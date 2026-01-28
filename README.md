@@ -92,14 +92,14 @@ Go to [WIKI](https://wiki.camthink.ai/docs/neoeyes-ne301-series/quick-start)
 
 ```bash
 # 1. Build (Or pull)Docker image
-docker build -t ne301-dev:latest .
+docker build -t ne301-dev:stedgeai-v2.2 .
 # or pull (faster)
-docker pull camthink/ne301-dev:latest
+docker pull camthink/ne301-dev:stedgeai-v2.2
 # 2. Run container
 docker run -it --rm --privileged \
   -v $(pwd):/workspace \
   -v /dev/bus/usb:/dev/bus/usb \
-  camthink/ne301-dev:latest
+  camthink/ne301-dev:stedgeai-v2.2
 # 3. Inside container
 make                        # Build all
 ```

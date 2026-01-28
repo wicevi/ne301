@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 60
     
     container:
-      image: camthink/ne301-dev:v1.0
+      image: camthink/ne301-dev:stedgeai-v2.2
       volumes:
         - ${{ github.workspace }}:/workspace
     defaults:
