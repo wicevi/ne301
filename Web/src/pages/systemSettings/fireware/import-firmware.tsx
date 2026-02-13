@@ -90,7 +90,7 @@ export default function ImportFirmware({ isImportFirmwareDialogOpen, setIsImport
     )
     const uploadOTAs = async (file: File, type: UploadCategory): Promise<boolean> => {
         try {
-            const contentPreview = await sliceFile(file, 1024);
+            const contentPreview = await sliceFile(file, 2048);
             if (!contentPreview.size) {
                 throw new Error(i18n._('sys.system_management.invalid_firmware_file') || 'Invalid firmware file');
             }
