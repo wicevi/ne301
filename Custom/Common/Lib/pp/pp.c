@@ -21,6 +21,8 @@ extern const pp_entry_t pp_entry_sseg_deeplab_v3_ui;
 extern const pp_entry_t pp_entry_mpe_yolo_v8_ui;
 extern const pp_entry_t pp_entry_od_yolo_v8_uf;
 extern const pp_entry_t pp_entry_od_yolo_v8_ui;
+extern const pp_entry_t pp_entry_od_yolo_v11_uf;
+extern const pp_entry_t pp_entry_od_yolo_v11_ui;
 
 /* Return registry (pointer array) and count */
 static const pp_entry_t * const* get_registered_entries(size_t *out_count)
@@ -46,6 +48,8 @@ static const pp_entry_t * const* get_registered_entries(size_t *out_count)
         &pp_entry_mpe_yolo_v8_ui,
         &pp_entry_od_yolo_v8_uf,
         &pp_entry_od_yolo_v8_ui,
+        &pp_entry_od_yolo_v11_uf,
+        &pp_entry_od_yolo_v11_ui,
     };
     if (out_count) {
         *out_count = sizeof(entries) / sizeof(entries[0]);
