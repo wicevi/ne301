@@ -23,11 +23,16 @@
 #include "storage.h"
 #include "version.h"
 #include "nn.h"
+#include "cmsis_os2.h"
+#include "mqtt_service.h"
 
 #define OTA_WRITE_BUF_SIZE 1024
 #define OTA_PRECHECK_DATA_SIZE 2048  // 2KB: 1KB OTA header + 1KB model package header
+#define OTA_TIMEOUT_MS (5 * 60 * 1000)  // 5 minutes timeout for OTA upload
 /* ==================== Global Variables ==================== */
 static aicam_bool_t g_ota_upgrade_in_progress = AICAM_FALSE;
+static uint32_t g_ota_last_activity_tick = 0;
+
 typedef struct {
     upgrade_handle_t handle;
     firmware_header_t header_storage;
@@ -58,6 +63,7 @@ typedef struct {
 
     aicam_bool_t failed;
     aicam_bool_t initialized;
+    aicam_bool_t mqtt_was_stopped;  // track if MQTT was stopped for OTA
 } ota_upload_ctx_t;
 
 
@@ -528,10 +534,16 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
     if (ev == MG_EV_CLOSE || ev == MG_EV_ERROR) {
         if (ctx) {
             LOG_SVC_INFO("OTA upload cleanup (Event: %d)", ev);
+            aicam_bool_t mqtt_was_stopped = ctx->mqtt_was_stopped;
             buffer_free(ctx);
             c->fn_data = NULL;
             // clear the global status
             g_ota_upgrade_in_progress = AICAM_FALSE;
+            // Restart MQTT service if it was stopped for OTA
+            if (mqtt_was_stopped) {
+                mqtt_service_start();
+                LOG_SVC_INFO("MQTT service restarted after OTA cleanup");
+            }
         }
         return;
     }
@@ -586,18 +598,32 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
         LOG_SVC_INFO("OTA Stream Init: type=%d (%s), len=%u", 
                      ctx->fw_type_param, fw_type_str, (unsigned int)ctx->content_length);
 
+        // Stop MQTT service during OTA to free up network resources
+        // MQTT auto-reconnect can interfere with OTA upload due to network lock contention
+        ctx->mqtt_was_stopped = AICAM_FALSE;
+        if (mqtt_service_is_running()) {
+            if (mqtt_service_stop() == AICAM_OK) {
+                ctx->mqtt_was_stopped = AICAM_TRUE;
+                LOG_SVC_INFO("MQTT service stopped for OTA upgrade");
+            }
+        }
+
         g_ota_upgrade_in_progress = AICAM_TRUE;
+        g_ota_last_activity_tick = osKernelGetTickCount();
 
         // remove the Mongoose HTTP protocol handler, switch to Raw TCP mode
         c->pfn = NULL; 
         mg_iobuf_del(&c->recv, 0, hm->head.len); // delete the header
 
+        return;  // important: return after initialization to avoid falling through to cleanup
     }
 
     // -----------------------------
     // data processing (buffer header + write)
     // -----------------------------
     if (ctx && ctx->initialized && !ctx->failed && c->recv.len > 0) {
+        g_ota_last_activity_tick = osKernelGetTickCount();  // update activity timestamp
+        
         size_t processed = 0;
         uint8_t *data = (uint8_t *)c->recv.buf;
         size_t len = c->recv.len;
@@ -678,6 +704,7 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
             LOG_SVC_INFO("Transfer Complete. Finalizing...");
 
             if (flush_write_buffer(ctx) != 0) {
+                ctx->failed = AICAM_TRUE;
                 ota_send_response(c, API_ERROR_INTERNAL_ERROR, "Flash flush failed");
                 goto cleanup;
             }
@@ -689,6 +716,7 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
             if (ctx->running_crc32 != ctx->fw_header.crc32) {
                 LOG_SVC_ERROR("CRC32 mismatch: calc=0x%08X, header=0x%08X", 
                               ctx->running_crc32, ctx->fw_header.crc32);
+                ctx->failed = AICAM_TRUE;
                 ota_send_response(c, API_ERROR_INTERNAL_ERROR, "CRC32 verification failed");
                 goto cleanup;
             }
@@ -696,6 +724,7 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
             // Finish upgrade
             if (ota_upgrade_finish(&ctx->upgrade_handle) != 0) {
                 LOG_SVC_ERROR("upgrade_finish failed");
+                ctx->failed = AICAM_TRUE;
                 ota_send_response(c, API_ERROR_INTERNAL_ERROR, "Upgrade finish failed");
                 goto cleanup;
             }
@@ -712,11 +741,22 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
         return;
     }
 
+    // No data to process yet, just return and wait for more data
+    return;
+
 cleanup:
-    if (ctx && (ctx->failed || ctx->total_received >= ctx->content_length)) {
-        buffer_free(ctx);
-        c->fn_data = NULL;
-        g_ota_upgrade_in_progress = AICAM_FALSE; // should be handled in the service layer
+    {
+        aicam_bool_t mqtt_was_stopped = ctx ? ctx->mqtt_was_stopped : AICAM_FALSE;
+        if (ctx && (ctx->failed || ctx->total_received >= ctx->content_length)) {
+            buffer_free(ctx);
+            c->fn_data = NULL;
+        }
+        g_ota_upgrade_in_progress = AICAM_FALSE; // clear the global status
+        // Restart MQTT service if it was stopped for OTA
+        if (mqtt_was_stopped) {
+            mqtt_service_start();
+            LOG_SVC_INFO("MQTT service restarted after OTA completion");
+        }
     }
 }
 
@@ -935,3 +975,46 @@ aicam_result_t web_api_register_ota_module(void)
     return AICAM_OK;
 }
 
+/**
+ * @brief Check OTA upload timeout and reset state if necessary
+ * @return AICAM_TRUE if timeout occurred and state was reset, AICAM_FALSE otherwise
+ */
+aicam_bool_t ota_check_timeout(void)
+{
+    if (!g_ota_upgrade_in_progress) {
+        return AICAM_FALSE;
+    }
+    
+    uint32_t current_tick = osKernelGetTickCount();
+    uint32_t elapsed = current_tick - g_ota_last_activity_tick;
+    
+    if (elapsed > OTA_TIMEOUT_MS) {
+        LOG_SVC_WARN("OTA upload timeout after %u ms, resetting state", elapsed);
+        g_ota_upgrade_in_progress = AICAM_FALSE;
+        g_ota_last_activity_tick = 0;
+        return AICAM_TRUE;
+    }
+    
+    return AICAM_FALSE;
+}
+
+/**
+ * @brief Force reset OTA upload state
+ */
+void ota_reset_upload_state(void)
+{
+    if (g_ota_upgrade_in_progress) {
+        LOG_SVC_WARN("Force resetting OTA upload state");
+    }
+    g_ota_upgrade_in_progress = AICAM_FALSE;
+    g_ota_last_activity_tick = 0;
+}
+
+/**
+ * @brief Check if OTA upload is in progress
+ * @return AICAM_TRUE if OTA upload is in progress, AICAM_FALSE otherwise
+ */
+aicam_bool_t ota_is_upload_in_progress(void)
+{
+    return g_ota_upgrade_in_progress;
+}
