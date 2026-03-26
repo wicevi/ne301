@@ -58,10 +58,6 @@ const osThreadAttr_t modemRxTask_attributes = {
 };
 /// @brief MODEM state
 modem_state_t modem_state = MODEM_STATE_UNINIT;
-/// @brief MODEM device status information
-modem_info_t modem_info = {0};
-/// @brief MODEM configuration parameters
-modem_config_t modem_config = {0};
 /// @brief MODEM AT handle
 modem_at_handle_t modem_at_handle = {0};
 /// @brief MODEM configuration parameters
@@ -141,6 +137,7 @@ int HAL_UART7_GPIO_IsReady(void)
     GPIO_InitStruct.Pull = GPIO_PULLDOWN;
     HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
+    osDelay(10);
     if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_15) == GPIO_PIN_SET || HAL_GPIO_ReadPin(GPIOG, GPIO_PIN_11) == GPIO_PIN_SET) {
         osDelay(10);
         if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_15) == GPIO_PIN_SET || HAL_GPIO_ReadPin(GPIOG, GPIO_PIN_11) == GPIO_PIN_SET) {
@@ -427,67 +424,437 @@ int modem_device_deinit(void)
     return MODEM_OK;
 }
 
+static void modem_device_free_rsp_bufs(char **rsp_bufs, size_t num)
+{
+    if (rsp_bufs == NULL) return;
+    for (int i = 0; i < num; i++) {
+        if (rsp_bufs[i] != NULL) hal_mem_free(rsp_bufs[i]);
+    }
+    hal_mem_free(rsp_bufs);
+}
+
+static char **modem_device_malloc_rsp_bufs(size_t num)
+{
+    char **rsp_bufs = NULL;
+
+    if (num == 0) return NULL;
+    rsp_bufs = (char **)hal_mem_alloc_large(num * sizeof(char *));
+    if (rsp_bufs == NULL) return NULL;
+
+    for (size_t i = 0; i < num; i++) {
+        rsp_bufs[i] = (char *)hal_mem_alloc_large(MODEM_AT_RSP_LEN_MAXIMUM);
+        if (rsp_bufs[i] == NULL) {
+            modem_device_free_rsp_bufs(rsp_bufs, i);
+            return NULL;
+        }
+        memset(rsp_bufs[i], 0, MODEM_AT_RSP_LEN_MAXIMUM);
+    }
+
+    return rsp_bufs;
+}
+
 int modem_device_wait_sim_ready(uint32_t timeout_ms)
 {
-    char rsp_buf1[MODEM_AT_RSP_LEN_MAXIMUM] = {0};
-    char rsp_buf2[MODEM_AT_RSP_LEN_MAXIMUM] = {0};
+    char **rsp_bufs = NULL;
     char cmd_buf[MODEM_AT_CMD_LEN_MAXIMUM] = {0};
-    char *rsp_bufs[2] = {rsp_buf1, rsp_buf2};
     int ret = MODEM_OK;
     uint32_t start_time = 0, end_time = 0, diff_time = 0, no_sim_times = 0;
 
     start_time = osKernelGetTickCount();
+    rsp_bufs = modem_device_malloc_rsp_bufs(2);
+    if (rsp_bufs == NULL) return MODEM_ERR_MEM;
     do {
         end_time = osKernelGetTickCount();
         diff_time = (end_time >= start_time) ? (end_time - start_time) : (UINT32_MAX - start_time + end_time);
 
         ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CPIN?\r\n", rsp_bufs, 2, 500);
         if (ret == 2) {
-            if (strstr(rsp_bufs[0], "READY") != NULL) return MODEM_OK;
-            if (strstr(rsp_bufs[0], "SIM PIN") != NULL) {
+            if (strstr(rsp_bufs[0], "READY") != NULL) {
+                modem_device_free_rsp_bufs(rsp_bufs, 2);
+                return MODEM_OK;
+            } else if (strstr(rsp_bufs[0], "SIM PIN") != NULL) {
                 snprintf(cmd_buf, sizeof(cmd_buf), "AT+CPIN=%s\r\n", g_modem_config.pin);
                 ret = modem_at_cmd_wait_ok(&modem_at_handle, cmd_buf, 500);
-                if (ret != MODEM_OK) return ret;
+                if (ret != MODEM_OK) {
+                    modem_device_free_rsp_bufs(rsp_bufs, 2);
+                    return ret;
+                }
             } else if (strstr(rsp_bufs[0], "SIM PUK") != NULL) {
                 snprintf(cmd_buf, sizeof(cmd_buf), "AT+CPIN=\"%s\",\"%s\"\r\n", g_modem_config.puk, g_modem_config.pin);
                 ret = modem_at_cmd_wait_ok(&modem_at_handle, cmd_buf, 500);
-                if (ret != MODEM_OK) return ret;
+                if (ret != MODEM_OK) {
+                    modem_device_free_rsp_bufs(rsp_bufs, 2);
+                    return ret;
+                }
             }
-        } else if (ret == 1 && strstr(rsp_bufs[0], "+CME ERROR: 10") != NULL && no_sim_times++ > 10) {
+        } else if (ret == 1 && strstr(rsp_bufs[0], "+CME ERROR: 10") != NULL && (++no_sim_times > 10)) {
+            modem_device_free_rsp_bufs(rsp_bufs, 2);
             return MODEM_ERR_INVALID_STATE;
         }
         osDelay(100);
     } while (diff_time < timeout_ms);
 
+    modem_device_free_rsp_bufs(rsp_bufs, 2);
     return MODEM_ERR_TIMEOUT;
 }
 
+modem_operator_t modem_device_get_operator(void)
+{
+    char **rsp_bufs = NULL;
+    char *value_ptr = NULL;
+    char *value_ptr2 = NULL;
+    char plmn_str[8] = {0};
+    char operator_str[32] = {0};
+    int ret = MODEM_OK;
+    modem_operator_t op = MODEM_OPERATOR_UNKNOWN;
+    size_t len = 0;
+
+    /* 1. Prefer AT+CIMI to read IMSI and use the first 5/6 digits (MCC+MNC) to determine the operator */
+    rsp_bufs = modem_device_malloc_rsp_bufs(2);
+    if (rsp_bufs != NULL) {
+        ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CIMI\r\n", rsp_bufs, 2, 500);
+        if (ret == 2 && strstr(rsp_bufs[1], "OK") != NULL) {
+            len = strlen(rsp_bufs[0]);
+            if (len >= 5) {
+                /* First try to match the first 6 digits for Verizon and other 3‑digit MNCs (for example 311480, 310004) */
+                if (len >= 6) {
+                    memcpy(plmn_str, rsp_bufs[0], 6);
+                    plmn_str[6] = '\0';
+                    if (strncmp(plmn_str, "310004", 6) == 0 ||
+                        strncmp(plmn_str, "311480", 6) == 0 ||
+                        strncmp(plmn_str, "311270", 6) == 0 ||
+                        strncmp(plmn_str, "311271", 6) == 0 ||
+                        strncmp(plmn_str, "311272", 6) == 0) {
+                        op = MODEM_OPERATOR_AMERICAN_VERIZON;
+                    }
+                }
+
+                /* If the operator is still unknown, use the first 5 digits to match Chinese operators by MCC+MNC (for example 46000, 46002) */
+                if (op == MODEM_OPERATOR_UNKNOWN) {
+                    memcpy(plmn_str, rsp_bufs[0], 5);
+                    plmn_str[5] = '\0';
+                    if (strncmp(plmn_str, "46000", 5) == 0 ||
+                        strncmp(plmn_str, "46002", 5) == 0 ||
+                        strncmp(plmn_str, "46007", 5) == 0 ||
+                        strncmp(plmn_str, "46008", 5) == 0) {
+                        op = MODEM_OPERATOR_CHINA_MOBILE;
+                    } else if (strncmp(plmn_str, "46001", 5) == 0 ||
+                               strncmp(plmn_str, "46006", 5) == 0 ||
+                               strncmp(plmn_str, "46009", 5) == 0) {
+                        op = MODEM_OPERATOR_CHINA_UNICOM;
+                    } else if (strncmp(plmn_str, "46003", 5) == 0 ||
+                               strncmp(plmn_str, "46005", 5) == 0 ||
+                               strncmp(plmn_str, "46011", 5) == 0) {
+                        op = MODEM_OPERATOR_CHINA_TELECOM;
+                    }
+                }
+
+                if (op != MODEM_OPERATOR_UNKNOWN) {
+                    modem_device_free_rsp_bufs(rsp_bufs, 2);
+                    return op;
+                }
+            }
+        }
+        modem_device_free_rsp_bufs(rsp_bufs, 2);
+        rsp_bufs = NULL;
+    }
+
+    /* 2. Fallback to AT+COPS? and determine the operator by PLMN or operator name */
+    rsp_bufs = modem_device_malloc_rsp_bufs(2);
+    if (rsp_bufs == NULL) return MODEM_OPERATOR_UNKNOWN;
+
+    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+COPS?\r\n", rsp_bufs, 2, 500);
+    if (ret != 2 || strstr(rsp_bufs[1], "OK") == NULL) {
+        modem_device_free_rsp_bufs(rsp_bufs, 2);
+        return MODEM_OPERATOR_UNKNOWN;
+    }
+
+    value_ptr = strstr(rsp_bufs[0], ",\"");
+    if (value_ptr == NULL) {
+        modem_device_free_rsp_bufs(rsp_bufs, 2);
+        return MODEM_OPERATOR_UNKNOWN;
+    }
+    value_ptr2 = strstr(value_ptr + 2, "\",");
+    if (value_ptr2 == NULL) {
+        modem_device_free_rsp_bufs(rsp_bufs, 2);
+        return MODEM_OPERATOR_UNKNOWN;
+    }
+
+    len = (size_t)((uint32_t)value_ptr2 - (uint32_t)value_ptr - 2);
+    if (len >= sizeof(operator_str)) len = sizeof(operator_str) - 1;
+    memcpy(operator_str, value_ptr + 2, len);
+    operator_str[len] = '\0';
+
+    modem_device_free_rsp_bufs(rsp_bufs, 2);
+
+    /* 2.1 If the PLMN is numeric (for example "46000", "311480"), map it again by MCC/MNC using string comparison */
+    if (len >= 5 && len <= 6) {
+        if (len == 6) {
+            /* First check whether it is Verizon or other operators that use a 3‑digit MNC */
+            if (strncmp(operator_str, "310004", 6) == 0 ||
+                strncmp(operator_str, "311480", 6) == 0 ||
+                strncmp(operator_str, "311270", 6) == 0 ||
+                strncmp(operator_str, "311271", 6) == 0 ||
+                strncmp(operator_str, "311272", 6) == 0) {
+                return MODEM_OPERATOR_AMERICAN_VERIZON;
+            }
+        }
+
+        /* Match the first 5 digits against the known Chinese operator list */
+        if (strncmp(operator_str, "46000", 5) == 0 ||
+            strncmp(operator_str, "46002", 5) == 0 ||
+            strncmp(operator_str, "46007", 5) == 0 ||
+            strncmp(operator_str, "46008", 5) == 0) {
+            return MODEM_OPERATOR_CHINA_MOBILE;
+        }
+        if (strncmp(operator_str, "46001", 5) == 0 ||
+            strncmp(operator_str, "46006", 5) == 0 ||
+            strncmp(operator_str, "46009", 5) == 0) {
+            return MODEM_OPERATOR_CHINA_UNICOM;
+        }
+        if (strncmp(operator_str, "46003", 5) == 0 ||
+            strncmp(operator_str, "46005", 5) == 0 ||
+            strncmp(operator_str, "46011", 5) == 0) {
+            return MODEM_OPERATOR_CHINA_TELECOM;
+        }
+
+        /* If it has 6 digits but the first 5 digits do not match any Chinese operator, fall back to check Verizon again */
+        if (len == 6 &&
+            (strncmp(operator_str, "310004", 6) == 0 ||
+             strncmp(operator_str, "311480", 6) == 0 ||
+             strncmp(operator_str, "311270", 6) == 0 ||
+             strncmp(operator_str, "311271", 6) == 0 ||
+             strncmp(operator_str, "311272", 6) == 0)) {
+            return MODEM_OPERATOR_AMERICAN_VERIZON;
+        }
+    }
+
+    /* 2.2 Match by operator name (long or short name returned by COPS mode 0) */
+    if (strstr(operator_str, "China Mobile") != NULL || strstr(operator_str, "CMCC") != NULL ||
+        strstr(operator_str, "CHN-CMCC") != NULL || strstr(operator_str, "CHN-MOBILE") != NULL) {
+        return MODEM_OPERATOR_CHINA_MOBILE;
+    }
+    if (strstr(operator_str, "China Unicom") != NULL || strstr(operator_str, "UNICOM") != NULL ||
+        strstr(operator_str, "CHN-UNICOM") != NULL || strstr(operator_str, "CHN-CU") != NULL) {
+        return MODEM_OPERATOR_CHINA_UNICOM;
+    }
+    if (strstr(operator_str, "China Telecom") != NULL || strstr(operator_str, "CTCC") != NULL ||
+        strstr(operator_str, "CHN-CT") != NULL || strstr(operator_str, "CHN-TELECOM") != NULL) {
+        return MODEM_OPERATOR_CHINA_TELECOM;
+    }
+    if (strstr(operator_str, "Verizon") != NULL) {
+        return MODEM_OPERATOR_AMERICAN_VERIZON;
+    }
+
+    return MODEM_OPERATOR_UNKNOWN;
+}
+
+int modem_device_get_network_status(int *stat, char *tac, char *ci, int *act)
+{
+    int ret = MODEM_OK, result = 0;
+    char **rsp_bufs = NULL;
+    char *ptr1, *ptr2 = NULL;
+
+    if (tac != NULL || ci != NULL || act != NULL) {
+        ret = modem_at_cmd_wait_ok(&modem_at_handle, "AT+CEREG=2\r\n", 500);
+        if (ret != MODEM_OK) return ret;
+    }
+    rsp_bufs = modem_device_malloc_rsp_bufs(2);
+    if (rsp_bufs == NULL) return MODEM_ERR_MEM;
+    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CEREG?\r\n", rsp_bufs, 2, 500);
+    if (ret < 0) {
+        modem_device_free_rsp_bufs(rsp_bufs, 2);
+        return ret;
+    }
+    if (ret == 2 && strstr(rsp_bufs[1], "OK") != NULL) {
+        if (strstr(rsp_bufs[0], "+CEREG:") != NULL) {
+            // Get Status
+            ptr1 = strstr(rsp_bufs[0], ",");
+            if (ptr1 != NULL && stat != NULL) {
+                ptr1++;
+                *stat = atoi(ptr1);
+                result++;
+            }
+        }
+        if (strstr(rsp_bufs[0], "+CEREG: 2") != NULL) {
+            do {
+                // Get TAC
+                ptr1 = strstr(rsp_bufs[0], ",\"");
+                if (ptr1 != NULL && tac != NULL) {
+                    ptr1 += 2;
+                    ptr2 = strstr(ptr1, "\",");
+                    if (ptr2 != NULL) {
+                        strncpy(tac, ptr1, ((uint32_t)ptr2 - (uint32_t)ptr1));
+                        result++;
+                    }
+                }
+                // Get CI
+                if (ptr1 == NULL) break;
+                ptr1 = strstr(ptr1, ",\"");
+                if (ptr1 != NULL && ci != NULL) {
+                    ptr1 += 2;
+                    ptr2 = strstr(ptr1, "\",");
+                    if (ptr2 != NULL) {
+                        strncpy(ci, ptr1, ((uint32_t)ptr2 - (uint32_t)ptr1));
+                        result++;
+                    }
+                }
+                // Get ACT
+                if (ptr1 == NULL) break;
+                ptr1 = strstr(ptr1, ",\"");
+                if (ptr1 != NULL && act != NULL) {
+                    ptr1 += 2;
+                    *act = atoi(ptr1);
+                    result++;
+                }
+            } while (0);
+        }
+    }
+    modem_device_free_rsp_bufs(rsp_bufs, 2);
+    return result;
+}
+
+static int modem_device_activate_network(void)
+{
+    int ret = MODEM_OK, context_id = 1;
+    char at_cmd[MODEM_AT_CMD_LEN_MAXIMUM] = {0};
+#if MODEM_IS_CHECK_NETWORK_TYPE
+    char **rsp_bufs = NULL;
+    char *value_ptr = NULL;
+#endif
+    modem_operator_t operator = MODEM_OPERATOR_UNKNOWN;
+
+    // Configure Modem Network (treat invalid/unknown as AUTO so we auto-detect)
+    if (g_modem_config.isp_selected >= MODEM_OPERATOR_UNKNOWN) {
+        operator = MODEM_OPERATOR_AUTO;
+    } else {
+        operator = (modem_operator_t)g_modem_config.isp_selected;
+    }
+    if (operator == MODEM_OPERATOR_AUTO) operator = modem_device_get_operator();
+    if (operator == MODEM_OPERATOR_AMERICAN_VERIZON) {
+        if (g_modem_config.apn_context_id != 1) {
+            // Deactivate PDP context
+            modem_at_cmd_wait_ok(&modem_at_handle, "AT+QIDEACT=1\r\n", 3000);
+            // Clear PDP context
+            ret = modem_at_cmd_wait_ok(&modem_at_handle, "AT+QICSGP=1,3,\"\",\"\",\"\",0\r\n", 500);
+            if (ret != MODEM_OK) MODEM_LOGE("Unset Default PDP context 1 failed(ret = %d)!", ret);
+        }
+        g_modem_config.ppp_context_id = 3;
+        context_id = 3;
+    } else if (g_modem_config.ppp_context_id > 0) {
+        context_id = g_modem_config.ppp_context_id;
+    } else {
+        context_id = 1;
+    }
+
+    // unset default PDP context
+    if (g_modem_config.apn_context_id > 0 && g_modem_config.apn_context_id != context_id) {
+        // Deactivate PDP context
+        snprintf(at_cmd, sizeof(at_cmd), "AT+QIDEACT=%d\r\n", g_modem_config.apn_context_id);
+        modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 3000);
+        // Clear PDP context
+        snprintf(at_cmd, sizeof(at_cmd), "AT+QICSGP=%d,3,\"\",\"\",\"\",0\r\n", g_modem_config.apn_context_id);
+        ret = modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 500);
+        if (ret != MODEM_OK) MODEM_LOGE("Unset Default PDP context %d failed(ret = %d)!", g_modem_config.apn_context_id, ret);
+    }
+
+    // Deactivate PDP context
+    snprintf(at_cmd, sizeof(at_cmd), "AT+QIDEACT=%d\r\n", context_id);
+    modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 3000);
+    // Default PDP context
+    snprintf(at_cmd, sizeof(at_cmd), "AT+QICSGP=%d,3,\"%s\",\"%s\",\"%s\",%d\r\n", context_id, g_modem_config.apn, g_modem_config.user, g_modem_config.passwd, g_modem_config.authentication);
+    ret = modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 500);
+    if (ret != MODEM_OK) return ret;
+    g_modem_config.apn_context_id = context_id;
+
+    // Send pre-AT commands
+    for (int i = 0; i < sizeof(g_modem_config.ppp_pre_at_cmds) / sizeof(g_modem_config.ppp_pre_at_cmds[0]); i++) {
+        if (g_modem_config.ppp_pre_at_cmds[i][0] != 0) {
+            ret = modem_at_cmd_wait_ok(&modem_at_handle, g_modem_config.ppp_pre_at_cmds[i], 3000);
+            if (ret != MODEM_OK) MODEM_LOGE("Send Pre-AT command %d: %s failed(ret = %d)!", i, g_modem_config.ppp_pre_at_cmds[i], ret);
+        }
+    }
+
+    // Activate Modem Network
+#if MODEM_IS_CHECK_NETWORK_TYPE
+    rsp_bufs = modem_device_malloc_rsp_bufs(2);
+    if (rsp_bufs == NULL) return MODEM_ERR_MEM;
+    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+COPS?\r\n", rsp_bufs, 2, 500);
+    if (ret == 2 && strstr(rsp_bufs[1], "OK") != NULL) {
+        if (strstr(rsp_bufs[0], "+COPS:") != NULL) {
+            value_ptr = strstr(rsp_bufs[0], "\",");
+            if (value_ptr != NULL) {
+                value_ptr += 2;
+                MODEM_LOGD("Network type: %c.", *value_ptr);
+                if (*value_ptr != '1' && *value_ptr != '7') {
+                    // Not 4G network, need to activate network
+#endif
+                    snprintf(at_cmd, sizeof(at_cmd), "AT+CGACT=1,%d\r\n", context_id);
+                    ret = modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 10000);
+                    if (ret != MODEM_OK) MODEM_LOGE("Activate Network failed(ret = %d)!", ret);
+#if MODEM_IS_CHECK_NETWORK_TYPE
+                }
+            }
+        }
+    } else if (ret >= 0) ret = MODEM_ERR_FAILED;
+    modem_device_free_rsp_bufs(rsp_bufs, 2);
+#endif
+
+    return ret;
+}
+
+#if MODEM_IS_ENABLE_NETWORK_READY
+int modem_device_wait_network_ready(uint32_t timeout_ms)
+{
+    int ret = MODEM_OK, net_status = 0;
+    uint32_t start_time = 0, end_time = 0, diff_time = 0;
+
+    start_time = osKernelGetTickCount();
+    // Wait for SIM ready
+    ret = modem_device_wait_sim_ready(timeout_ms);
+    if (ret != MODEM_OK) return ret;
+    // Wait for Network ready
+    do {
+        osDelay(10);
+        ret = modem_device_get_network_status(&net_status, NULL, NULL, NULL);
+        if (ret == 1 && (net_status == 1 || net_status == 5)) return MODEM_OK;
+        end_time = osKernelGetTickCount();
+        diff_time = (end_time >= start_time) ? (end_time - start_time) : (UINT32_MAX - start_time + end_time);
+    } while (diff_time < timeout_ms);
+    
+    return MODEM_ERR_TIMEOUT;
+}
+#endif
+
 int modem_device_check_and_enable_ecm(void)
 {
-    char rsp_buf1[MODEM_AT_RSP_LEN_MAXIMUM] = {0};
-    char rsp_buf2[MODEM_AT_RSP_LEN_MAXIMUM] = {0};
-    char *rsp_bufs[2] = {rsp_buf1, rsp_buf2};
     int ret = MODEM_OK;
+    char **rsp_bufs = NULL;
 
+    rsp_bufs = modem_device_malloc_rsp_bufs(2);
+    if (rsp_bufs == NULL) return MODEM_ERR_MEM;
     ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+QCFG=\"usbnet\"\r\n", rsp_bufs, 2, 500);
-    if (ret == 2 && strstr(rsp_bufs[0], "+QCFG: \"usbnet\",1") != NULL) return MODEM_OK;
+    if (ret == 2 && strstr(rsp_bufs[0], "+QCFG: \"usbnet\",1") != NULL) {
+        modem_device_free_rsp_bufs(rsp_bufs, 2);
+        return MODEM_OK;
+    }
     ret = modem_at_cmd_wait_ok(&modem_at_handle, "AT+QCFG=\"usbnet\",1\r\n", 500);
-    
+
+    modem_device_free_rsp_bufs(rsp_bufs, 2);
     return ret;
 }
 
 int modem_device_get_info(modem_info_t *info, uint8_t is_update_all)
 {
-    char rsp_buf1[MODEM_AT_RSP_LEN_MAXIMUM] = {0};
-    char rsp_buf2[MODEM_AT_RSP_LEN_MAXIMUM] = {0};
-    char *rsp_bufs[2] = {rsp_buf1, rsp_buf2};
+    char **rsp_bufs = NULL;
     char *value_ptr = NULL, *value_ptr2 = NULL;
     int csq = 0, ber = 0, dBm = 0;
-    int ret = MODEM_OK;
-    uint8_t try_times = 0;
+    int ret = MODEM_OK, net_status = 0;
     if (info == NULL) return MODEM_ERR_INVALID_ARG;
     if (modem_state != MODEM_STATE_INIT) return MODEM_ERR_INVALID_STATE;
 
+    rsp_bufs = modem_device_malloc_rsp_bufs(2);
+    if (rsp_bufs == NULL) return MODEM_ERR_MEM;
     if (is_update_all) {
         // Get Model Name, IMEI, Version
         ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CGMM\r\n", rsp_bufs, 2, 500);
@@ -534,9 +901,15 @@ int modem_device_get_info(modem_info_t *info, uint8_t is_update_all)
             strncpy(info->sim_status, rsp_bufs[0], sizeof(info->sim_status) - 1);
         }
     } else if (ret == 2) {
-        if (strstr(rsp_bufs[1], "OK") == NULL) return MODEM_ERR_FAILED;
+        if (strstr(rsp_bufs[1], "OK") == NULL) {
+            modem_device_free_rsp_bufs(rsp_bufs, 2);
+            return MODEM_ERR_FAILED;
+        }
         value_ptr = strstr(rsp_bufs[0], "+CPIN:");
-        if (value_ptr == NULL) return MODEM_ERR_FAILED;
+        if (value_ptr == NULL) {
+            modem_device_free_rsp_bufs(rsp_bufs, 2);
+            return MODEM_ERR_FAILED;
+        }
         strncpy(info->sim_status, value_ptr + strlen("+CPIN:"), sizeof(info->sim_status) - 1);
     } else strncpy(info->sim_status, "Unknown", sizeof(info->sim_status) - 1);
 
@@ -650,77 +1023,35 @@ int modem_device_get_info(modem_info_t *info, uint8_t is_update_all)
     strncpy(info->lac, "-", sizeof(info->lac) - 1);
     strncpy(info->cell_id, "-", sizeof(info->cell_id) - 1);
     strncpy(info->registration_status, "Unknown", sizeof(info->registration_status) - 1);
-    do {
-        ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CREG?\r\n", rsp_bufs, 2, 500);
-        if (ret == 2) {
-            if (strstr(rsp_bufs[0], "+CREG: 2,") == NULL) {
-                if (try_times > 1) {
-                    ret = MODEM_ERR_NOT_SUPPORT;
-                    break;
-                } else {
-                    try_times++;
-                    ret = modem_at_cmd_wait_ok(&modem_at_handle, "AT+CREG=2\r\n", 500);
-                    if (ret != MODEM_OK) break;
-                    else continue;
-                }
-            }
-            ret = MODEM_OK;
-            if (strstr(rsp_bufs[1], "OK") == NULL) ret = MODEM_ERR_FAILED;
-            else {
-                char delimiters[] = ":,\"";
-                char *saveptr;
-                char *p = strtok_r(rsp_bufs[0], delimiters, &saveptr);
-                int field = 0;
-                while (p) {
-                    switch (field) {
-                        case 2: {
-                            int n = atoi(p);
-                            switch (n) {
-                                case 0:
-                                    strncpy(info->registration_status, "Not registered", sizeof(info->registration_status) - 1);
-                                    break;
-                                case 1:
-                                    strncpy(info->registration_status, "Registered (Home network)", sizeof(info->registration_status) - 1);
-                                    break;
-                                case 2:
-                                    strncpy(info->registration_status, "Searching", sizeof(info->registration_status) - 1);
-                                    break;
-                                case 3:
-                                    strncpy(info->registration_status, "Registration denied", sizeof(info->registration_status) - 1);    
-                                    break;
-                                case 4:
-                                    strncpy(info->registration_status, "Unknown", sizeof(info->registration_status) - 1);    
-                                    break;
-                                case 5:
-                                    strncpy(info->registration_status, "Registered (Roaming)", sizeof(info->registration_status) - 1);
-                                    break;
-                                default:
-                                    break;
-                            }
-                            break;
-                        }
-                        case 3: {
-                            if (strlen(p) >= sizeof(info->lac)) ret = MODEM_ERR_INVALID_SIZE;
-                            else snprintf(info->lac, sizeof(info->lac), "%s", p);
-                            break;
-                        }
-                        case 4: {
-                            if (strlen(p) >= sizeof(info->cell_id)) ret = MODEM_ERR_INVALID_SIZE;
-                            else snprintf(info->cell_id, sizeof(info->cell_id), "%s", p);
-                            break;
-                        }
-                        default:
-                            break;
-                    }
-                    p = strtok_r(NULL, delimiters, &saveptr);
-                    field++;
-                }
-            }
-        }
-        break;
-    } while (try_times < 3);
-    if (ret != MODEM_OK) MODEM_LOGE("Get CREG info failed(ret = %d)!", ret);
-    
+
+    ret = modem_device_get_network_status(&net_status, info->lac, info->cell_id, NULL);
+    if (ret == 3) {
+        if (net_status == 0) strncpy(info->registration_status, "Not registered", sizeof(info->registration_status) - 1);
+        else if (net_status == 1) strncpy(info->registration_status, "Registered (Home network)", sizeof(info->registration_status) - 1);
+        else if (net_status == 2) strncpy(info->registration_status, "Searching", sizeof(info->registration_status) - 1);
+        else if (net_status == 3) strncpy(info->registration_status, "Registration denied", sizeof(info->registration_status) - 1);
+        else if (net_status == 4) strncpy(info->registration_status, "Unknown", sizeof(info->registration_status) - 1);
+        else if (net_status == 5) strncpy(info->registration_status, "Registered (Roaming)", sizeof(info->registration_status) - 1);
+        else sprintf(info->registration_status, "Unknown(%d)", net_status);
+    } else MODEM_LOGE("Get CREG info failed(ret = %d)!", ret);
+
+    modem_device_free_rsp_bufs(rsp_bufs, 2);
+    return MODEM_OK;
+}
+
+int modem_device_restart_network(void)
+{
+    int ret = MODEM_OK;
+    if (modem_state != MODEM_STATE_INIT) return MODEM_ERR_INVALID_STATE;
+
+    MODEM_LOGD("Restart Modem Network...");
+    ret = modem_at_cmd_wait_ok(&modem_at_handle, "AT+CFUN=4\r\n", 3000);
+    if (ret != MODEM_OK) return ret;
+
+    ret = modem_at_cmd_wait_ok(&modem_at_handle, "AT+CFUN=1\r\n", 3000);
+    if (ret != MODEM_OK) return ret;
+    MODEM_LOGD("Modem Network Restarted.");
+
     return MODEM_OK;
 }
 
@@ -728,19 +1059,27 @@ int modem_device_set_config(const modem_config_t *config)
 {
     int ret = MODEM_OK;
     char at_cmd[MODEM_AT_CMD_LEN_MAXIMUM] = {0};
+    uint8_t is_need_restart_network = 0;
     if (config == NULL) return MODEM_ERR_INVALID_ARG;
     if (modem_state != MODEM_STATE_INIT) return MODEM_ERR_INVALID_STATE;
     
     if (config->apn[0] != 0 && strcmp(config->apn, g_modem_config.apn) != 0) {
-        snprintf(at_cmd, sizeof(at_cmd), "AT+CGDCONT=1,\"IP\",\"%s\"\r\n", config->apn);
+        // Deactivate PDP context
+        modem_at_cmd_wait_ok(&modem_at_handle, "AT+QIDEACT=1\r\n", 3000);
+        // Set PDP context
+        snprintf(at_cmd, sizeof(at_cmd), "AT+CGDCONT=1,\"IPV4V6\",\"%s\"\r\n", config->apn);
         ret = modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 500);
         if (ret != MODEM_OK) return ret;
         MODEM_LOGD("Set Modem APN: %s => %s.", g_modem_config.apn, config->apn);
         strncpy(g_modem_config.apn, config->apn, sizeof(g_modem_config.apn) - 1);
+        is_need_restart_network = 1;
     }
 
     if (strcmp(config->apn, g_modem_config.apn) != 0 || strcmp(config->user, g_modem_config.user) != 0 || strcmp(config->passwd, g_modem_config.passwd) != 0 || config->authentication != g_modem_config.authentication) {
-        snprintf(at_cmd, sizeof(at_cmd), "AT+QICSGP=1,1,\"%s\",\"%s\",\"%s\",%d\r\n", config->apn, config->user, config->passwd, config->authentication);
+        // Deactivate PDP context
+        modem_at_cmd_wait_ok(&modem_at_handle, "AT+QIDEACT=1\r\n", 3000);
+        // Set PDP context
+        snprintf(at_cmd, sizeof(at_cmd), "AT+QICSGP=1,3,\"%s\",\"%s\",\"%s\",%d\r\n", config->apn, config->user, config->passwd, config->authentication);
         ret = modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 500);
         if (ret != MODEM_OK) return ret;
         MODEM_LOGD("Set Modem QICSGP: %s, %s, %s, %d => %s, %s, %s, %d.", g_modem_config.apn, g_modem_config.user, g_modem_config.passwd, g_modem_config.authentication, config->apn, config->user, config->passwd, config->authentication);
@@ -748,14 +1087,20 @@ int modem_device_set_config(const modem_config_t *config)
         strncpy(g_modem_config.user, config->user, sizeof(g_modem_config.user) - 1);
         strncpy(g_modem_config.passwd, config->passwd, sizeof(g_modem_config.passwd) - 1);
         g_modem_config.authentication = config->authentication;
+        is_need_restart_network = 1;
     }
 
-    snprintf(at_cmd, sizeof(at_cmd), "AT+QCFG=\"roamservice\",%d,1\r\n", (config->is_enable_roam ? 2 : 1));
-    ret = modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 500);
-    if (ret == MODEM_OK) {
-        MODEM_LOGD("Set Modem Roaming: %d => %d.", g_modem_config.is_enable_roam, config->is_enable_roam);
-        g_modem_config.is_enable_roam = config->is_enable_roam;
+    if (config->is_enable_roam != g_modem_config.is_enable_roam) {
+        snprintf(at_cmd, sizeof(at_cmd), "AT+QCFG=\"roamservice\",%d,1\r\n", (config->is_enable_roam ? 2 : 1));
+        ret = modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 500);
+        if (ret == MODEM_OK) {
+            MODEM_LOGD("Set Modem Roaming: %d => %d.", g_modem_config.is_enable_roam, config->is_enable_roam);
+            g_modem_config.is_enable_roam = config->is_enable_roam;
+            is_need_restart_network = 1;
+        }
     }
+
+    if (is_need_restart_network) modem_device_restart_network();
 
     if (config->pin[0] != 0) {
         MODEM_LOGD("Set Modem PIN: %s => %s.", g_modem_config.pin, config->pin);
@@ -767,112 +1112,237 @@ int modem_device_set_config(const modem_config_t *config)
         strncpy(g_modem_config.puk, config->puk, sizeof(g_modem_config.puk) - 1);
     }
 
+    if (config->isp_selected != g_modem_config.isp_selected) {
+        MODEM_LOGD("Set Modem ISP Selected: %d => %d.", g_modem_config.isp_selected, config->isp_selected);
+        g_modem_config.isp_selected = config->isp_selected;
+    }
+    if (config->ppp_context_id != g_modem_config.ppp_context_id) {
+        MODEM_LOGD("Set Modem PPP Context ID: %d => %d.", g_modem_config.ppp_context_id, config->ppp_context_id);
+        g_modem_config.ppp_context_id = config->ppp_context_id;
+    }
+    memcpy(g_modem_config.ppp_pre_at_cmds, config->ppp_pre_at_cmds, sizeof(g_modem_config.ppp_pre_at_cmds));
+    
     return MODEM_OK;
 }
 
 int modem_device_get_config(modem_config_t *config)
 {
-    char rsp_buf1[MODEM_AT_RSP_LEN_MAXIMUM] = {0};
-    char rsp_buf2[MODEM_AT_RSP_LEN_MAXIMUM] = {0};
-    char *rsp_bufs[2] = {rsp_buf1, rsp_buf2};
+    int index = 0, context_id = 0;
+    char **rsp_bufs = NULL;
     char *value_ptr1 = NULL, *value_ptr2 = NULL;
+    char cmd_str[64] = {0};
     int ret = MODEM_OK;
     if (config == NULL) return MODEM_ERR_INVALID_ARG;
-    if (modem_state != MODEM_STATE_INIT) return MODEM_ERR_INVALID_STATE;
+    if (modem_state != MODEM_STATE_INIT && modem_state != MODEM_STATE_PPP) return MODEM_ERR_INVALID_STATE;
+    if (modem_state == MODEM_STATE_PPP) {
+        memcpy(config, &g_modem_config, sizeof(modem_config_t));
+        return MODEM_OK;
+    }
 
-    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CGDCONT?\r\n", rsp_bufs, 2, 500);
-    if (ret < 1) return ret;
-    if (strstr(rsp_bufs[0], "+CGDCONT:") != NULL) {
-        if (strstr(rsp_bufs[0], "1,\"IP\"") != NULL) {
-            value_ptr1 = strstr(rsp_bufs[0], "+CGDCONT: 1,\"IP\",\"");
-            if (value_ptr1 != NULL) value_ptr1 += strlen("+CGDCONT: 1,\"IP\",\"");
-        } else if (strstr(rsp_bufs[0], "1,\"IPV4V6\"") != NULL) {
-            value_ptr1 = strstr(rsp_bufs[0], "+CGDCONT: 1,\"IPV4V6\",\"");
-            if (value_ptr1 != NULL) value_ptr1 += strlen("+CGDCONT: 1,\"IPV4V6\",\"");
+    memset(config, 0, sizeof(modem_config_t));
+    rsp_bufs = modem_device_malloc_rsp_bufs(8);
+    if (rsp_bufs == NULL) return MODEM_ERR_MEM;
+    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CGDCONT?\r\n", rsp_bufs, 8, 500);
+    if (ret < 1) {
+        modem_device_free_rsp_bufs(rsp_bufs, 8);
+        return ret;
+    }
+    for (index = 0; index < ret; index++) {
+        if (strstr(rsp_bufs[index], "+CGDCONT:") != NULL) {
+            // Find the context ID
+            value_ptr1 = NULL;
+            do {
+                // +CGDCONT: 1,"IP","",0
+                value_ptr1 = strstr(rsp_bufs[index], ",\"IP\",\"");
+                if (value_ptr1 != NULL) {
+                    context_id = *(value_ptr1 - 1) - '0';
+                    if (*(value_ptr1 - 2) >= '0' && *(value_ptr1 - 2) <= '9') context_id = (*(value_ptr1 - 2) - '0') * 10 + context_id;
+                    value_ptr1 += strlen(",\"IP\",\"");
+                    break;
+                }
+                // +CGDCONT: 1,"IPV4V6","",0
+                value_ptr1 = strstr(rsp_bufs[index], ",\"IPV4V6\",\"");
+                if (value_ptr1 != NULL) {
+                    context_id = *(value_ptr1 - 1) - '0';
+                    if (*(value_ptr1 - 2) >= '0' && *(value_ptr1 - 2) <= '9') context_id = (*(value_ptr1 - 2) - '0') * 10 + context_id;
+                    value_ptr1 += strlen(",\"IPV4V6\",\"");
+                    break;
+                }
+                // +CGDCONT: 1,"IPV6","",0
+                value_ptr1 = strstr(rsp_bufs[index], ",\"IPV6\",\"");
+                if (value_ptr1 != NULL) {
+                    context_id = *(value_ptr1 - 1) - '0';
+                    if (*(value_ptr1 - 2) >= '0' && *(value_ptr1 - 2) <= '9') context_id = (*(value_ptr1 - 2) - '0') * 10 + context_id;
+                    value_ptr1 += strlen(",\"IPV6\",\"");
+                    break;
+                }
+                // +CGDCONT: 1,"PPP","",0
+                value_ptr1 = strstr(rsp_bufs[index], ",\"PPP\",\"");
+                if (value_ptr1 != NULL) {
+                    context_id = *(value_ptr1 - 1) - '0';
+                    if (*(value_ptr1 - 2) >= '0' && *(value_ptr1 - 2) <= '9') context_id = (*(value_ptr1 - 2) - '0') * 10 + context_id;
+                    value_ptr1 += strlen(",\"PPP\",\"");
+                    break;
+                }
+            } while (0);
+            // Get the APN
+            if (value_ptr1 != NULL) {
+                value_ptr2 = strchr(value_ptr1, '"');
+                if (value_ptr2 == NULL) {
+                    modem_device_free_rsp_bufs(rsp_bufs, 8);
+                    return MODEM_ERR_FAILED;
+                }
+                if (value_ptr2 > value_ptr1) {
+                    size_t apn_len = (size_t)(value_ptr2 - value_ptr1);
+                    if (apn_len >= sizeof(config->apn)) apn_len = sizeof(config->apn) - 1;
+                    memcpy(config->apn, value_ptr1, apn_len);
+                    config->apn[apn_len] = '\0';
+                    strncpy(g_modem_config.apn, config->apn, sizeof(g_modem_config.apn) - 1);
+                    g_modem_config.apn[sizeof(g_modem_config.apn) - 1] = '\0';
+                }
+            }
         }
-        if (value_ptr1 != NULL) {
+        if (config->apn[0] != 0) {
+            config->apn_context_id = context_id;
+            g_modem_config.apn_context_id = config->apn_context_id;
+            break;
+        }
+    }
+    
+    if (config->apn_context_id == 0) {
+        config->apn_context_id = 1;
+        g_modem_config.apn_context_id = config->apn_context_id;
+    }
+    if (context_id > 0) {
+        snprintf(cmd_str, sizeof(cmd_str), "AT+QICSGP=%d\r\n", context_id);
+        ret = modem_at_cmd_wait_rsp(&modem_at_handle, cmd_str, rsp_bufs, 2, 500);
+        if (ret < 1) {
+            modem_device_free_rsp_bufs(rsp_bufs, 8);
+            return ret;
+        }
+        if (strstr(rsp_bufs[0], "+QICSGP:") != NULL) {
+            value_ptr1 = strstr(rsp_bufs[0], ",\"");
+            if (value_ptr1 == NULL) {
+                modem_device_free_rsp_bufs(rsp_bufs, 8);
+                return MODEM_ERR_FAILED;
+            }
+            value_ptr1 += strlen(",\"");
             value_ptr2 = strchr(value_ptr1, '"');
-            if (value_ptr2 == NULL) return MODEM_ERR_FAILED;
+            if (value_ptr2 == NULL) {
+                modem_device_free_rsp_bufs(rsp_bufs, 8);
+                return MODEM_ERR_FAILED;
+            }
             if (value_ptr2 == value_ptr1) {
                 config->apn[0] = 0;
                 g_modem_config.apn[0] = 0;
             } else {
-                strncpy(config->apn, value_ptr1, value_ptr2 - value_ptr1);
+                size_t len_apn = (size_t)(value_ptr2 - value_ptr1);
+                if (len_apn >= sizeof(config->apn)) len_apn = sizeof(config->apn) - 1;
+                memcpy(config->apn, value_ptr1, len_apn);
+                config->apn[len_apn] = '\0';
                 strncpy(g_modem_config.apn, config->apn, sizeof(g_modem_config.apn) - 1);
+                g_modem_config.apn[sizeof(g_modem_config.apn) - 1] = '\0';
             }
+            value_ptr1 = strstr(value_ptr2, ",\"");
+            if (value_ptr1 == NULL) {
+                modem_device_free_rsp_bufs(rsp_bufs, 8);
+                return MODEM_ERR_FAILED;
+            }
+            value_ptr1 += strlen(",\"");
+            value_ptr2 = strchr(value_ptr1, '"');
+            if (value_ptr2 == NULL) {
+                modem_device_free_rsp_bufs(rsp_bufs, 8);
+                return MODEM_ERR_FAILED;
+            }
+            if (value_ptr2 == value_ptr1) {
+                config->user[0] = 0;
+                g_modem_config.user[0] = 0;
+            } else {
+                size_t len_usr = (size_t)(value_ptr2 - value_ptr1);
+                if (len_usr >= sizeof(config->user)) len_usr = sizeof(config->user) - 1;
+                memcpy(config->user, value_ptr1, len_usr);
+                config->user[len_usr] = '\0';
+                strncpy(g_modem_config.user, config->user, sizeof(g_modem_config.user) - 1);
+                g_modem_config.user[sizeof(g_modem_config.user) - 1] = '\0';
+            }
+            value_ptr1 = strstr(value_ptr2, ",\"");
+            if (value_ptr1 == NULL) {
+                modem_device_free_rsp_bufs(rsp_bufs, 8);
+                return MODEM_ERR_FAILED;
+            }
+            value_ptr1 += strlen(",\"");
+            value_ptr2 = strchr(value_ptr1, '"');
+            if (value_ptr2 == NULL) {
+                modem_device_free_rsp_bufs(rsp_bufs, 8);
+                return MODEM_ERR_FAILED;
+            }
+            if (value_ptr2 == value_ptr1) {
+                config->passwd[0] = 0;
+                g_modem_config.passwd[0] = 0;
+            } else {
+                size_t len_pwd = (size_t)(value_ptr2 - value_ptr1);
+                if (len_pwd >= sizeof(config->passwd)) len_pwd = sizeof(config->passwd) - 1;
+                memcpy(config->passwd, value_ptr1, len_pwd);
+                config->passwd[len_pwd] = '\0';
+                strncpy(g_modem_config.passwd, config->passwd, sizeof(g_modem_config.passwd) - 1);
+                g_modem_config.passwd[sizeof(g_modem_config.passwd) - 1] = '\0';
+            }
+            value_ptr1 = strstr(value_ptr2, ",");
+            if (value_ptr1 == NULL) {
+                modem_device_free_rsp_bufs(rsp_bufs, 8);
+                return MODEM_ERR_FAILED;
+            }
+            value_ptr1 += strlen(",");
+            config->authentication = atoi(value_ptr1);
+            g_modem_config.authentication = config->authentication;
         }
-    }
-
-    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+QICSGP=1\r\n", rsp_bufs, 2, 500);
-    if (ret < 1) return ret;
-    if (strstr(rsp_bufs[0], "+QICSGP: 1") != NULL) {
-        value_ptr1 = strstr(rsp_bufs[0], ",\"");
-        if (value_ptr1 == NULL) return MODEM_ERR_FAILED;
-        value_ptr1 += strlen(",\"");
-        value_ptr2 = strchr(value_ptr1, '"');
-        if (value_ptr2 == NULL) return MODEM_ERR_FAILED;
-        if (value_ptr2 == value_ptr1) {
-            config->apn[0] = 0;
-            g_modem_config.apn[0] = 0;
-        } else {
-            strncpy(config->apn, value_ptr1, value_ptr2 - value_ptr1);
-            strncpy(g_modem_config.apn, config->apn, sizeof(g_modem_config.apn) - 1);
-        }
-        value_ptr1 = strstr(value_ptr2, ",\"");
-        if (value_ptr1 == NULL) return MODEM_ERR_FAILED;
-        value_ptr1 += strlen(",\"");
-        value_ptr2 = strchr(value_ptr1, '"');
-        if (value_ptr2 == NULL) return MODEM_ERR_FAILED;
-        if (value_ptr2 == value_ptr1) {
-            config->user[0] = 0;
-            g_modem_config.user[0] = 0;
-        } else {
-            strncpy(config->user, value_ptr1, value_ptr2 - value_ptr1);
-            strncpy(g_modem_config.user, config->user, sizeof(g_modem_config.user) - 1);
-        }
-        value_ptr1 = strstr(value_ptr2, ",\"");
-        if (value_ptr1 == NULL) return MODEM_ERR_FAILED;
-        value_ptr1 += strlen(",\"");
-        value_ptr2 = strchr(value_ptr1, '"');
-        if (value_ptr2 == NULL) return MODEM_ERR_FAILED;
-        if (value_ptr2 == value_ptr1) {
-            config->passwd[0] = 0;
-            g_modem_config.passwd[0] = 0;
-        } else {
-            strncpy(config->passwd, value_ptr1, value_ptr2 - value_ptr1);
-            strncpy(g_modem_config.passwd, config->passwd, sizeof(g_modem_config.passwd) - 1);
-        }
-        value_ptr1 = strstr(value_ptr2, ",");
-        if (value_ptr1 == NULL) return MODEM_ERR_FAILED;
-        value_ptr1 += strlen(",");
-        config->authentication = atoi(value_ptr1);
-        g_modem_config.authentication = config->authentication;
     }
 
     ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+QCFG=\"roamservice\"\r\n", rsp_bufs, 2, 500);
-    if (ret < 1) return ret;
+    if (ret < 1) {
+        modem_device_free_rsp_bufs(rsp_bufs, 8);
+        return ret;
+    }
     if (strstr(rsp_bufs[0], "+QCFG:") != NULL) {
         value_ptr1 = strstr(rsp_bufs[0], "\",");
-        if (value_ptr1 == NULL) return MODEM_ERR_FAILED;
+        if (value_ptr1 == NULL) {
+            modem_device_free_rsp_bufs(rsp_bufs, 8);
+            return MODEM_ERR_FAILED;
+        }
         value_ptr1 += strlen("\",");
-        config->is_enable_roam = atoi(value_ptr1);
-        config->is_enable_roam -= 1;
-        g_modem_config.is_enable_roam = config->is_enable_roam;
+        {
+            int roam_val = atoi(value_ptr1);
+            config->is_enable_roam = (roam_val == 2) ? 1u : 0u;
+            g_modem_config.is_enable_roam = config->is_enable_roam;
+        }
     }
 
-    strncpy(config->pin, g_modem_config.pin, sizeof(config->pin) - 1);
-    strncpy(config->puk, g_modem_config.puk, sizeof(config->puk) - 1);
+    memcpy(config->pin, g_modem_config.pin, sizeof(g_modem_config.pin));
+    memcpy(config->puk, g_modem_config.puk, sizeof(g_modem_config.puk));
+    config->isp_selected = g_modem_config.isp_selected;
+    config->ppp_context_id = g_modem_config.ppp_context_id;
+    memcpy(config->ppp_pre_at_cmds, g_modem_config.ppp_pre_at_cmds, sizeof(g_modem_config.ppp_pre_at_cmds));
 
+    modem_device_free_rsp_bufs(rsp_bufs, 8);
     return MODEM_OK;
 }
 
 int modem_device_into_ppp(modem_net_ppp_callback_t recv_callback)
 {
     int ret = MODEM_OK;
+    char at_cmd[32] = {0};
     if (recv_callback == NULL) return MODEM_ERR_INVALID_ARG;
     if (modem_state != MODEM_STATE_INIT) return MODEM_ERR_INVALID_STATE;
 
-    ret = modem_at_cmd_wait_str(&modem_at_handle, "ATD*99#\r", "CONNECT|OK", 500);
+    ret = modem_device_activate_network();
+    if (ret != MODEM_OK) return ret;
+
+    if (g_modem_config.ppp_context_id == 0) {
+        ret = modem_at_cmd_wait_str(&modem_at_handle, "ATD*99#\r", "CONNECT|OK", 500);
+    } else {
+        snprintf(at_cmd, sizeof(at_cmd), "ATD*99***%d#\r", g_modem_config.ppp_context_id);
+        ret = modem_at_cmd_wait_str(&modem_at_handle, at_cmd, "CONNECT|OK", 500);
+    }
     if (ret == MODEM_OK) {
         xSemaphoreTake(recv_mutex, portMAX_DELAY);
         modem_state = MODEM_STATE_PPP;
@@ -979,6 +1449,8 @@ static int modem_cmd_deal_cmd(int argc, char* argv[])
                 i++;
             }
         }
+        if (rsp_num < 1) rsp_num = 1;
+        if (rsp_num > MODEM_AT_RSP_MAX_LINE_NUM) rsp_num = MODEM_AT_RSP_MAX_LINE_NUM;
         for (i = 0; i < rsp_num; i++) {
             rsp_list[i] = (char *)pvPortMalloc(MODEM_AT_RSP_LEN_MAXIMUM);
             if (rsp_list[i] == NULL) {
@@ -1006,9 +1478,16 @@ modem_at_cmd_end:
             }
         }
         return ret;
+    } else if (strcmp(argv[1], "restart_network") == 0) {
+        ret = modem_device_restart_network();
+        if (ret != MODEM_OK) {
+            LOG_SIMPLE("modem restart network failed(ret = %d)!", ret);
+            return -1;
+        }
+        LOG_SIMPLE("modem restart network success!");
+        return 0;
     }
     return -1;
-
 }
 
 debug_cmd_reg_t modem_cmd_table[] = {
