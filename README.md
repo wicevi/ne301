@@ -1,4 +1,4 @@
-<img width="660" height="309" alt="image" src="https://github.com/user-attachments/assets/6e4ec6f5-235c-4683-abea-4294b2227351" /><img width="674" height="313" alt="image" src="https://github.com/user-attachments/assets/aa226230-013a-4bd7-9bcc-c27e3bcfa6f7" /># NE301 - STM32N6570 AI Vision Camera
+# NE301 - STM32N6570 AI Vision Camera
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Platform](https://img.shields.io/badge/platform-STM32N6570-blue)]()
