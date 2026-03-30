@@ -4,7 +4,7 @@
 [![Platform](https://img.shields.io/badge/platform-STM32N6570-blue)]()
 [![License](https://img.shields.io/badge/license-Proprietary-red)]()
 [![Version](https://img.shields.io/badge/version-1.0.0.1-blue)]()
-> Warning: This branch is about to stop supporting!
+> Warning: Support for this branch will be discontinued soon.
 
 > High-performance AI vision camera system based on STM32N6570 Discovery Kit, featuring real-time video processing, neural network acceleration, and modern web interface.
 
