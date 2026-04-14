@@ -208,9 +208,9 @@ static void PLATFORM_Config(void)
     MX_USART1_UART_Init();
 #else
     MX_USART2_UART_Init();
+#endif
     MX_RNG_Init();
     MX_CRC_Init();
-#endif
 
 #if !defined(POWER_MODULE_TEST) || !POWER_MODULE_TEST
     NPURam_enable();

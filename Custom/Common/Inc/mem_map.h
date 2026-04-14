@@ -8,7 +8,11 @@
 | UNCACHED      | 0x341A0000        | 0x341FFFFF        | 384K       |
 | AI            | 0x34200000        | 0x343BFFFF        | 1M + 768K  |
 | AI_EXT        | 0x90000000        | 0x907FFFFF        | 8M         |
+#if defined(BOARD_PSRAM_SIZE) && BOARD_PSRAM_SIZE == 64
 | APP EXT       | 0x90800000        | 0x93FFFFFF        | 56M        |
+#else
+| APP EXT       | 0x90800000        | 0x91FFFFFF        | 24M        |
+#endif
 
 =================== Flash Partition Layout ===================
 |   Partition    |   Start Address   |   End Address     |   Size     |
@@ -48,9 +52,13 @@
 #define SRAM_AI_EXT_END      0x907FFFFFU
 #define SRAM_AI_EXT_SIZE     (0x90800000U - 0x90000000U)   // 8M
 #define SRAM_APP_EXT_BASE    0x90800000U
+#if defined(BOARD_PSRAM_SIZE) && BOARD_PSRAM_SIZE == 64
 #define SRAM_APP_EXT_END     0x93FFFFFFU
 #define SRAM_APP_EXT_SIZE    (0x94000000U - 0x90800000U)   // 56M
-
+#else
+#define SRAM_APP_EXT_END     0x91FFFFFFU
+#define SRAM_APP_EXT_SIZE    (0x92000000U - 0x90800000U)   // 24M
+#endif
 // =================== Flash Partitions ===================
 #define FLASH_BASE      0x70000000U
 #define FSBL_BASE       0x70000000U

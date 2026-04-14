@@ -909,7 +909,12 @@ ASFLAGS += -mcmse
 # Linker Configuration
 ######################################
 # Linker script
+# Match root COMMON_DEFS: -DBOARD_PSRAM_SIZE=64 vs 32 (no separate Make variable required)
+ifneq ($(filter -DBOARD_PSRAM_SIZE=64,$(COMMON_DEFS)),)
 LDSCRIPT = STM32N657L0HXQ_LRUN.ld
+else
+LDSCRIPT = STM32N657L0HXQ_LRUN_32MB.ld
+endif
 
 # Libraries (in correct order for linking)
 LIBS = -lc -lm -lnosys
