@@ -6,6 +6,7 @@
 #include "lwip/etharp.h"
 #include "lwip/dhcp.h"
 #include "lwip/tcpip.h"
+#include "lwip/netifapi.h"
 #include "Log/debug.h"
 #include "mem.h"
 #include "usb_host_ecm.h"
@@ -163,7 +164,7 @@ static void usb_ecm_tcpip_link_up_fn(void *ctx)
 static void usb_ecm_tcpip_link_down_fn(void *ctx)
 {
     (void)ctx;
-    dhcp_stop(&ecm_netif);
+    (void)netifapi_dhcp_stop(&ecm_netif);
     netif_set_down(&ecm_netif);
     netif_set_link_down(&ecm_netif);
     if (usb_ecm_netif_events != NULL) {
@@ -274,9 +275,9 @@ int usb_ecm_netif_init(void)
         goto usb_ecm_netif_init_exit;
     }
 
-    // Register lwIP netif
-    ue = netif_add(&ecm_netif, NULL, NULL, NULL, NULL, &usb_ecm_netif_ethernetif_init, &tcpip_input);
-    if (ue == NULL) {
+    // Register lwIP netif (run on tcpip thread)
+    err_t nif_err = netifapi_netif_add(&ecm_netif, NULL, NULL, NULL, NULL, &usb_ecm_netif_ethernetif_init, &tcpip_input);
+    if (nif_err != ERR_OK) {
         ret = AICAM_ERROR;
         goto usb_ecm_netif_init_exit;
     }
@@ -297,10 +298,7 @@ int usb_ecm_netif_init(void)
 usb_ecm_netif_init_exit:
     if (ret != AICAM_OK) {
         usb_host_ecm_deinit();
-        if (ue != NULL) {
-            netif_remove(ue);
-            ue = NULL;
-        }
+        (void)netifapi_netif_remove(&ecm_netif);
         if (usb_ecm_netif_events != NULL) {
             osEventFlagsDelete(usb_ecm_netif_events);
             usb_ecm_netif_events = NULL;
@@ -369,7 +367,7 @@ int usb_ecm_netif_up(void)
         ip_addr_set_zero_ip4(&(ecm_netif.ip_addr));
         ip_addr_set_zero_ip4(&(ecm_netif.netmask));
         ip_addr_set_zero_ip4(&(ecm_netif.gw));
-        ret = dhcp_start(&ecm_netif);
+        ret = netifapi_dhcp_start(&ecm_netif);
         if (ret != ERR_OK){
             netifapi_netif_set_down(&ecm_netif);
             return AICAM_ERROR;
@@ -378,7 +376,7 @@ int usb_ecm_netif_up(void)
         do {
             event = osEventFlagsWait(usb_ecm_netif_events, USB_ECM_EVENT_DOWN, osFlagsWaitAny, 100);
             if (!(event & osFlagsError)) {
-                dhcp_stop(&ecm_netif);
+                (void)netifapi_dhcp_stop(&ecm_netif);
                 netifapi_netif_set_down(&ecm_netif);
                 return AICAM_ERROR;
             }
@@ -390,7 +388,7 @@ int usb_ecm_netif_up(void)
             diff_tick = (end_tick >= start_tick) ? (end_tick - start_tick) : (0xFFFFFFFFU - start_tick + end_tick);
         } while (diff_tick < NETIF_USB_ECM_DHCP_TIMEOUT_MS);
         if (diff_tick >= NETIF_USB_ECM_DHCP_TIMEOUT_MS) {
-            dhcp_stop(&ecm_netif);
+            (void)netifapi_dhcp_stop(&ecm_netif);
             netifapi_netif_set_down(&ecm_netif);
             return AICAM_ERROR_TIMEOUT;
         }
@@ -417,7 +415,7 @@ int usb_ecm_netif_down(void)
     ue = netif_get_by_index(ecm_netif.num + 1);
     if (ue == NULL || ue != &ecm_netif) return AICAM_ERROR_NOT_SUPPORTED;
     
-    dhcp_stop(&ecm_netif);
+    (void)netifapi_dhcp_stop(&ecm_netif);
     netifapi_netif_set_down(&ecm_netif);
     return AICAM_OK;
 }
@@ -429,10 +427,10 @@ void usb_ecm_netif_deinit(void)
     ue = netif_get_by_index(ecm_netif.num + 1);
     if (ue == NULL || ue != &ecm_netif) return;
 
-    dhcp_stop(&ecm_netif);
+    (void)netifapi_dhcp_stop(&ecm_netif);
     netifapi_netif_set_down(&ecm_netif);
     netifapi_netif_set_link_down(&ecm_netif);
-    netif_remove(&ecm_netif);
+    (void)netifapi_netif_remove(&ecm_netif);
 
 #if NETIF_USB_ECM_IS_CAT1_MODULE
     modem_device_deinit();

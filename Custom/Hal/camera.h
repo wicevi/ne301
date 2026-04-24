@@ -190,6 +190,7 @@ typedef struct {
 } camera_t;
 
 int camera_register(void);
+int camera_deinit_but_nit_unregister(void);
 int camera_unregister(void);
 
 /**

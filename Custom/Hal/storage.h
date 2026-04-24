@@ -13,6 +13,7 @@
 #include "generic_file.h"
 #include "nvs.h"
 #include "mem_map.h"
+#include "fsbl_app_common.h"
 
 #define FLASH_BLOCK_SIZE  4096
 #define FS_BASE_MEM_START  FLASH_BASE
@@ -48,6 +49,13 @@ typedef enum
     NVS_FACTORY = 0,            /*!< Factory NVS storage                           */
     NVS_USER,                   /*!< User NVS storage                              */
 } NVS_Type_t;
+
+typedef struct {
+    bool mounted;
+    uint32_t total_KBytes;
+    uint32_t free_KBytes;
+    char fs_type[8]; // "littlefs"
+} storage_disk_info_t;
 
 typedef struct {
     uint32_t start_addr;
@@ -146,9 +154,11 @@ void storage_nvs_sync_trigger(void);  // Trigger async sync (wake up background 
 int storage_flash_write(uint32_t offset, void *data, size_t size);
 int storage_flash_read(uint32_t offset, void *data, size_t size);
 int storage_flash_erase(uint32_t offset, size_t num_blk);
+int storage_get_disk_info(storage_disk_info_t *info);
 void storage_lock(void);
 void storage_unlock(void);
 void storage_format(void);
 int storage_file_ops_switch(void);
 void storage_register(void);
+
 #endif

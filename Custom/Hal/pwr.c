@@ -422,7 +422,7 @@ static IOGroup iogroup_list[] = {
     {GPIOG, GPIO_PIN_12, GPIO_NOPULL},
 };
 
-static void iogroup_power_init(void)
+static void __attribute__((unused)) iogroup_power_init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
     for(int i = 0; i < sizeof(iogroup_list) / sizeof(iogroup_list[0]); i++) {
@@ -434,14 +434,14 @@ static void iogroup_power_init(void)
     }
 }
 
-static void iogroup_power_on(void)
+static void __attribute__((unused)) iogroup_power_on(void)
 {
     for(int i = 0; i < sizeof(iogroup_list) / sizeof(iogroup_list[0]); i++) {
         HAL_GPIO_WritePin(iogroup_list[i].GPIOx, iogroup_list[i].pin, GPIO_PIN_SET);
     }
 }
 
-static void iogroup_power_off(void)
+static void __attribute__((unused)) iogroup_power_off(void)
 {
     for(int i = 0; i < sizeof(iogroup_list) / sizeof(iogroup_list[0]); i++) {
         HAL_GPIO_WritePin(iogroup_list[i].GPIOx, iogroup_list[i].pin, GPIO_PIN_RESET);
@@ -457,7 +457,7 @@ power_desc pwr_descs[] = {
     {PWR_CAT1_NAME, cat1_power_init, cat1_power_on, cat1_power_off},
     {PWR_TF_NAME, tf_power_init, tf_power_on, tf_power_off},
     {PWR_WIFI, wifi_power_init, wifi_power_on, wifi_power_off},
-    {PWR_IOGROUP, iogroup_power_init, iogroup_power_on, iogroup_power_off},
+    // {PWR_IOGROUP, iogroup_power_init, iogroup_power_on, iogroup_power_off},
 };
 
 
