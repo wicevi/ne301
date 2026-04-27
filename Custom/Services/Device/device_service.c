@@ -970,7 +970,7 @@ aicam_result_t device_service_update_info(const device_info_config_t *info)
 
 aicam_bool_t device_service_storage_is_sd_connected(void)
 {
-    if (!g_device_service.initialized) {
+    if (!g_device_service.initialized || sd_wait_ready_for_open(1000) != AICAM_OK) {
         return AICAM_FALSE;
     }
     

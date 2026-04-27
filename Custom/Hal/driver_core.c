@@ -38,8 +38,8 @@ extern void NPUCache_config();
 bool driver_core_init(void)
 {
 #ifdef QUICK_SNAPSHOT_CARE_WAKEUP_FLAG_MASK
-    int ret = 0;
-    char capture_quick_mode[2] = {0};
+    // int ret = 0;
+    // char capture_quick_mode[2] = {0};
     uint32_t wakeup_flag = 0;
 #endif
 
@@ -62,19 +62,19 @@ bool driver_core_init(void)
     nn_register();
 #if ENABLE_U0_MODULE && defined(QUICK_SNAPSHOT_CARE_WAKEUP_FLAG_MASK)
     if (u0_module_get_wakeup_flag(&wakeup_flag) == 0 && (wakeup_flag & QUICK_SNAPSHOT_CARE_WAKEUP_FLAG_MASK) && !(wakeup_flag & (PWR_WAKEUP_FLAG_KEY_LONG_PRESS | PWR_WAKEUP_FLAG_KEY_MAX_PRESS))) {
-        ret = storage_nvs_read(NVS_USER, NVS_KEY_CAPTURE_QUICK_MODE, capture_quick_mode, sizeof(capture_quick_mode));
-        if (ret > 0 && capture_quick_mode[0] == '1') {
-            /* Quick_Bootstrap：在 camera/jpegc 注册完成后，按 U0 wakeup_flag 走快拍流水线. 其他模块按需注册. */
-            if (wakeup_flag & (PWR_WAKEUP_FLAG_RTC_TIMING | PWR_WAKEUP_FLAG_RTC_ALARM_A | PWR_WAKEUP_FLAG_RTC_ALARM_B)) {
-                quick_bootstrap_run(QB_WAKEUP_SOURCE_TIMER);
-            } else if ((wakeup_flag & PWR_WAKEUP_FLAG_CONFIG_KEY)) {
-                quick_bootstrap_run(QB_WAKEUP_SOURCE_BUTTON);
-            } else if (wakeup_flag & (PWR_WAKEUP_FLAG_PIR_HIGH | PWR_WAKEUP_FLAG_PIR_LOW | PWR_WAKEUP_FLAG_PIR_RISING | PWR_WAKEUP_FLAG_PIR_FALLING)) {
-                quick_bootstrap_run(QB_WAKEUP_SOURCE_PIR);
-            }
-        } else {
+        // ret = storage_nvs_read(NVS_USER, NVS_KEY_CAPTURE_QUICK_MODE, capture_quick_mode, sizeof(capture_quick_mode));
+        // if (ret > 0 && capture_quick_mode[0] == '1') {
+        //     /* Quick_Bootstrap：在 camera/jpegc 注册完成后，按 U0 wakeup_flag 走快拍流水线. 其他模块按需注册. */
+        //     if (wakeup_flag & (PWR_WAKEUP_FLAG_RTC_TIMING | PWR_WAKEUP_FLAG_RTC_ALARM_A | PWR_WAKEUP_FLAG_RTC_ALARM_B)) {
+        //         quick_bootstrap_run(QB_WAKEUP_SOURCE_TIMER);
+        //     } else if ((wakeup_flag & PWR_WAKEUP_FLAG_CONFIG_KEY)) {
+        //         quick_bootstrap_run(QB_WAKEUP_SOURCE_BUTTON);
+        //     } else if (wakeup_flag & (PWR_WAKEUP_FLAG_PIR_HIGH | PWR_WAKEUP_FLAG_PIR_LOW | PWR_WAKEUP_FLAG_PIR_RISING | PWR_WAKEUP_FLAG_PIR_FALLING)) {
+        //         quick_bootstrap_run(QB_WAKEUP_SOURCE_PIR);
+        //     }
+        // } else {
             quick_snapshot_init();
-        }
+        // }
     }
 #endif
     enc_register();

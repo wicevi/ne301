@@ -148,12 +148,12 @@ static void qs_light_set(aicam_bool_t enable, uint32_t brightness_percent)
 static void qs_stop_camera_pipes(aicam_bool_t need_ai)
 {
     if (!s_cam_dev) return;
-    (void)device_ioctl(s_cam_dev, CAM_CMD_SET_PIPE1_STOP, NULL, 0);
+    (void)device_ioctl(s_cam_dev, CAM_CMD_UNSHARE_PIPE1_BUFFER, s_main_fb, 0);
     if (need_ai) {
-        (void)device_ioctl(s_cam_dev, CAM_CMD_SET_PIPE2_STOP, NULL, 0);
+        (void)device_ioctl(s_cam_dev, CAM_CMD_UNSHARE_PIPE2_BUFFER, s_ai_fb, 0);
     }
     device_stop(s_cam_dev);
-    camera_deinit_but_nit_unregister();
+    camera_deinit_but_not_unregister();
 }
 
 static int qs_prepare_camera_and_jpeg(const qs_snapshot_config_t *cfg, const nn_model_info_t *model_info_opt)

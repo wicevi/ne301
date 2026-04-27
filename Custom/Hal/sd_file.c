@@ -867,6 +867,22 @@ int sd_is_detected(void)
     return SD_IsDetected();
 }
 
+int sd_wait_ready_for_open(uint32_t timeout_ms)
+{
+    if (g_sd.is_init == true && g_sd.media_status == MEDIA_OPENED) {
+        return AICAM_OK;
+    }
+    if (sd_is_detected()) {
+        while (g_sd.media_status != MEDIA_OPENED && timeout_ms > 0) {
+            osDelay(5);
+            if (timeout_ms > 5) timeout_ms -= 5;
+            else return AICAM_ERROR_TIMEOUT;
+        }
+        return AICAM_OK;
+    }
+    return AICAM_ERROR_TIMEOUT;
+}
+
 int sd_init(void *priv)
 {
     sd_t *sd = (sd_t *)priv;

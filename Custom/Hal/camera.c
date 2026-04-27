@@ -1061,7 +1061,7 @@ static int camera_start(void *priv)
     camera_t *camera = (camera_t *)priv;
     int ret;
     if(!camera->is_init){
-        if (osSemaphoreAcquire(camera->sem_init, 2000) != osOK || !camera->is_init) {
+        if (camera->sem_init == NULL || osSemaphoreAcquire(camera->sem_init, 2000) != osOK || !camera->is_init) {
             return AICAM_ERROR_NOT_FOUND;
         }
     }
@@ -1199,11 +1199,12 @@ static int camera_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsig
     camera_t *camera = (camera_t *)priv;
     CAM_CMD_E cam_cmd = (CAM_CMD_E)cmd;
     pipe_buffer_t *buffer = NULL;
+    uint8_t *new_buffer = NULL; // buffer to replace the unshared buffer
     int ret = AICAM_OK;
     int i = 0;
 
     if(!camera->is_init){
-        if (osSemaphoreAcquire(camera->sem_init, 2000) != osOK || !camera->is_init) {
+        if (camera->sem_init == NULL || osSemaphoreAcquire(camera->sem_init, 2000) != osOK || !camera->is_init) {
             return AICAM_ERROR_NOT_FOUND;
         }
     }
@@ -1593,6 +1594,46 @@ static int camera_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsig
             ret = AICAM_OK;
             break;
 
+        case CAM_CMD_UNSHARE_PIPE1_BUFFER:
+            if(camera->state.pipe1_state != PIPE_START){
+                ret = AICAM_ERROR_NOT_SUPPORTED;
+                break;
+            }
+            ret = AICAM_ERROR_NOT_FOUND;
+            for (i = 0; i < camera->pipe1_param.buffer_nb; ++i) {
+                if (camera->pipe1_buffer[i].data == ubuf && camera->pipe1_buffer[i].state == BUFFER_IN_USE && camera->pipe1_buffer[i].owner_count == 1 && camera->pipe1_buffer[i].owner_list[0] == osThreadGetId()) {
+                    new_buffer = hal_mem_alloc_aligned(g_camera.pipe1_param.width * g_camera.pipe1_param.height * g_camera.pipe1_param.bpp, CAMERA_MEMORY_ALIGNMENT, MEM_LARGE);
+                    if(new_buffer == NULL){
+                        ret = AICAM_ERROR_OUT_OF_MEMORY;
+                        break;
+                    }
+                    camera->pipe1_buffer[i].data = new_buffer;
+                    buffer_release_isr(&camera->pipe1_buffer[i], &camera->pipe1_dq);
+                    ret = AICAM_OK;
+                    break;
+                }
+            }
+            break;
+        case CAM_CMD_UNSHARE_PIPE2_BUFFER:
+            if(camera->state.pipe2_state != PIPE_START){
+                ret = AICAM_ERROR_NOT_SUPPORTED;
+                break;
+            }
+            ret = AICAM_ERROR_NOT_FOUND;
+            for (i = 0; i < camera->pipe2_param.buffer_nb; ++i) {
+                if (camera->pipe2_buffer[i].data == ubuf && camera->pipe2_buffer[i].state == BUFFER_IN_USE && camera->pipe2_buffer[i].owner_count == 1 && camera->pipe2_buffer[i].owner_list[0] == osThreadGetId()) {
+                    new_buffer = hal_mem_alloc_aligned(g_camera.pipe2_param.width * g_camera.pipe2_param.height * g_camera.pipe2_param.bpp, CAMERA_MEMORY_ALIGNMENT, MEM_LARGE);
+                    if(new_buffer == NULL){
+                        ret = AICAM_ERROR_OUT_OF_MEMORY;
+                        break;
+                    }
+                    camera->pipe2_buffer[i].data = new_buffer;
+                    buffer_release_isr(&camera->pipe2_buffer[i], &camera->pipe2_dq);
+                    ret = AICAM_OK;
+                    break;
+                }
+            }
+            break;
         default:
             ret = AICAM_ERROR_NOT_SUPPORTED;
             break;
@@ -1642,11 +1683,7 @@ static int pipe_buffer_release(pipe_buffer_t *pipe_buffer, pipe_params_t *pipe_p
     }
     for (int i = 0; i < pipe_param->buffer_nb; i++) {
         if (pipe_buffer[i].data != NULL) {
-            if (pipe_buffer[i].state != BUFFER_IN_USE) {
-                hal_mem_free(pipe_buffer[i].data);
-            } else {
-                printf("pipe buffer release failed, state is BUFFER_IN_USE \r\n");
-            }
+            hal_mem_free(pipe_buffer[i].data);
         }
     }
 
@@ -1819,9 +1856,18 @@ int camera_unregister(void)
     return AICAM_OK;
 }
 
-int camera_deinit_but_nit_unregister(void)
+/* This function is used to deinit the camera but not unregister */
+int camera_deinit_but_not_unregister(void)
 {
     return camera_deinit(&g_camera);
+}
+
+void camera_free_unshared_buffer(uint8_t *buffer)
+{
+    if(buffer == NULL){
+        return;
+    }
+    hal_mem_free(buffer);
 }
 
 #ifdef ISP_MW_TUNING_TOOL_SUPPORT
