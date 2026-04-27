@@ -486,8 +486,8 @@ int storage_flash_read(uint32_t offset, void *data, size_t size)
 {
     storage_lock();
     memcpy(data, (const void *)(FS_BASE_MEM_START + offset), size);
-    // 为了降低功耗，读完后重新进入 XSPI memory-mapped 模式；
-    // 切换过程中禁止任务调度，避免任务切换打断导致 XSPI 状态切换时序异常
+    // To reduce power consumption, switch back to XSPI memory-mapped mode after reading.
+    // Disable task scheduling during the switch to avoid timing issues caused by task preemption.
     // XSPI_NOR_DisableMemoryMappedMode();
     // XSPI_NOR_EnableMemoryMappedMode();
     storage_unlock();

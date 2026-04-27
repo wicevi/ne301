@@ -64,7 +64,7 @@ bool driver_core_init(void)
     if (u0_module_get_wakeup_flag(&wakeup_flag) == 0 && (wakeup_flag & QUICK_SNAPSHOT_CARE_WAKEUP_FLAG_MASK) && !(wakeup_flag & (PWR_WAKEUP_FLAG_KEY_LONG_PRESS | PWR_WAKEUP_FLAG_KEY_MAX_PRESS))) {
         // ret = storage_nvs_read(NVS_USER, NVS_KEY_CAPTURE_QUICK_MODE, capture_quick_mode, sizeof(capture_quick_mode));
         // if (ret > 0 && capture_quick_mode[0] == '1') {
-        //     /* Quick_Bootstrap：在 camera/jpegc 注册完成后，按 U0 wakeup_flag 走快拍流水线. 其他模块按需注册. */
+        //     /* Quick_Bootstrap: after camera/jpegc are registered, run the fast snapshot pipeline based on U0 wakeup_flag. Register other modules on demand. */
         //     if (wakeup_flag & (PWR_WAKEUP_FLAG_RTC_TIMING | PWR_WAKEUP_FLAG_RTC_ALARM_A | PWR_WAKEUP_FLAG_RTC_ALARM_B)) {
         //         quick_bootstrap_run(QB_WAKEUP_SOURCE_TIMER);
         //     } else if ((wakeup_flag & PWR_WAKEUP_FLAG_CONFIG_KEY)) {

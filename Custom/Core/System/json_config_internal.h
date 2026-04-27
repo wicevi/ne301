@@ -54,8 +54,9 @@
  // AI Debug configuration key names
  #define NVS_KEY_AI_ENABLE           "ai_enabled"
  #define NVS_KEY_AI_1_ACTIVE         "ai_1_active"
- /* AI 管道输入分辨率（NVS）。若读取失败或值为无效/占位，不得自行臆造尺寸：
-  * 应等待模型加载完成、从 nn_model_info_t（或等价接口）取得输入尺寸后再配置 AI 管道。 */
+ /* AI pipeline input resolution (stored in NVS). If reading fails or the value is invalid/placeholder,
+  * do not guess a resolution. Wait until the model is loaded and obtain the input size from
+  * nn_model_info_t (or an equivalent interface) before configuring the AI pipeline. */
  #define NVS_KEY_AI_PIPE_WIDTH       "ai_pipe_width"
  #define NVS_KEY_AI_PIPE_HEIGHT      "ai_pipe_height"
  #define NVS_KEY_CONFIDENCE          "confidence"
