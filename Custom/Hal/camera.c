@@ -627,6 +627,94 @@ void camera_configure_pipe1_grayscale(pipe_params_t *pipe1, aicam_bool_t graysca
      * video pipeline / encoder stride (bpp=2) stays consistent. */
 }
 
+int camera_apply_isp_iq_runtime(ISP_HandleTypeDef *hIsp, ISP_IQParamTypeDef *iq)
+{
+    ISP_IQParamTypeDef *cached;
+
+    if (!hIsp || !iq) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    cached = ISP_SVC_IQParam_Get(hIsp);
+    if (!cached) {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    /* Only write blocks whose values actually differ from the current cache.
+       Every ISP_SVC_ISP_Set* function internally does Disable→Write→Enable,
+       so writing an unchanged block causes a needless pipeline blink.
+
+       Conditions mirror ISP_Start() in isp_core.c — optional blocks are
+       only applied when their enable flag is set (and for gain/colorConv,
+       only when AWB is off). */
+
+    if (memcmp(&iq->demosaicing, &cached->demosaicing, sizeof(iq->demosaicing)) != 0) {
+        ISP_SVC_ISP_SetDemosaicing(hIsp, &iq->demosaicing);
+        cached->demosaicing = iq->demosaicing;
+    }
+
+    if (memcmp(&iq->statRemoval, &cached->statRemoval, sizeof(iq->statRemoval)) != 0) {
+        ISP_SVC_ISP_SetStatRemoval(hIsp, &iq->statRemoval);
+        cached->statRemoval = iq->statRemoval;
+    }
+
+    if (memcmp(&iq->contrast, &cached->contrast, sizeof(iq->contrast)) != 0) {
+        ISP_SVC_ISP_SetContrast(hIsp, &iq->contrast);
+        cached->contrast = iq->contrast;
+    }
+
+    if (iq->badPixelStatic.enable &&
+        memcmp(&iq->badPixelStatic, &cached->badPixelStatic, sizeof(iq->badPixelStatic)) != 0) {
+        ISP_SVC_ISP_SetBadPixel(hIsp, &iq->badPixelStatic);
+        cached->badPixelStatic = iq->badPixelStatic;
+    }
+
+    if (iq->blackLevelStatic.enable &&
+        memcmp(&iq->blackLevelStatic, &cached->blackLevelStatic, sizeof(iq->blackLevelStatic)) != 0) {
+        ISP_SVC_ISP_SetBlackLevel(hIsp, &iq->blackLevelStatic);
+        cached->blackLevelStatic = iq->blackLevelStatic;
+    }
+
+    if (memcmp(&iq->statAreaStatic, &cached->statAreaStatic, sizeof(iq->statAreaStatic)) != 0) {
+        ISP_SVC_ISP_SetStatArea(hIsp, &iq->statAreaStatic);
+        cached->statAreaStatic = iq->statAreaStatic;
+    }
+
+    if (memcmp(&iq->gamma, &cached->gamma, sizeof(iq->gamma)) != 0) {
+        ISP_SVC_ISP_SetGamma(hIsp, &iq->gamma);
+        cached->gamma = iq->gamma;
+    }
+
+    /* AEC/AWB-managed blocks — only apply when algorithms are off.
+       Mirror ISP_Start() conditions: gain/colorConv only when AWB disabled. */
+    if (!iq->AWBAlgo.enable) {
+        if (iq->ispGainStatic.enable &&
+            memcmp(&iq->ispGainStatic, &cached->ispGainStatic, sizeof(iq->ispGainStatic)) != 0) {
+            ISP_SVC_ISP_SetGain(hIsp, &iq->ispGainStatic);
+            cached->ispGainStatic = iq->ispGainStatic;
+        }
+        if (iq->colorConvStatic.enable &&
+            memcmp(&iq->colorConvStatic, &cached->colorConvStatic, sizeof(iq->colorConvStatic)) != 0) {
+            ISP_SVC_ISP_SetColorConv(hIsp, &iq->colorConvStatic);
+            cached->colorConvStatic = iq->colorConvStatic;
+        }
+        cached->AWBAlgo.enable = 0;
+    }
+
+    if (memcmp(&iq->AECAlgo.exposureCompensation, &cached->AECAlgo.exposureCompensation,
+               sizeof(iq->AECAlgo.exposureCompensation)) != 0) {
+        ISP_SetExposureTarget(hIsp, iq->AECAlgo.exposureCompensation);
+        cached->AECAlgo.exposureCompensation = iq->AECAlgo.exposureCompensation;
+    }
+
+    if (iq->AECAlgo.enable != cached->AECAlgo.enable) {
+        ISP_SetAECState(hIsp, iq->AECAlgo.enable);
+        cached->AECAlgo.enable = iq->AECAlgo.enable;
+    }
+
+    return AICAM_OK;
+}
+
 static void CAM_setSensorInfo(CMW_Sensor_Name_t sensor, camera_t *camera)
 {
     CMW_Sensor_Name_t sensor_id = sensor;
@@ -1714,6 +1802,31 @@ static int camera_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsig
                     buffer_release_isr(&camera->pipe2_buffer[i], &camera->pipe2_dq);
                     ret = AICAM_OK;
                     break;
+                }
+            }
+            break;
+        case CAM_CMD_APPLY_ISP_IQ:
+            /* Hot-swap ISP IQ on a running pipeline. Mutex is already held,
+               serializing against cameraProcess/ISP background processing. */
+            if (ubuf == NULL || arg != sizeof(ISP_IQParamTypeDef)) {
+                ret = AICAM_ERROR_INVALID_PARAM;
+                break;
+            }
+            if (camera->state.camera_state != CAMERA_START) {
+                /* Camera not streaming: just cache for next start. */
+                memcpy(&camera->isp_iq_param, ubuf, sizeof(ISP_IQParamTypeDef));
+                ret = AICAM_OK;
+                break;
+            }
+            {
+                ISP_HandleTypeDef *hIsp = camera_get_isp_handle();
+                if (hIsp == NULL) {
+                    ret = AICAM_ERROR_NOT_FOUND;
+                    break;
+                }
+                ret = camera_apply_isp_iq_runtime(hIsp, (ISP_IQParamTypeDef *)ubuf);
+                if (ret == AICAM_OK) {
+                    memcpy(&camera->isp_iq_param, ubuf, sizeof(ISP_IQParamTypeDef));
                 }
             }
             break;

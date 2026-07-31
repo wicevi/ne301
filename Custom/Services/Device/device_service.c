@@ -103,6 +103,8 @@ static device_service_context_t g_device_service = {0};
  * @param config Camera configuration to apply
  * @return aicam_result_t Operation result
  */
+static void device_service_build_isp_iq_param(const image_config_t *img_cfg, ISP_IQParamTypeDef *out_iq);
+
 static aicam_result_t apply_camera_config_to_hardware(const camera_config_t *config)
 {
     if (!config || !g_device_service.camera_device) {
@@ -1229,6 +1231,23 @@ aicam_result_t device_service_image_set_config(const image_config_t *config)
         if (result != AICAM_OK) {
             LOG_SVC_ERROR("Failed to apply camera configuration to hardware: %d", result);
             return result;
+        }
+
+        // Hot-swap ISP IQ for isp_mode / grayscale changes — no restart needed
+        {
+            ISP_IQParamTypeDef iq = {0};
+            device_service_build_isp_iq_param(&g_device_service.camera_config.image_config, &iq);
+            result = device_ioctl(g_device_service.camera_device,
+                                CAM_CMD_APPLY_ISP_IQ,
+                                (uint8_t *)&iq,
+                                sizeof(ISP_IQParamTypeDef));
+            if (result != AICAM_OK) {
+                LOG_SVC_ERROR("Failed to apply ISP IQ hot-swap: %d", result);
+                return result;
+            }
+            LOG_SVC_DEBUG("ISP IQ hot-swapped (mode=%u, grayscale=%d)",
+                         g_device_service.camera_config.image_config.isp_mode,
+                         g_device_service.camera_config.image_config.grayscale);
         }
     }
 
