@@ -676,7 +676,7 @@ static void wifi_update_process(void)
     // osDelay(100);
     storage_nvs_write(NVS_FACTORY, NVS_KEY_WIFI_MODE, WIFI_MODE_NORMAL, strlen(WIFI_MODE_NORMAL));
     
-    misc = device_find_pattern(IND_DEVICE_NAME, DEV_TYPE_MISC);
+    misc = device_find_pattern(IND_EXT_DEVICE_NAME, DEV_TYPE_MISC);
     if (misc != NULL) {
         blink_params.blink_times = INT32_MAX;
         blink_params.interval_ms = 50;

@@ -877,9 +877,16 @@ aicam_result_t device_service_start(void)
         g_device_service.led_config.connected = AICAM_TRUE;
         g_device_service.led_initialized = AICAM_TRUE;
         
-        // Set initial indicator state: system running, AP not yet started
-        g_device_service.indicator_state = SYSTEM_INDICATOR_RUNNING_AP_OFF;
-        device_service_set_indicator_state(SYSTEM_INDICATOR_RUNNING_AP_OFF);
+        // Set initial indicator state based on actual AP state. on_wifi_ap_ready
+        // runs on the async netif thread and may have already set AP_ON before
+        // device_service start; a blind AP_OFF here clobbers it (timing race).
+        if (communication_is_interface_connected(NETIF_NAME_WIFI_AP)) {
+            g_device_service.indicator_state = SYSTEM_INDICATOR_RUNNING_AP_ON;
+            device_service_set_indicator_state(SYSTEM_INDICATOR_RUNNING_AP_ON);
+        } else {
+            g_device_service.indicator_state = SYSTEM_INDICATOR_RUNNING_AP_OFF;
+            device_service_set_indicator_state(SYSTEM_INDICATOR_RUNNING_AP_OFF);
+        }
     }
     
     // Find and initialize button device
