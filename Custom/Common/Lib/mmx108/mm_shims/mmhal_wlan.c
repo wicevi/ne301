@@ -375,6 +375,10 @@ void mmhal_read_mac_addr(uint8_t *mac_addr)
 
 const struct mmhal_chip *mmhal_get_chip(void)
 {
+#ifdef HALOW_CHIP_MM8108
+    return &mmhal_mm8108;
+#else
     return &mmhal_mm6108;
+#endif
 }
 

@@ -49,6 +49,15 @@ C_INCLUDES += -I../Custom/Hal/Network/netif_manager
 
 CFLAGS += -DHALT_ON_ASSERT
 
+# === HaLow target chip — toggle to rebuild for the other silicon ===
+#   mm8108 (default) — current NE301 silicon, matches the tested working tree
+#   mm6108           — legacy
+# Override on the command line:  make HALOW_CHIP=mm6108
+HALOW_CHIP ?= mm8108
+ifeq ($(HALOW_CHIP),mm8108)
+CFLAGS += -DHALOW_CHIP_MM8108
+endif
+
 # NE301 SPI HaLow: disable 802.11 PS and long bus idle timeout (default 100 ms sleeps chip).
 CFLAGS += -DMMWLAN_DEFAULT_DYNAMIC_PS_TIMEOUT_MS=3600000U
 CFLAGS += -DMMWLAN_DEFAULT_PS_MODE=0
