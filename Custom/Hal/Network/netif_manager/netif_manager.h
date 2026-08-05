@@ -204,6 +204,8 @@ typedef struct
 
 /** HaLow regdomain code buffer size (matches @ref MMWLAN_COUNTRY_CODE_LEN). */
 #define NETIF_HALOW_COUNTRY_CODE_LEN        (16U)
+/** Legacy WiFi region string buffer size ("world" + NUL, with headroom). */
+#define NETIF_WIFI_COUNTRY_CODE_LEN         (8U)
 
 #if NETIF_WIFI_HALOW_IS_ENABLE
 /// @brief HaLow (mmx108) extended wireless configuration

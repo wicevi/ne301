@@ -44,7 +44,9 @@ bool bypass_mode_enabled = false;
 bool dual_mode_enabled   = false;
 
 /// @brief Default wireless network interface configuration
-static const sl_wifi_device_configuration_t device_configuration = {
+/// @note Non-const so region_code can be configured before init via
+///       sl_net_wifi_set_region_code() (only effective when both netifs DEINIT).
+static sl_wifi_device_configuration_t device_configuration = {
   .boot_option = LOAD_NWP_FW,
   .mac_address = NULL,
   .band        = SL_SI91X_WIFI_BAND_2_4GHZ,
@@ -501,8 +503,10 @@ static void sl_net_low_level_input(struct netif *netif, uint8_t *b, uint16_t len
     if (len < NETIF_LWIP_FRAME_ALIGNMENT) len = NETIF_LWIP_FRAME_ALIGNMENT;
 
     // Drop packets originated from the same interface and is not destined for the said interface
-//    const uint8_t *src_mac = b + netif->hwaddr_len;
-//    const uint8_t *dst_mac = b;
+#if LWIP_IPV6
+    const uint8_t *src_mac = b + netif->hwaddr_len;
+    const uint8_t *dst_mac = b;
+#endif
 
 #if LWIP_IPV6
     if (!(ip6_addr_ispreferred(netif_ip6_addr_state(netif, 0)))
@@ -621,9 +625,13 @@ static err_t sl_net_ethernetif_init(struct netif *netif)
     // set netif maximum transfer unit
     netif->mtu = NETIF_MAX_TRANSFER_UNIT;
 
-    // Accept broadcast address and ARP traffic
-    netif->flags |= NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_IGMP;
-
+    if (interface == SL_WIFI_CLIENT_INTERFACE) {
+        // Accept broadcast address and ARP traffic
+        netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_IGMP;
+    } else if (interface == SL_WIFI_AP_INTERFACE) {
+        // Accept broadcast address
+        netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP;
+    }
 #if LWIP_IPV6_MLD
     netif->flags |= NETIF_FLAG_MLD6;
 #endif /* LWIP_IPV6_MLD */
@@ -2246,9 +2254,104 @@ void sli_firmware_error_callback(int error_code)
     }
 }
 
+/****************************************************************************************/
+/***************************** WiFi Region (Country) Code ********************************/
+/****************************************************************************************/
+/* Region string <-> sl_wifi_region_code_t mapping for legacy WiFi (concurrent AP+STA).
+ * WORLD_DOMAIN is intentionally excluded: per WiSeConnect docs it is only valid in
+ * CLIENT/TRANSCEIVER/TRANSMIT_TEST modes (and AN1437 lists "Worldwide" as BLE-only),
+ * so passing it for CONCURRENT_MODE init makes the firmware reject the AP (0xF).
+ * DEFAULT/SG(not supported)/IGNORE(deprecated) are also excluded. */
+static const struct {
+    const char *str;
+    sl_wifi_region_code_t code;
+} s_wifi_region_table[] = {
+    { "us",    SL_WIFI_REGION_US },
+    { "eu",    SL_WIFI_REGION_EU },
+    { "jp",    SL_WIFI_REGION_JP },
+    { "kr",    SL_WIFI_REGION_KR },
+    { "cn",    SL_WIFI_REGION_CN },
+};
+#define SL_NET_WIFI_REGION_TABLE_SIZE (sizeof(s_wifi_region_table) / sizeof(s_wifi_region_table[0]))
+
+static sl_wifi_region_code_t sl_net_wifi_region_lookup(const char *country_code)
+{
+    uint32_t i;
+    if (country_code == NULL) return SL_WIFI_IGNORE_REGION;
+    for (i = 0; i < SL_NET_WIFI_REGION_TABLE_SIZE; i++) {
+        const char *s = s_wifi_region_table[i].str;
+        size_t j;
+        for (j = 0; s[j] != '\0' && country_code[j] != '\0'; j++) {
+            char a = s[j], b = country_code[j];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+            if (b >= 'A' && b <= 'Z') b = (char)(b + ('a' - 'A'));
+            if (a != b) break;
+        }
+        if (s[j] == '\0' && country_code[j] == '\0') return s_wifi_region_table[i].code;
+    }
+    return SL_WIFI_IGNORE_REGION;
+}
+
+/// @brief Configure WiFi region (country) code. Only effective at the next sl_wifi_init,
+///        so it requires both client and AP netifs to be DEINIT.
+/// @param country_code Region string, e.g. "us", "cn", "eu", "jp", "world", "kr"
+/// @return SL_STATUS_OK / SL_STATUS_INVALID_PARAMETER / SL_STATUS_INVALID_STATE
+int sl_net_wifi_set_region_code(const char *country_code)
+{
+    sl_wifi_region_code_t code = sl_net_wifi_region_lookup(country_code);
+    if (code == SL_WIFI_IGNORE_REGION) return SL_STATUS_INVALID_PARAMETER;
+    if (sl_net_client_netif_state() != NETIF_STATE_DEINIT ||
+        sl_net_ap_netif_state() != NETIF_STATE_DEINIT) {
+        return SL_STATUS_INVALID_STATE;
+    }
+    /* Keep every WiFi device config in sync so the region applies regardless of
+     * which mode (normal concurrent / remote-wakeup-wifi / remote-wakeup-ble) inits next. */
+    device_configuration.region_code = code;
+    remote_wake_up_wifi_cfg.region_code = code;
+#if IS_ENABLE_BLE
+    remote_wake_up_ble_cfg.region_code = code;
+#endif
+    return SL_STATUS_OK;
+}
+
+/// @brief Get the currently active WiFi region string (applied at last init).
+/// @param buf Output buffer
+/// @param len Buffer size
+/// @return SL_STATUS_OK / SL_STATUS_INVALID_PARAMETER
+int sl_net_wifi_get_region_code(char *buf, size_t len)
+{
+    uint32_t i;
+    const char *str = "us"; /* fallback for unmapped active region (DEFAULT/IGNORE) */
+    if (buf == NULL || len == 0) return SL_STATUS_INVALID_PARAMETER;
+    for (i = 0; i < SL_NET_WIFI_REGION_TABLE_SIZE; i++) {
+        if (s_wifi_region_table[i].code == device_configuration.region_code) {
+            str = s_wifi_region_table[i].str;
+            break;
+        }
+    }
+    strncpy(buf, str, len - 1);
+    buf[len - 1] = '\0';
+    return SL_STATUS_OK;
+}
+
+uint32_t sl_net_wifi_get_supported_region_count(void)
+{
+    return (uint32_t)SL_NET_WIFI_REGION_TABLE_SIZE;
+}
+
+int sl_net_wifi_get_region_code_by_index(uint32_t idx, char *buf, size_t len)
+{
+    if (buf == NULL || len == 0 || idx >= SL_NET_WIFI_REGION_TABLE_SIZE) {
+        return SL_STATUS_INVALID_PARAMETER;
+    }
+    strncpy(buf, s_wifi_region_table[idx].str, len - 1);
+    buf[len - 1] = '\0';
+    return SL_STATUS_OK;
+}
+
 /// @brief Initialize WiFi network interface
 /// @param None
-/// @return Error code 
+/// @return Error code
 int sl_net_netif_init(void)
 {
     if (is_wifi_ant()) return SL_STATUS_INVALID_STATE;

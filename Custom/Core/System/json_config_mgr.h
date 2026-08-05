@@ -224,6 +224,7 @@ typedef struct {
     uint32_t ap_sleep_time;                 // AP sleep time in seconds
     char ssid[32];                          // AP SSID
     char password[64];                      // AP password
+    char wifi_country_code[NETIF_WIFI_COUNTRY_CODE_LEN]; // Legacy WiFi region (e.g. "us","cn"); applied at next boot
     network_scan_result_t known_networks[16]; // Known network configuration
     uint32_t known_network_count;           // Known network count
     

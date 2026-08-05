@@ -158,6 +158,7 @@
          .ap_sleep_time = 600,      // 10 minutes default sleep time
          .ssid = "AICAM-AP",        // Default AP SSID
          .password = "",            // Default AP password
+         .wifi_country_code = "",   // Default: empty -> firmware default region (US)
          .known_network_count = 0,
          .preferred_comm_type = 0,  // No preferred type
          .enable_auto_priority = AICAM_TRUE,  // Enable auto priority

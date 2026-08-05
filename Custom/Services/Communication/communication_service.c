@@ -972,6 +972,17 @@ aicam_result_t communication_service_init(void *config)
     // Load communication and cellular configuration from NVS
     network_service_config_t net_cfg;
     if (json_config_get_network_service_config(&net_cfg) == AICAM_OK) {
+        // Apply legacy WiFi region before any WiFi netif init (both netifs DEINIT here,
+        // so set takes effect at the next sl_wifi_init). Empty -> keep firmware default (US).
+        if (net_cfg.wifi_country_code[0] != '\0') {
+            int region_ret = sl_net_wifi_set_region_code(net_cfg.wifi_country_code);
+            if (region_ret == SL_STATUS_OK) {
+                LOG_SVC_INFO("WiFi region applied from NVS: %s", net_cfg.wifi_country_code);
+            } else {
+                LOG_SVC_WARN("WiFi region '%s' not applied (ret=%d)", net_cfg.wifi_country_code, region_ret);
+            }
+        }
+
         // Load communication type preferences (normalize COMM_PREF vs COMM_TYPE encoding)
         g_communication_service.preferred_type =
             comm_nvs_to_comm_type(net_cfg.preferred_comm_type);

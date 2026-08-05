@@ -17,6 +17,11 @@ import { Input } from '@/components/ui/input';
 import WifiReloadMask from '@/components/wifi-reload-mask';
 import { sleep, retryFetch } from '@/utils';
 import { useCommunicationData } from '@/store/communicationData';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/tooltip';
+import { toast } from 'sonner';
+import { useLanguage } from '@/hooks/useLanguageProvider';
+import { getWifiRegionLabel } from './wifi-region';
 
 type WifiData = {
     ssid: string;
@@ -31,7 +36,8 @@ type WifiData = {
 export default function WifiNetworkPage() {
     const { i18n } = useLingui();
     const isMobile = useIsMobile();
-    const { getNetworkSTAReq, scanWifi, setWifi, disconnectWifi, deleteWifi } = systemSettings;
+    const { locale } = useLanguage();
+    const { getNetworkSTAReq, scanWifi, setWifi, disconnectWifi, deleteWifi, getWifiRegionReq, setWifiRegionReq } = systemSettings;
     const { getCommunicationData } = useCommunicationData();
     // const wifiDataList = wifiData.data.scan_results.known_networks;
     const [isLoading, setIsLoading] = useState(true);
@@ -46,6 +52,9 @@ export default function WifiNetworkPage() {
     const [loadingText, setLoadingText] = useState('');
     const [isReloading, setIsReloading] = useState(false);
     const [isErrorWifiPassword, setIsErrorWifiPassword] = useState(false);
+    const [region, setRegion] = useState('us');
+    const [activeRegion, setActiveRegion] = useState('us');
+    const [supportedRegions, setSupportedRegions] = useState<string[]>(['us', 'eu', 'jp', 'kr', 'cn']);
     const getNetworkSTA = async () => {
         try {
             setIsLoading(true);
@@ -61,6 +70,35 @@ export default function WifiNetworkPage() {
     }
     useEffect(() => {
         getNetworkSTA();
+    }, []);
+
+    const loadWifiRegion = async () => {
+        try {
+            const res = await getWifiRegionReq();
+            if (res.data?.region) setRegion(res.data.region);
+            if (res.data?.active_region) setActiveRegion(res.data.active_region);
+            if (Array.isArray(res.data?.supported_regions) && res.data.supported_regions.length > 0) {
+                setSupportedRegions(res.data.supported_regions);
+            }
+        } catch (error) {
+            console.error(error);
+        }
+    };
+    const handleWifiRegionChange = async (value: string) => {
+        const prev = region;
+        setRegion(value);
+        try {
+            const res = await setWifiRegionReq({ region: value });
+            if (res.data?.restart_required) {
+                toast.info(i18n._('sys.system_management.wifi_region_restart_hint'));
+            }
+        } catch (error) {
+            setRegion(prev);
+            console.error(error);
+        }
+    };
+    useEffect(() => {
+        loadWifiRegion();
     }, []);
     const isValidateWifiPassword = (password: string, minLength: number, maxLength: number) => {
         const allowedPattern = /^[a-zA-Z0-9!@#$%^&*()_+\-=[\]{}|;':",./<>?`~]+$/;
@@ -231,6 +269,44 @@ export default function WifiNetworkPage() {
     }
     return (
         <div className="mt-2">
+            <div className="flex gap-2 justify-between items-center mb-4">
+                <Label className="text-sm font-bold text-text-primary">{i18n._('sys.system_management.wifi_region')}</Label>
+                <div className="flex items-center gap-2">
+                    {region !== activeRegion && region && activeRegion && (
+                        <Tooltip mbEnhance side="bottom">
+                            <TooltipTrigger>
+                                <span className="inline-flex items-center gap-0.5 text-xs font-medium text-red-500 whitespace-nowrap cursor-pointer">
+                                    {i18n._('sys.system_management.wifi_region_pending_badge')}
+                                    <SvgIcon icon="info" className="w-3 h-3" />
+                                </span>
+                            </TooltipTrigger>
+                            <TooltipContent className="max-w-72 text-pretty">
+                                <div className="flex flex-col gap-1">
+                                    <span>{i18n._('sys.system_management.wifi_region_active')}: {getWifiRegionLabel(activeRegion, locale)}</span>
+                                    <span>{i18n._('sys.system_management.wifi_region_pending_to')}: {getWifiRegionLabel(region, locale)}</span>
+                                </div>
+                            </TooltipContent>
+                        </Tooltip>
+                    )}
+                    <Select
+                      value={region}
+                      onValueChange={handleWifiRegionChange}
+                    >
+                        <SelectTrigger>
+                            <SelectValue placeholder={i18n._('sys.system_management.wifi_region')}>
+                                {region ? getWifiRegionLabel(region, locale) : null}
+                            </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                            {supportedRegions.map((code) => (
+                                <SelectItem key={code} value={code}>
+                                    {getWifiRegionLabel(code, locale)}
+                                </SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                </div>
+            </div>
             {isLoading && <CommunicationSkeleton />}
             {!isLoading && (
                 <div className="relative">

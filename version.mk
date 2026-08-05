@@ -111,7 +111,7 @@ EXPECTED_FSBL_VERSION := 1.0.3.0
 # OTA packer: Major.Minor.Patch.(Security*100 + Build)
 # e.g. SiWG917-B.2.15.5.0.0.2  ->  2.15.5.2
 #      SiWG917-B.2.14.5.2.0.7  ->  2.14.5.207
-EXPECTED_WIFI_VERSION := 2.15.5.2
+EXPECTED_WIFI_VERSION := 2.16.5.108
 
 # Determine effective suffix for each component
 # Logic: 
