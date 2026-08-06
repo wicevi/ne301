@@ -22,6 +22,9 @@
 
 #define IS_TCP_IP_DUAL_MODE         1
 #define IS_ENABLE_NWP_DEBUG_PRINTS  0
+#if IS_TCP_IP_DUAL_MODE 
+#define IS_SELF_DHCP_SERVER         1
+#endif
 #ifdef SLI_SI91X_ENABLE_BLE
 #define IS_ENABLE_BLE               1
 #else
@@ -64,8 +67,11 @@ static sl_wifi_device_configuration_t device_configuration = {
                       ),
                    .tcp_ip_feature_bit_map     = (
 #if IS_TCP_IP_DUAL_MODE
-                        SL_SI91X_TCP_IP_FEAT_DHCPV4_CLIENT | SL_SI91X_TCP_IP_FEAT_DHCPV4_SERVER | SL_SI91X_TCP_IP_FEAT_ICMP | SL_SI91X_TCP_IP_FEAT_SSL
+                        SL_SI91X_TCP_IP_FEAT_DHCPV4_CLIENT | SL_SI91X_TCP_IP_FEAT_ICMP | SL_SI91X_TCP_IP_FEAT_SSL
                         | SL_SI91X_TCP_IP_FEAT_DNS_CLIENT |
+#if (IS_SELF_DHCP_SERVER == 0)
+                        SL_SI91X_TCP_IP_FEAT_DHCPV4_SERVER |
+#endif
 #else
                         SL_SI91X_TCP_IP_FEAT_BYPASS | 
 #endif
@@ -631,6 +637,9 @@ static err_t sl_net_ethernetif_init(struct netif *netif)
     } else if (interface == SL_WIFI_AP_INTERFACE) {
         // Accept broadcast address
         netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP;
+#if IS_SELF_DHCP_SERVER
+        netif->flags |= NETIF_FLAG_IGMP;
+#endif
     }
 #if LWIP_IPV6_MLD
     netif->flags |= NETIF_FLAG_MLD6;
@@ -1612,7 +1621,7 @@ sl_status_t sl_net_wifi_ap_up(sl_net_interface_t interface, sl_net_profile_id_t 
         }
     }
 
-#if IS_TCP_IP_DUAL_MODE
+#if IS_TCP_IP_DUAL_MODE && (IS_SELF_DHCP_SERVER == 0)
     status = SL_STATUS_NOT_SUPPORTED;
     if (interface == SL_NET_WIFI_AP_1_INTERFACE) {
         status = sl_si91x_configure_ip_address(&wifi_ap_profile.ip, SL_WIFI_AP_VAP_ID);
@@ -1656,6 +1665,9 @@ sl_status_t sl_net_wifi_ap_up(sl_net_interface_t interface, sl_net_profile_id_t 
                                     &netmask,
                                     &gateway);
     LOG_DRV_DEBUG(NETIF_NAME_STR_FMT " ip: %s\r\n", NETIF_NAME_PARAMETER(&ap_netif), ip4addr_ntoa((const ip4_addr_t *)&ap_netif.ip_addr));
+#if IS_SELF_DHCP_SERVER
+    if (err == ERR_OK) dhcps_start(&ap_netif);
+#endif
 #else
     if (SL_IP_MANAGEMENT_STATIC_IP == wifi_ap_profile.ip.mode) {
 #if LWIP_IPV4 && LWIP_IPV6
@@ -1831,9 +1843,13 @@ static sl_status_t ap_connected_event_handler(sl_wifi_event_t event, void *data,
     printf("Remote Client connected: ");
     print_mac_address((sl_mac_address_t *)mac_address);
     printf("\r\n");
+#if IS_TCP_IP_DUAL_MODE && IS_SELF_DHCP_SERVER
+    dhcps_add_client_by_mac(mac_address->octet);
+#else
     if (wifi_ap_profile.ip.mode == SL_IP_MANAGEMENT_LINK_LOCAL) {
         dhcps_add_client_by_mac(mac_address->octet);
     }
+#endif
 
     return SL_STATUS_OK;
 }
@@ -1848,9 +1864,13 @@ static sl_status_t ap_disconnected_event_handler(sl_wifi_event_t event, void *da
     printf("Remote Client disconnected: ");
     print_mac_address(mac_address);
     printf("\r\n");
+#if IS_TCP_IP_DUAL_MODE && IS_SELF_DHCP_SERVER
+    dhcps_del_client_by_mac(mac_address->octet);
+#else
     if (wifi_ap_profile.ip.mode == SL_IP_MANAGEMENT_LINK_LOCAL) {
         dhcps_del_client_by_mac(mac_address->octet);
     }
+#endif
 
     return SL_STATUS_OK;
 }
