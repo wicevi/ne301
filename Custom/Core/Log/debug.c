@@ -813,21 +813,16 @@ static aicam_result_t debug_init_ymodem(void)
 
 static void debug_uart_output(char c)
 {
-    // HAL_UART_Transmit(&H_UART, (uint8_t*)&c, 1, 10);
-    printf("%c", c);
+    /* Direct UART, not printf: stdout is line-buffered (newlib _fstat returns
+     * S_IFCHR), so printf("%c") holds each byte until a '\n' flush. Echo must
+     * appear per-keystroke, so bypass stdio and write the UART directly. */
+    HAL_UART_Transmit(&H_UART, (uint8_t*)&c, 1, 10);
 }
 
 static void debug_uart_output_str(const char* str)
 {
-    // if (str) {
-    //     while (*str) {
-    //         HAL_UART_Transmit(&H_UART, (uint8_t*)str, 1, 10);
-    //         str++;
-    //     }
-    // }
-
     if (str) {
-        printf("%s", str);
+        HAL_UART_Transmit(&H_UART, (uint8_t*)str, strlen(str), 100);
     }
 }
 
