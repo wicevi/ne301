@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import storageManagement from '@/services/api/storageManagement';
-import fileManagement, { type FileEntry, type FsType } from '@/services/api/fileManagement';
+import fileManagement, { type FileEntry, type FsType, PREVIEW_IMAGE_MAX_SIZE } from '@/services/api/fileManagement';
 import loginApis from '@/services/api/login';
 import FormatFlashDialog from '@/components/format-flash-dialog';
 import StorageManagementSkeleton from './skeleton';
@@ -47,6 +47,13 @@ function isTextFile(name: string): boolean {
 function isImageFile(name: string): boolean {
   const ext = name.split('.').pop()?.toLowerCase();
   return ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'svg', 'ico'].includes(ext || '');
+}
+
+/** Backend refuses to preview images > PREVIEW_IMAGE_MAX_SIZE (returns a JSON
+ *  error instead of bytes), so check up front and hide preview rather than
+ *  render a broken image. */
+function canPreviewImage(name: string, size: number): boolean {
+  return isImageFile(name) && size > 0 && size <= PREVIEW_IMAGE_MAX_SIZE;
 }
 
 function isEditableFile(name: string): boolean { return isTextFile(name); }
@@ -210,6 +217,10 @@ function FileBrowserModal({ fsType, onClose, availableMB, onStorageChange }: { f
 
   // preview
   const handlePreview = async (entry: FileEntry) => {
+    if (isImageFile(entry.name) && !canPreviewImage(entry.name, entry.size)) {
+      toast.error(t('preview_too_large'));
+      return;
+    }
     const fp = fullPath(entry.name);
     setPreviewFile(entry.name); setEditFile(null); setPreviewLoading(true);
     if (isImageFile(entry.name)) {
@@ -635,7 +646,7 @@ file,
                         >
                           {entry.name}
                         </button>
-                      ) : (isImageFile(entry.name) || isTextFile(entry.name)) ? (
+                      ) : (canPreviewImage(entry.name, entry.size) || isTextFile(entry.name)) ? (
                         <button
                           className="text-gray-800 hover:text-blue-600 hover:underline cursor-pointer text-left"
                           onClick={() => handlePreview(entry)}
@@ -668,7 +679,11 @@ file,
                         >
                           {entry.type === 'file' && (
                             <>
-                              {(isImageFile(entry.name) || isTextFile(entry.name)) && (
+                              {isImageFile(entry.name) && !canPreviewImage(entry.name, entry.size) ? (
+                                <span className="text-xs text-gray-400 px-2 self-center whitespace-nowrap">
+                                  🚫 {t('preview_too_large')}
+                                </span>
+                              ) : (isImageFile(entry.name) || isTextFile(entry.name)) && (
                                 <Button
                                   size="sm"
                                   variant="outline"
