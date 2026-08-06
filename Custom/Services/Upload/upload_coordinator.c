@@ -514,7 +514,7 @@ static aicam_result_t ensure_dirs(FS_Type_t fs)
              * cleanup_for_space + retry futile (a ~30s hang on a full FS). Leaving
              * s_ensured_fs unset lets the retry re-create the tree once cleanup
              * has freed space. */
-            LOG_SVC_ERROR("ensure_dirs: mkdir failed path=%s", dirs[i]);
+            LOG_SVC_ERROR("ensure_dirs: mkdir failed fs=%d path=%s", fs, dirs[i]);
             ret = AICAM_ERROR;
         }
     }
@@ -1580,7 +1580,10 @@ static aicam_result_t record_load(FS_Type_t fs, const char *id,
     struct stat st = {0};
     if (disk_file_stat(fs, img_path, &st) != 0 || st.st_size <= 0) {
         cJSON_Delete(*out_meta); *out_meta = NULL;
-        return AICAM_ERROR;
+        /* Distinct code so callers can tell "source image gone" (permanent)
+         * from other load failures (transient) and fail the record outright
+         * instead of retrying it forever. */
+        return AICAM_ERROR_NOT_FOUND;
     }
     uint8_t *jpeg = (uint8_t *)buffer_calloc(1, (size_t)st.st_size);
     if (!jpeg) { cJSON_Delete(*out_meta); *out_meta = NULL; return AICAM_ERROR_NO_MEMORY; }
@@ -1652,6 +1655,35 @@ static void record_mark_failed(FS_Type_t fs, const char *id, const char *err)
     }
 }
 
+/* Source image missing/unreadable — the record can never be uploaded, so this
+ * is a PERMANENT failure (not a transient network error). Bump retry, record
+ * the reason, and move straight to FAILED unconditionally (don't gate on
+ * retry_max_attempts). Without this, such a record stuck in PENDING forever:
+ * the load bailed before the normal retry-bump path, so retry_count never
+ * advanced and the flush pass retried it on every pass for nothing. */
+static void record_mark_source_missing(FS_Type_t fs, const char *id)
+{
+    char meta_path[128];
+    path_for_meta(meta_path, sizeof(meta_path), id);
+    cJSON *meta = NULL;
+    if (parse_meta_file(fs, meta_path, &meta) != AICAM_OK) return;
+
+    cJSON *rt = cJSON_GetObjectItem(meta, "retry_count");
+    int retry = (rt ? (int)rt->valueint : 0) + 1;
+    cJSON_ReplaceItemInObject(meta, "retry_count", cJSON_CreateNumber(retry));
+    cJSON_ReplaceItemInObject(meta, "last_error", cJSON_CreateString("source_image_missing"));
+
+    char tmp_path[136];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", meta_path);
+    if (write_meta_json(fs, tmp_path, meta) == AICAM_OK) {
+        if (disk_file_rename(fs, tmp_path, meta_path) != 0) (void)disk_file_remove(fs, tmp_path);
+    }
+    cJSON_Delete(meta);
+
+    (void)move_record(fs, id, RECORD_STATE_PENDING, RECORD_STATE_FAILED);
+    LOG_SVC_WARN("upload: %s source image missing — moved to FAILED", id);
+}
+
 /* MQTT pipeline publish: load + publish (no ack wait). On success returns
  * AICAM_OK and *out_msg_id = the MQTT packet id. On failure bumps retry and
  * returns the error. Caller frees nothing - jpeg is freed internally. */
@@ -1666,6 +1698,7 @@ static aicam_result_t record_publish_mqtt(FS_Type_t fs, const char *id, int *out
     upload_proto_t proto = UPLOAD_PROTO_MQTT;
 
     aicam_result_t r = record_load(fs, id, &meta, &jpeg, &jpeg_size, &m, &proto);
+    if (r == AICAM_ERROR_NOT_FOUND) { record_mark_source_missing(fs, id); return r; }
     if (r != AICAM_OK) return r;
 
     aicam_result_t result = AICAM_ERROR;
@@ -1821,6 +1854,7 @@ static aicam_result_t upload_one_record_webhook(FS_Type_t fs, const char *id)
     upload_proto_t proto = UPLOAD_PROTO_WEBHOOK;
 
     aicam_result_t r = record_load(fs, id, &meta, &jpeg, &jpeg_size, &m, &proto);
+    if (r == AICAM_ERROR_NOT_FOUND) { record_mark_source_missing(fs, id); return r; }
     if (r != AICAM_OK) return r;
 
     aicam_result_t result = AICAM_ERROR;
@@ -1874,7 +1908,10 @@ static aicam_result_t upload_one_record(FS_Type_t fs, const char *id,
     path_for_data(img_path, sizeof(img_path), id, 'p');
     struct stat st = {0};
     if (disk_file_stat(fs, img_path, &st) != 0 || st.st_size <= 0) {
+        /* Source image gone — permanent failure. Mark FAILED so it leaves
+         * PENDING instead of retrying forever (see record_mark_source_missing). */
         cJSON_Delete(meta);
+        record_mark_source_missing(fs, id);
         return AICAM_ERROR;
     }
     uint8_t *jpeg = (uint8_t *)buffer_calloc(1, (size_t)st.st_size);

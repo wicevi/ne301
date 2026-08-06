@@ -625,6 +625,7 @@
       "delete": "Delete",
       "delete_success": "File deleted successfully",
       "delete_failed": "Delete failed",
+      "deleting": "Deleting",
       "delete_confirm_title": "Confirm Deletion",
       "delete_confirm_msg": "Are you sure you want to delete",
       "delete_confirm_suffix": "? This action cannot be undone.",

@@ -122,6 +122,11 @@ function FileBrowserModal({ fsType, onClose, availableMB, onStorageChange }: { f
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [batchDeleteConfirm, setBatchDeleteConfirm] = useState<string | null>(null);
 
+  // delete in-progress (single or batch) — drives a blocking overlay so the
+  // user can't navigate/operate while files are being removed
+  const [deleting, setDeleting] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState<{ done: number; total: number } | null>(null);
+
   // kebab menu
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
 
@@ -155,6 +160,24 @@ function FileBrowserModal({ fsType, onClose, availableMB, onStorageChange }: { f
   }, [fsType]);
 
   useEffect(() => { loadDir(currentPath); }, [currentPath, loadDir]);
+
+  // Prune stale selections whenever the listing changes. A single delete or
+  // rename removes an entry that may still be batch-selected; without this the
+  // "delete selected (N)" count stays stale and batch-delete re-targets a file
+  // that's already gone (→ spurious error for that name).
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const names = new Set(entries.map((e) => e.name));
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((n) => {
+        if (names.has(n)) next.add(n);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [entries]);
 
   // close floating action bar on outside click
   useEffect(() => {
@@ -282,31 +305,41 @@ fp,
     if (!deleteTarget || deleteInput !== deleteTarget.name) return;
     const target = deleteTarget;
     setDeleteTarget(null);  // close dialog immediately to prevent double-click
+    setDeleting(true);
+    setDeleteProgress(null);
     try {
       await fileManagement.deleteFile(fsType, target.path, target.isDir);
       toast.success(t('delete_success'));
       onStorageChange();
       loadDir(currentPath);
     } catch { toast.error(t('delete_failed')); }
+    setDeleting(false);
+    setDeleteProgress(null);
   };
 
   const handleBatchDelete = async () => {
     if (selected.size === 0) return;
     const toDelete = Array.from(selected);
     setBatchDeleting(true);
+    setDeleting(true);
+    setDeleteProgress({ done: 0, total: toDelete.length });
     setBatchDeleteConfirm(null);  // close dialog immediately
     setSelected(new Set());
     let ok = 0;
-    for (const name of toDelete) {
+    for (let i = 0; i < toDelete.length; i++) {
+      const name = toDelete[i];
       const entry = entries.find(e => e.name === name);
       const fp = fullPath(name);
       const isDir = entry?.type === 'dir';
       // eslint-disable-next-line no-await-in-loop
       try { await fileManagement.deleteFile(fsType, fp, isDir); ok++; } catch { toast.error(`${t('delete_failed')}: ${name}`); }
+      setDeleteProgress({ done: i + 1, total: toDelete.length });
     }
     if (ok > 0) toast.success(t('delete_success'));
     onStorageChange();
     setBatchDeleting(false);
+    setDeleting(false);
+    setDeleteProgress(null);
     setSelected(new Set());
     setBatchDeleteConfirm(null);
     loadDir(currentPath);
@@ -978,6 +1011,26 @@ file,
               <p className="text-sm text-gray-500 leading-relaxed">
                 {t('formatting_msg')}
               </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Delete in-progress overlay (blocks all interaction) ── */}
+        {deleting && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60">
+            <div className="bg-white rounded-lg shadow-2xl p-8 mx-4 text-center space-y-3 max-w-sm w-full">
+              <div className="flex justify-center">
+                <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              </div>
+              <h3 className="text-lg font-bold text-gray-800">🗑 {t('deleting')}…</h3>
+              {deleteProgress && (
+                <>
+                  <p className="text-sm text-gray-500">{deleteProgress.done} / {deleteProgress.total}</p>
+                  <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="h-full bg-blue-500 transition-all" style={{ width: `${deleteProgress.total ? (deleteProgress.done * 100) / deleteProgress.total : 0}%` }} />
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}

@@ -334,6 +334,12 @@ static int storage_lfs_stat(void *context, const char *filename, struct stat *st
         if (st) {
             memset(st, 0, sizeof(struct stat));
             st->st_size = info.size; // Fill file size
+            /* Classify dir vs regular file — matches sd_filex_stat(). Without
+             * this st_mode stays 0, so S_IFDIR/S_ISDIR checks (e.g. the file
+             * delete handler's non-empty-directory detection) never match on
+             * flash and a non-empty folder deletion reports a generic
+             * INTERNAL_ERROR instead of DIR_NOT_EMPTY. */
+            st->st_mode = (info.type == LFS_TYPE_DIR) ? (S_IFDIR | 0755) : (S_IFREG | 0644);
         }
         return 0; // File exists
     }

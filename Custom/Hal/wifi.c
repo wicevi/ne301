@@ -313,7 +313,7 @@ static int32_t sl_si91x_app_task_fw_update_via_xmodem(uint8_t *rx_data, uint32_t
                 
                 chunk_check = (fw_image_size + FW_HEADER_SIZE + SI91X_CHUNK_SIZE - 1) / SI91X_CHUNK_SIZE;
                 one_time = 0;
-                LOG_SIMPLE("Firmware upgrade started. Total chunks: %lu\r\n", chunk_check);
+                printf("Firmware upgrade started. Total chunks: %lu\r\n", chunk_check);
             }
 
             if (chunk_cnt >= chunk_check) {
@@ -333,7 +333,7 @@ static int32_t sl_si91x_app_task_fw_update_via_xmodem(uint8_t *rx_data, uint32_t
             // Execute firmware upgrade transfer
             status = sl_si91x_bl_upgrade_firmware(rx_data, SI91X_CHUNK_SIZE, transfer_mode);
             if (status != SL_STATUS_OK) {
-                LOG_SIMPLE("ERROR at chunk %lu: 0x%lx\r\n", chunk_cnt, status);
+                printf("ERROR at chunk %lu: 0x%lx\r\n", chunk_cnt, status);
                 return status;
             }
 
@@ -343,30 +343,32 @@ static int32_t sl_si91x_app_task_fw_update_via_xmodem(uint8_t *rx_data, uint32_t
             
             // Transfer completion handling
             if (chunk_cnt == chunk_check) {
-                LOG_SIMPLE("\r\nFirmware upgrade completed\r\n");
+                printf("\r\nFirmware upgrade completed\r\n");
                 si91x_wlan_app_cb.state = SI91X_WLAN_FW_UPGRADE_DONE;
             }
             break;
         }
         case SI91X_WLAN_FW_UPGRADE_DONE: {
+            sl_net_deinit(SL_NET_WIFI_CLIENT_INTERFACE);
+            osDelay(1000);
             status = sl_net_init(SL_NET_WIFI_CLIENT_INTERFACE, NULL, NULL, NULL);
             if (status != SL_STATUS_OK) {
+                printf("Failed to start Wi-Fi client interface: 0x%lx\r\n", status);
                 return status;
             }
 
             status = sl_wifi_get_firmware_version(&fw_version);
             if (status == SL_STATUS_OK) {
-                LOG_SIMPLE("New firmware version: ");
+                printf("New firmware version: ");
                 print_firmware_version(&fw_version);
             }
 
             t_end = osKernelGetTickCount();
             xfer_time = t_end - t_start;
             uint32_t secs = xfer_time / 1000;
-            LOG_SIMPLE("\r\nFirmware upgrade time: %d seconds\r\n", (int)secs);
-            LOG_SIMPLE("\r\nDEMO COMPLETED\r\n");
+            printf("\r\nFirmware upgrade time: %d seconds\r\n", (int)secs);
+            printf("\r\nDEMO COMPLETED\r\n");
 
-            sl_net_deinit(SL_NET_WIFI_CLIENT_INTERFACE);
             break;
         }
         default:
@@ -689,9 +691,21 @@ static void wifi_update_process(void)
         return;
     }
     
-    status = firmware_upgrade_from_file(WIFI_FIR_NAME);
-    if (status != 0) {
+    /* Pick the upgrade source from whichever trigger set wifi_mode=update:
+     * web OTA (wifi_mark_update_pending) writes FLASH → push the .rps at
+     * WIFI_FW_BASE; first-boot recovery (wifi_enter_update_mode) writes FILE
+     * → load `siwg917` from the file system (SD), flash as fallback. Absent
+     * key (old device) defaults to FILE to preserve the recovery order. This
+     * stops a stray siwg917 on SD from hijacking a web-uploaded firmware. */
+    char fw_source[8] = {0};
+    if (storage_nvs_read(NVS_FACTORY, NVS_KEY_WIFI_FW_SOURCE, fw_source, sizeof(fw_source)) > 0 &&
+        strcmp(fw_source, WIFI_FW_SOURCE_FLASH) == 0) {
         status = firmware_upgrade_from_flash();
+    } else {
+        status = firmware_upgrade_from_file(WIFI_FIR_NAME);
+        if (status != 0) {
+            status = firmware_upgrade_from_flash();
+        }
     }
     
     sl_net_deinit(SL_NET_WIFI_CLIENT_INTERFACE);
@@ -732,6 +746,7 @@ static void wifi_ant_process(void)
 
 void wifi_enter_update_mode(void)
 {
+    storage_nvs_write(NVS_FACTORY, NVS_KEY_WIFI_FW_SOURCE, WIFI_FW_SOURCE_FILE, strlen(WIFI_FW_SOURCE_FILE));
     storage_nvs_write(NVS_FACTORY, NVS_KEY_WIFI_MODE, WIFI_MODE_UPDATE, strlen(WIFI_MODE_UPDATE));
     LOG_SIMPLE("wifi update, System reset...\r\n");
     osDelay(200);
@@ -744,6 +759,7 @@ void wifi_enter_update_mode(void)
 
 void wifi_mark_update_pending(void)
 {
+    storage_nvs_write(NVS_FACTORY, NVS_KEY_WIFI_FW_SOURCE, WIFI_FW_SOURCE_FLASH, strlen(WIFI_FW_SOURCE_FLASH));
     storage_nvs_write(NVS_FACTORY, NVS_KEY_WIFI_MODE, WIFI_MODE_UPDATE, strlen(WIFI_MODE_UPDATE));
     LOG_SIMPLE("wifi update pending, will apply on next reboot\r\n");
 }

@@ -473,13 +473,26 @@ int sd_filex_remove(void *context, const char *path)
     if (sd_resolve_file_path(media, path, fx_path, sizeof(fx_path)) != 0) return -1;
     sd_lock();
     UINT status = fx_file_delete(media, fx_path);
+    if (status == FX_NOT_A_FILE) {
+        /* fx_file_delete cannot remove a directory (returns FX_NOT_A_FILE).
+         * Retry with fx_directory_delete. Without this, any directory removal
+         * on SD — e.g. upload_coordinator's best-effort empty hour/date dir
+         * cleanup, and recursive folder delete — failed with 0x05 every time. */
+        status = fx_directory_delete(media, fx_path);
+    }
     if (status == FX_SUCCESS) {
         UINT fs = fx_media_flush(media);
         if (fs != FX_SUCCESS) LOG_DRV_ERROR("fx_media_flush after delete failed: 0x%02X\r\n", fs);
     }
     sd_unlock();
     if (status != FX_SUCCESS) {
-        LOG_DRV_ERROR("fx_file_delete failed: 0x%02X, path=%s\r\n", status, path);
+        /* FX_DIR_NOT_EMPTY (0x10) is the expected outcome of best-effort
+         * empty-dir cleanup (e.g. deleting a record whose hour dir still holds
+         * other records) — not an error. Stay silent like flash's lfs_remove,
+         * which also returns failure for a non-empty dir without logging. */
+        if (status != FX_DIR_NOT_EMPTY) {
+            LOG_DRV_ERROR("fx delete failed: 0x%02X path=%s\r\n", status, path);
+        }
         return -(int)status;
     }
     return 0;
@@ -820,6 +833,8 @@ int sd_filex_mkdir(void *context, const char *path)
     if (status == FX_SUCCESS) {
         UINT fs = fx_media_flush(media);
         if (fs != FX_SUCCESS) LOG_DRV_ERROR("fx_media_flush after mkdir failed: 0x%02X\r\n", fs);
+    } else {
+        LOG_DRV_ERROR("fx_directory_create failed: 0x%02X path=%s\r\n", status, fx_path);
     }
     sd_unlock();
     return (status == FX_SUCCESS) ? 0 : -1;
