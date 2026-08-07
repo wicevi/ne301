@@ -58,4 +58,5 @@ Custom/Common/Lib/SiliconLabs_SDK/**/*.slcc
 
 # Claude AI files
 .claude/
+CLAUDE.md
 .codegraph/

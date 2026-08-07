@@ -291,6 +291,8 @@ void mmhal_wlan_deinit(void)
         mmosal_semb_delete(dma_semb_handle);
         dma_semb_handle = NULL;
     }
+    spi_irq_handler = NULL;
+    busy_irq_handler = NULL;
 }
 
 void mmhal_wlan_wake_assert(void)
@@ -327,6 +329,7 @@ void mmhal_wlan_set_busy_irq_enabled(bool enabled)
     }
     else
     {
+        printf("mmhal_wlan_set_busy_irq_enabled: disabling busy irq\n");
         HAL_NVIC_DisableIRQ(MM_HALOW_BUSY_IRQn);
     }
 }

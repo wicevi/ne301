@@ -30,7 +30,14 @@
 
 
 /* ==================== Communication Service Context ==================== */
+#define BACKGROUND_EVT_SCAN     (1UL << 0)
+#define BACKGROUND_EVT_DECISION (1UL << 1)
 uint8_t background_scan_task_stack[1024 * 4] ALIGN_32 IN_PSRAM;
+/* Startup decision runs on its own thread: the startup-timeout timer callback
+ * runs on the small timer thread and may only set an event; the decision/connect
+ * path (netif up can block up to 30 s + deep calls) needs a large stack and must
+ * not share the scan thread (scan blocks ~3 s and would be starved). */
+uint8_t startup_decision_task_stack[1024 * 16] ALIGN_32 IN_PSRAM;
 
 
 typedef struct {
@@ -40,8 +47,9 @@ typedef struct {
     communication_service_config_t config;
     communication_service_stats_t stats;
     osThreadId_t scan_task_id;
-    osSemaphoreId_t scan_semaphore_id;
-    
+    osThreadId_t decision_task_id;
+    osEventFlagsId_t background_events;
+
     // Network interface management
     network_interface_status_t interfaces[MAX_NETWORK_INTERFACES];
     uint32_t interface_count;
@@ -170,6 +178,10 @@ static void update_type_info_cache(void);
 static communication_type_t get_highest_priority_connected_type(void);
 static const char* get_interface_name_for_type(communication_type_t type);
 static void check_and_handle_hardware_change(void);
+static void communication_stop_conflicting(communication_type_t target);
+#if NETIF_WIFI_HALOW_IS_ENABLE
+static aicam_result_t communication_halow_connect_startup(uint32_t timeout_ms, aicam_bool_t scan_before_connect);
+#endif
 
 /* ==================== Startup Connection Decision ==================== */
 static void check_all_ready_and_decide(void);
@@ -590,15 +602,44 @@ static aicam_result_t try_connect_known_networks(aicam_bool_t scan_before_connec
 
 static void background_scan_task(void *argument)
 {
-    for(;;) {
-        osSemaphoreAcquire(g_communication_service.scan_semaphore_id, osWaitForever);
-        aicam_result_t result = communication_start_network_scan(NULL);
-        if (result != AICAM_OK) {
-            LOG_SVC_ERROR("Failed to start network scan: %d", result);
+    (void)argument;
+    for (;;) {
+        uint32_t ev = osEventFlagsWait(g_communication_service.background_events,
+                                       BACKGROUND_EVT_SCAN, osFlagsWaitAny, osWaitForever);
+        if (ev & BACKGROUND_EVT_SCAN) {
+            aicam_result_t result = communication_start_network_scan(NULL);
+            if (result != AICAM_OK) {
+                LOG_SVC_ERROR("Failed to start network scan: %d", result);
+            }
         }
-        osDelay(1000);
     }
-    osThreadExit();
+}
+
+/* Runs the startup connection decision on its own thread (large stack). The
+ * startup-timeout timer callback only sets the event flag; the decision path
+ * (switch -> netif up, can block up to 30 s + deep libmorse calls + printf)
+ * must not run on the small timer thread, nor share the scan thread (scan
+ * blocks ~3 s and would be starved while the decision blocks). */
+static void startup_decision_task(void *argument)
+{
+    (void)argument;
+    for (;;) {
+        uint32_t ev = osEventFlagsWait(g_communication_service.background_events,
+                                       BACKGROUND_EVT_DECISION, osFlagsWaitAny, osWaitForever);
+        if ((ev & BACKGROUND_EVT_DECISION) && !g_communication_service.startup_decision_made) {
+            LOG_SVC_WARN("Startup timeout (%u ms) reached, forcing connection decision", STARTUP_TIMEOUT_MS);
+            LOG_SVC_INFO("Ready status at timeout: WiFi=%s, HaLow=%s, Cellular=%s, PoE=%s",
+                 g_communication_service.wifi_sta_ready ? "ready" : "waiting",
+#if NETIF_WIFI_HALOW_IS_ENABLE
+                 g_communication_service.halow_ready ? "ready" : "waiting",
+#else
+                 "n/a",
+#endif
+                 g_communication_service.cellular_ready ? "ready" : "waiting",
+                 g_communication_service.poe_ready ? "ready" : "waiting");
+            make_startup_connection_decision();
+        }
+    }
 }
 
 /**
@@ -606,7 +647,7 @@ static void background_scan_task(void *argument)
  */
 void start_network_scan(void)
 {
-    osSemaphoreRelease(g_communication_service.scan_semaphore_id);
+    osEventFlagsSet(g_communication_service.background_events, BACKGROUND_EVT_SCAN);
 }
 
 /* ==================== Helper Functions ==================== */
@@ -1274,16 +1315,26 @@ aicam_result_t communication_service_start(void)
         LOG_SVC_INFO("Startup timeout timer started (%u ms)", STARTUP_TIMEOUT_MS);
     }
 
-    // Start background scan task
+    // Background scan task (scan blocks ~3 s, keep it isolated from the decision)
     const osThreadAttr_t scan_task_attr = {
         .name = "BackgroundScanTask",
         .stack_size = sizeof(background_scan_task_stack),
         .stack_mem = background_scan_task_stack,
         .priority = osPriorityBelowNormal,
     };
-    g_communication_service.scan_semaphore_id = osSemaphoreNew(1, 0, NULL);
-    g_communication_service.scan_task_id = osThreadNew(background_scan_task, NULL, &scan_task_attr);
-    
+    // Startup decision task (connect path blocks up to 30 s, needs large stack)
+    const osThreadAttr_t decision_task_attr = {
+        .name = "StartupDecisionTask",
+        .stack_size = sizeof(startup_decision_task_stack),
+        .stack_mem = startup_decision_task_stack,
+        .priority = osPriorityNormal,
+    };
+    g_communication_service.background_events = osEventFlagsNew(NULL);
+    if (g_communication_service.background_events != NULL) {
+        g_communication_service.scan_task_id = osThreadNew(background_scan_task, NULL, &scan_task_attr);
+        g_communication_service.decision_task_id = osThreadNew(startup_decision_task, NULL, &decision_task_attr);
+    }
+
     g_communication_service.running = AICAM_TRUE;
     g_communication_service.state = SERVICE_STATE_RUNNING;
     
@@ -1337,9 +1388,16 @@ aicam_result_t communication_service_start(void)
 #endif
 
 #if NETIF_WIFI_HALOW_IS_ENABLE
+    /* PoE and HaLow share EXTI15 (PD15 vs PA15) - hardware-exclusive, so only
+     * start the higher-priority one: PoE first, unless preferred_type is HaLow. */
+    aicam_bool_t halow_suppressed = AICAM_FALSE;
+#if NETIF_ETH_WAN_IS_ENABLE
+    halow_suppressed = g_communication_service.config.auto_start_poe &&
+                       g_communication_service.preferred_type != COMM_TYPE_HALOW;
+#endif
     if (!cellular_first &&
         g_communication_service.config.auto_start_halow &&
-        g_communication_service.halow_available) {
+        g_communication_service.halow_available && !halow_suppressed) {
         LOG_SVC_INFO("Starting async HaLow initialization...");
         g_communication_service.halow_init_started = AICAM_TRUE;
         aicam_result_t halow_result = netif_init_manager_init_async(NETIF_NAME_WIFI_HALOW);
@@ -1354,7 +1412,8 @@ aicam_result_t communication_service_start(void)
 #endif
 
 #if NETIF_ETH_WAN_IS_ENABLE
-    if (g_communication_service.config.auto_start_poe) {
+    if (g_communication_service.config.auto_start_poe &&
+        g_communication_service.preferred_type != COMM_TYPE_HALOW) {
         LOG_SVC_INFO("Starting async PoE/Ethernet initialization...");
         aicam_result_t poe_result = netif_init_manager_init_async(NETIF_NAME_ETH_WAN);
         if (poe_result != AICAM_OK) {
@@ -1978,19 +2037,12 @@ static void startup_timeout_callback(void *argument)
         return;
     }
     
-    LOG_SVC_WARN("Startup timeout (%u ms) reached, forcing connection decision", STARTUP_TIMEOUT_MS);
-    LOG_SVC_INFO("Ready status at timeout: WiFi=%s, HaLow=%s, Cellular=%s, PoE=%s",
-                 g_communication_service.wifi_sta_ready ? "ready" : "waiting",
-#if NETIF_WIFI_HALOW_IS_ENABLE
-                 g_communication_service.halow_ready ? "ready" : "waiting",
-#else
-                 "n/a",
-#endif
-                 g_communication_service.cellular_ready ? "ready" : "waiting",
-                 g_communication_service.poe_ready ? "ready" : "waiting");
-    
-    // Force decision with whatever is ready
-    make_startup_connection_decision();
+    /* Timers run on the tiny ThreadX timer thread: ANY printf/LOG here overflows
+     * the stack (newlib printf is deep) and HardFaults (LR=0xEFEFEFEF). No logging,
+     * no blocking - just signal the dedicated decision thread which logs and runs. */
+    if (g_communication_service.background_events != NULL) {
+        osEventFlagsSet(g_communication_service.background_events, BACKGROUND_EVT_DECISION);
+    }
 }
 
 /**
@@ -2038,6 +2090,68 @@ static communication_type_t get_highest_priority_available_type(void)
  * 2. If preferred_type is not set: select by priority (PoE > HaLow > Cellular > WiFi)
  * 3. Connection failure does NOT trigger fallback to other types
  */
+#if NETIF_WIFI_HALOW_IS_ENABLE
+/* Startup-only HaLow connect. Separated from communication_switch_type_sync
+ * (the runtime user-switch API) so an AUTO-selected HaLow is not treated as a
+ * user-chosen type: no selected_type / preferred pinning here - those stay AUTO
+ * for an automatic startup choice. */
+static aicam_result_t communication_halow_connect_startup(uint32_t timeout_ms,
+                                                          aicam_bool_t scan_before_connect)
+{
+    aicam_result_t connect_result;
+
+    /* HaLow is exclusive: stop PoE (EXTI15 conflict) + 4G */
+    communication_stop_conflicting(COMM_TYPE_HALOW);
+
+    if (!netif_init_manager_is_ready(NETIF_NAME_WIFI_HALOW)) {
+        if (!g_communication_service.halow_init_started) {
+            g_communication_service.halow_init_started = AICAM_TRUE;
+            (void)netif_init_manager_init_async(NETIF_NAME_WIFI_HALOW);
+        }
+        connect_result = netif_init_manager_wait_ready(NETIF_NAME_WIFI_HALOW, timeout_ms);
+        if (connect_result == AICAM_OK) {
+            g_communication_service.halow_initialized = AICAM_TRUE;
+            g_communication_service.halow_available = AICAM_TRUE;
+            g_communication_service.halow_ready = AICAM_TRUE;
+        }
+    } else {
+        connect_result = AICAM_OK;
+        g_communication_service.halow_initialized = AICAM_TRUE;
+        g_communication_service.halow_available = AICAM_TRUE;
+        g_communication_service.halow_ready = AICAM_TRUE;
+    }
+
+    if (connect_result == AICAM_OK && g_communication_service.halow_initialized) {
+        connect_result = apply_halow_config_from_json();
+
+        if (connect_result == AICAM_OK) {
+            network_service_config_t net_cfg;
+            if (scan_before_connect &&
+                json_config_get_network_service_config(&net_cfg) == AICAM_OK &&
+                net_cfg.halow_ssid[0] != '\0') {
+                if (!halow_scan_contains_ssid(net_cfg.halow_ssid, 0U)) {
+                    connect_result = AICAM_ERROR;
+                }
+            }
+        }
+
+        if (connect_result == AICAM_OK) {
+            connect_result = (aicam_result_t)nm_ctrl_netif_up(NETIF_NAME_WIFI_HALOW);
+        }
+    } else if (connect_result == AICAM_OK) {
+        connect_result = AICAM_ERROR_UNAVAILABLE;
+    }
+
+    if (connect_result == AICAM_OK) {
+        g_communication_service.active_type = COMM_TYPE_HALOW;
+        (void)service_set_sta_ready(AICAM_TRUE);
+        device_service_update_communication_type();
+        LOG_SVC_INFO("Successfully connected to HaLow at startup");
+    }
+    return connect_result;
+}
+#endif
+
 static void make_startup_connection_decision(void)
 {
     if (g_communication_service.startup_decision_made) {
@@ -2146,8 +2260,10 @@ static void make_startup_connection_decision(void)
             case COMM_TYPE_HALOW:
 #if NETIF_WIFI_HALOW_IS_ENABLE
                 if (g_communication_service.halow_initialized) {
-                    communication_switch_result_t halow_sw_result;
-                    connect_result = communication_switch_type_sync(COMM_TYPE_HALOW, &halow_sw_result,
+                    /* Startup connect: do NOT use communication_switch_type_sync
+                     * (runtime user-switch API) - an AUTO-selected HaLow must not
+                     * be pinned as a user-chosen type. */
+                    connect_result = communication_halow_connect_startup(
                             g_communication_service.config.connection_timeout_ms,
                             scan_before_connect);
                     if (connect_result != AICAM_OK) {
@@ -2265,8 +2381,12 @@ static void check_all_ready_and_decide(void)
 #endif
 
 #if NETIF_ETH_WAN_IS_ENABLE
-    aicam_bool_t waiting_for_poe = g_communication_service.config.auto_start_poe && 
-                                   !g_communication_service.poe_ready;
+    /* Wait for PoE only when it is actually started. With preferred=HaLow the
+     * PoE init is skipped (poe_ready stays false), so waiting here would block
+     * the startup decision and HaLow would init but never connect. */
+    aicam_bool_t poe_starting = g_communication_service.config.auto_start_poe &&
+                                g_communication_service.preferred_type != COMM_TYPE_HALOW;
+    aicam_bool_t waiting_for_poe = poe_starting && !g_communication_service.poe_ready;
 #else
     aicam_bool_t waiting_for_poe = AICAM_FALSE;
 #endif
@@ -2794,6 +2914,11 @@ static void on_halow_ready(const char *if_name, aicam_result_t result)
         LOG_SVC_INFO("HaLow initialized and ready");
         g_communication_service.halow_initialized = AICAM_TRUE;
         g_communication_service.halow_available = AICAM_TRUE;
+        /* HaLow is exclusive with PoE (shared EXTI15) and 4G: treat them as unavailable. */
+        g_communication_service.poe_available = AICAM_FALSE;
+#if NETIF_4G_CAT1_IS_ENABLE
+        g_communication_service.cellular_available = AICAM_FALSE;
+#endif
 
         if (!g_communication_service.switch_in_progress) {
             if (apply_halow_config_from_json() != AICAM_OK) {
@@ -2965,6 +3090,17 @@ static void on_poe_ready(const char *if_name, aicam_result_t result)
         LOG_SVC_INFO("[PoE] Hardware initialized in %u ms", init_time);
         g_communication_service.poe_initialized = AICAM_TRUE;
         g_communication_service.poe_available = AICAM_TRUE;
+        /* PoE is exclusive with HaLow (shared EXTI15): treat HaLow as unavailable. */
+        g_communication_service.halow_available = AICAM_FALSE;
+#if NETIF_4G_CAT1_IS_ENABLE
+        /* PoE and 4G do not conflict; probe 4G so it stays selectable/usable. */
+        if (g_communication_service.config.auto_start_cellular &&
+            !g_communication_service.cellular_init_started) {
+            g_communication_service.cellular_init_started = AICAM_TRUE;
+            LOG_SVC_INFO("[PoE] Starting async 4G probe (PoE/4G coexist)");
+            (void)netif_init_manager_init_async(NETIF_NAME_4G_CAT1);
+        }
+#endif
         
         // Load saved PoE configuration for quick recovery
         poe_config_persist_t poe_cfg;
@@ -3034,12 +3170,17 @@ static void on_poe_ready(const char *if_name, aicam_result_t result)
         LOG_SVC_INFO("[PoE] Ready for connection (total init: %u ms)", init_time);
         
     } else {
-        LOG_SVC_ERROR("[PoE] Init failed: %d (status: %s)", result, 
+        LOG_SVC_ERROR("[PoE] Init failed: %d (status: %s)", result,
                      poe_status_code_to_string(POE_STATUS_ERROR));
         g_communication_service.poe_available = AICAM_FALSE;
         g_communication_service.poe_initialized = AICAM_FALSE;
         g_communication_service.stats.failed_connections++;
         g_communication_service.stats.last_error_code = result;
+#if NETIF_WIFI_HALOW_IS_ENABLE
+        /* PoE absent: HaLow was suppressed at boot (PoE priority) - fall back to probing it. */
+        (void)comm_start_halow_init_fallback(
+            "[PoE] Init failed, starting fallback HaLow initialization...");
+#endif
     }
     
     // Check if all interfaces ready, then make connection decision
@@ -3258,6 +3399,48 @@ aicam_bool_t communication_is_type_connected(communication_type_t type)
     return (g_communication_service.type_info[type].status == COMM_STATUS_CONNECTED);
 }
 
+/* PoE and HaLow share EXTI15 (PD15 vs PA15), so they are hardware-exclusive;
+ * HaLow also conflicts with 4G. PoE and 4G do NOT conflict and can coexist.
+ * When switching to `target`, deinit every other netif it conflicts with. */
+static void communication_stop_conflicting(communication_type_t target)
+{
+    (void)target;
+#if NETIF_WIFI_HALOW_IS_ENABLE
+    if (target != COMM_TYPE_HALOW) {
+        netif_state_t st = nm_get_netif_state(NETIF_NAME_WIFI_HALOW);
+        if (st != NETIF_STATE_DEINIT) {
+            LOG_SVC_INFO("%s switch: stopping/deinit HaLow to enforce mutual exclusion",
+                         communication_type_to_string(target));
+            (void)nm_ctrl_netif_down(NETIF_NAME_WIFI_HALOW);
+            (void)nm_ctrl_netif_deinit(NETIF_NAME_WIFI_HALOW);
+            g_communication_service.halow_initialized = AICAM_FALSE;
+        }
+    }
+#endif
+#if NETIF_ETH_WAN_IS_ENABLE
+    if (target == COMM_TYPE_HALOW) {
+        netif_state_t st = nm_get_netif_state(NETIF_NAME_ETH_WAN);
+        if (st != NETIF_STATE_DEINIT) {
+            LOG_SVC_INFO("HaLow switch: stopping/deinit PoE to enforce mutual exclusion");
+            (void)nm_ctrl_netif_down(NETIF_NAME_ETH_WAN);
+            (void)nm_ctrl_netif_deinit(NETIF_NAME_ETH_WAN);
+            g_communication_service.poe_initialized = AICAM_FALSE;
+        }
+    }
+#endif
+#if NETIF_4G_CAT1_IS_ENABLE
+    if (target == COMM_TYPE_HALOW) {
+        netif_state_t st = nm_get_netif_state(NETIF_NAME_4G_CAT1);
+        if (st != NETIF_STATE_DEINIT) {
+            LOG_SVC_INFO("HaLow switch: stopping/deinit cellular to enforce mutual exclusion");
+            (void)nm_ctrl_netif_down(NETIF_NAME_4G_CAT1);
+            (void)nm_ctrl_netif_deinit(NETIF_NAME_4G_CAT1);
+            g_communication_service.cellular_initialized = AICAM_FALSE;
+        }
+    }
+#endif
+}
+
 aicam_result_t communication_switch_type(communication_type_t type,
                                          communication_switch_callback_t callback)
 {
@@ -3385,15 +3568,9 @@ aicam_result_t communication_switch_type_sync(communication_type_t type,
 #if NETIF_WIFI_HALOW_IS_ENABLE
         case COMM_TYPE_HALOW:
         {
-#if NETIF_4G_CAT1_IS_ENABLE
-            netif_state_t cell_state = nm_get_netif_state(NETIF_NAME_4G_CAT1);
-            if (cell_state != NETIF_STATE_DEINIT) {
-                LOG_SVC_INFO("HaLow switch: stopping/deinit cellular to enforce mutual exclusion");
-                (void)nm_ctrl_netif_down(NETIF_NAME_4G_CAT1);
-                (void)nm_ctrl_netif_deinit(NETIF_NAME_4G_CAT1);
-                g_communication_service.cellular_initialized = AICAM_FALSE;
-            }
-#endif
+            /* HaLow is exclusive: stop PoE (EXTI15 conflict) + 4G */
+            communication_stop_conflicting(COMM_TYPE_HALOW);
+
             if (!netif_init_manager_is_ready(NETIF_NAME_WIFI_HALOW)) {
                 if (!g_communication_service.halow_init_started) {
                     g_communication_service.halow_init_started = AICAM_TRUE;
@@ -3444,21 +3621,16 @@ aicam_result_t communication_switch_type_sync(communication_type_t type,
 #endif
             
         case COMM_TYPE_CELLULAR:
-#if NETIF_WIFI_HALOW_IS_ENABLE
-            {
-                netif_state_t hw_state = nm_get_netif_state(NETIF_NAME_WIFI_HALOW);
-                if (hw_state != NETIF_STATE_DEINIT) {
-                    LOG_SVC_INFO("Cellular switch: stopping/deinit HaLow to enforce mutual exclusion");
-                    (void)nm_ctrl_netif_down(NETIF_NAME_WIFI_HALOW);
-                    (void)nm_ctrl_netif_deinit(NETIF_NAME_WIFI_HALOW);
-                    g_communication_service.halow_initialized = AICAM_FALSE;
-                }
-            }
-#endif
+            /* 4G conflicts with HaLow only; PoE coexists */
+            communication_stop_conflicting(COMM_TYPE_CELLULAR);
+
             connect_result = communication_cellular_connect();
             break;
             
         case COMM_TYPE_POE:
+            /* PoE conflicts with HaLow (EXTI15); 4G coexists */
+            communication_stop_conflicting(COMM_TYPE_POE);
+
             connect_result = communication_poe_connect();
             break;
             

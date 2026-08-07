@@ -1041,10 +1041,26 @@ int CMW_CAMERA_PIPE_VsyncEventCallback(uint32_t pipe)
   return HAL_OK;
 }
 
+/* DCMIPP pipe error recording (ISR-safe: only writes globals, no printf in IRQ -
+ * printf in interrupt can HardFault, see spi.c HAL_SPI_ErrorCallback). */
+static struct {
+    uint32_t pipe;
+    uint32_t pipe1_ovr;
+    uint32_t pipe2_ovr;
+    uint32_t axi_err;
+    uint32_t frame_id;
+    uint32_t count;
+} s_camera_pipe_err = {0};
+
 void CMW_CAMERA_PIPE_ErrorCallback(uint32_t pipe)
 {
-    /* Handle DCMIPP pipe error without asserting.
-     * For now just log and keep running; detailed recovery can be added if needed. */
+    DCMIPP_HandleTypeDef *hdcmipp = CMW_CAMERA_GetDCMIPPHandle();
+    s_camera_pipe_err.pipe = pipe;
+    s_camera_pipe_err.pipe1_ovr = (hdcmipp != NULL) ? (__HAL_DCMIPP_GET_FLAG(hdcmipp, DCMIPP_FLAG_PIPE1_OVR) ? 1U : 0U) : 0U;
+    s_camera_pipe_err.pipe2_ovr = (hdcmipp != NULL) ? (__HAL_DCMIPP_GET_FLAG(hdcmipp, DCMIPP_FLAG_PIPE2_OVR) ? 1U : 0U) : 0U;
+    s_camera_pipe_err.axi_err    = (hdcmipp != NULL) ? (__HAL_DCMIPP_GET_FLAG(hdcmipp, DCMIPP_FLAG_AXI_TRANSFER_ERROR) ? 1U : 0U) : 0U;
+    s_camera_pipe_err.frame_id   = (uint32_t)g_camera.current_frame_id;
+    s_camera_pipe_err.count++;
 }
 
 static int pipe_start_common(camera_t *camera, uint32_t pipe_id, pipe_buffer_t **pipe_buffer, 
@@ -2012,6 +2028,92 @@ static int camera_deinit(void *priv)
     return 0;
 }
 
+/* ==================== Camera Diagnostic (CLI: camdiag) ==================== */
+static int s_diag_last_frame_id = -1;
+
+static void camera_diag_dump_pipe(uint32_t pipe)
+{
+    const char *name = (pipe == 1) ? "pipe1" : "pipe2";
+    pipe_buffer_t *bufs = (pipe == 1) ? g_camera.pipe1_buffer : g_camera.pipe2_buffer;
+    pipe_params_t *param = (pipe == 1) ? &g_camera.pipe1_param : &g_camera.pipe2_param;
+    camera_dq_t *dq = (pipe == 1) ? &g_camera.pipe1_dq : &g_camera.pipe2_dq;
+    PIPE_STATE_E st = (pipe == 1) ? g_camera.state.pipe1_state : g_camera.state.pipe2_state;
+    const char *st_str = (st == PIPE_START) ? "START" : (st == PIPE_SUSPEND) ? "SUSPEND" : "STOP";
+
+    printf("  %s: state=%s %dx%d bpp=%d fps=%d buf_nb=%d\r\n",
+           name, st_str, param->width, param->height, param->bpp, param->fps, param->buffer_nb);
+    printf("    ready_queue=%d idle_sem=%s\r\n",
+           (dq->ready_queue) ? (int)osMessageQueueGetCount(dq->ready_queue) : -1,
+           (dq->idle_sem) ? "exists" : "NULL");
+    if (bufs != NULL) {
+        for (int i = 0; i < param->buffer_nb; i++) {
+            const char *bstate = (bufs[i].state == BUFFER_IDLE) ? "IDLE" :
+                                 (bufs[i].state == BUFFER_PROCESSING) ? "PROCESSING" :
+                                 (bufs[i].state == BUFFER_READY) ? "READY" :
+                                 (bufs[i].state == BUFFER_IN_USE) ? "IN_USE" : "?";
+            printf("    buf[%d] addr=0x%08lx state=%s frame=%lu owner=%u/%u ret=%u\r\n",
+                   i, (unsigned long)bufs[i].data, bstate,
+                   (unsigned long)bufs[i].frame_id, bufs[i].owner_count,
+                   CAMERA_BUF_MAX_OWNERS, bufs[i].return_count);
+        }
+    } else {
+        printf("    buffer=NULL\r\n");
+    }
+}
+
+static int camera_diag_cmd(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    int delta = (s_diag_last_frame_id >= 0) ?
+                (g_camera.current_frame_id - s_diag_last_frame_id) : 0;
+
+    printf("\r\n=== Camera Diag ===\r\n");
+    printf("state: camera=%s pipe1=%s pipe2=%s\r\n",
+           (g_camera.state.camera_state == CAMERA_START) ? "START" : "STOP",
+           (g_camera.state.pipe1_state == PIPE_START) ? "START" : "STOP",
+           (g_camera.state.pipe2_state == PIPE_START) ? "START" : "STOP");
+    printf("current_frame_id=%d (delta=%d since last diag; >0 = frame IRQ alive)\r\n",
+           g_camera.current_frame_id, delta);
+    printf("skip_frame_counter=%d/%d\r\n",
+           g_camera.skip_frame_counter, g_camera.startup_skip_frames);
+    s_diag_last_frame_id = g_camera.current_frame_id;
+
+    DCMIPP_HandleTypeDef *hdcmipp = CMW_CAMERA_GetDCMIPPHandle();
+    if (hdcmipp != NULL) {
+        printf("DCMIPP flags: pipe1_ovr=%d pipe2_ovr=%d axi_err=%d irq_nvic=%d errcode=0x%08lx\r\n",
+               __HAL_DCMIPP_GET_FLAG(hdcmipp, DCMIPP_FLAG_PIPE1_OVR) ? 1 : 0,
+               __HAL_DCMIPP_GET_FLAG(hdcmipp, DCMIPP_FLAG_PIPE2_OVR) ? 1 : 0,
+               __HAL_DCMIPP_GET_FLAG(hdcmipp, DCMIPP_FLAG_AXI_TRANSFER_ERROR) ? 1 : 0,
+               NVIC_GetEnableIRQ(DCMIPP_IRQn) ? 1 : 0,
+               (unsigned long)hdcmipp->ErrorCode);
+        printf("DCMIPP IT enable: p1_vsync=%d p1_frame=%d p2_vsync=%d p2_frame=%d\r\n",
+               __HAL_DCMIPP_GET_IT_SOURCE(hdcmipp, DCMIPP_IT_PIPE1_VSYNC) ? 1 : 0,
+               __HAL_DCMIPP_GET_IT_SOURCE(hdcmipp, DCMIPP_IT_PIPE1_FRAME) ? 1 : 0,
+               __HAL_DCMIPP_GET_IT_SOURCE(hdcmipp, DCMIPP_IT_PIPE2_VSYNC) ? 1 : 0,
+               __HAL_DCMIPP_GET_IT_SOURCE(hdcmipp, DCMIPP_IT_PIPE2_FRAME) ? 1 : 0);
+        printf("DCMIPP VSYNC flag: p1=%d p2=%d\r\n",
+               __HAL_DCMIPP_GET_FLAG(hdcmipp, DCMIPP_FLAG_PIPE1_VSYNC) ? 1 : 0,
+               __HAL_DCMIPP_GET_FLAG(hdcmipp, DCMIPP_FLAG_PIPE2_VSYNC) ? 1 : 0);
+    }
+    printf("pipe err: count=%lu last_pipe=%lu ovr1=%lu ovr2=%lu axi=%lu frame=%lu\r\n",
+           (unsigned long)s_camera_pipe_err.count, (unsigned long)s_camera_pipe_err.pipe,
+           (unsigned long)s_camera_pipe_err.pipe1_ovr, (unsigned long)s_camera_pipe_err.pipe2_ovr,
+           (unsigned long)s_camera_pipe_err.axi_err, (unsigned long)s_camera_pipe_err.frame_id);
+
+    camera_diag_dump_pipe(1);
+    camera_diag_dump_pipe(2);
+    return 0;
+}
+
+static void camera_cmd_register(void)
+{
+    static debug_cmd_reg_t camera_cmd_table[] = {
+        {"camdiag", "camera pipe/buffer/frame diagnostics", camera_diag_cmd},
+    };
+    debug_cmdline_register(camera_cmd_table, sizeof(camera_cmd_table) / sizeof(camera_cmd_table[0]));
+}
+
 int camera_register(void)
 {
     static dev_ops_t camera_ops ={
@@ -2039,6 +2141,8 @@ int camera_register(void)
         g_camera.dev = NULL;
         return AICAM_ERROR;
     }
+    /* Defer command registration to driver_cmd_register_all (runs after debug is ready). */
+    driver_cmd_register_callback("camera", camera_cmd_register);
     return AICAM_OK;
 }
 

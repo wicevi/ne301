@@ -2427,7 +2427,13 @@ aicam_result_t upload_coordinator_init(void *config)
 
     if (g_up.active_fs != FS_MAX) {
         ensure_dirs_with_space_check(g_up.active_fs);
-        rebuild_index_if_needed(g_up.active_fs);
+        /* Only probe the index when the backing FS is actually ready.
+         * Otherwise (e.g. SD media still opening in sdProcess) disk_file_stat
+         * fails and rebuild_index_if_needed logs a misleading "index dir
+         * missing" warning every boot even though the tree is fine. */
+        if (fs_ready_for_dirs(g_up.active_fs)) {
+            rebuild_index_if_needed(g_up.active_fs);
+        }
     }
     uint64_t t4 = rtc_get_uptime_ms();
 

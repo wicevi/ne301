@@ -137,20 +137,31 @@ void NMI_Handler(void)
   /* USER CODE END NonMaskableInt_IRQn 1 */
 }
 
-// /**
-//   * @brief This function handles Hard fault interrupt.
-//   */
-// void HardFault_Handler(void)
-// {
-//   /* USER CODE BEGIN HardFault_IRQn 0 */
-//   printf("HardFault_Handler\r\n");
-//   /* USER CODE END HardFault_IRQn 0 */
-//   while (1)
-//   {
-//     /* USER CODE BEGIN W1_HardFault_IRQn 0 */
-//     /* USER CODE END W1_HardFault_IRQn 0 */
-//   }
-// }
+/**
+  * @brief This function handles Hard fault interrupt.
+  */
+void HardFault_Handler(void)
+{
+  /* USER CODE BEGIN HardFault_IRQn 0 */
+  {
+    volatile uint32_t cfsr = SCB->CFSR;
+    volatile uint32_t bfar  = SCB->BFAR;
+    volatile uint32_t mmfar = SCB->MMFAR;
+    volatile uint32_t hfsr  = SCB->HFSR;
+    register uint32_t exc_return __asm("lr");
+    volatile uint32_t *sp = (volatile uint32_t *)((exc_return & 0x4) ? __get_PSP() : __get_MSP());
+    printf("HardFault CFSR=0x%08lx BFAR=0x%08lx MMFAR=0x%08lx HFSR=0x%08lx\r\n",
+           cfsr, bfar, mmfar, hfsr);
+    printf("  EXC_RETURN=0x%08lx SP=0x%08lx PC=0x%08lx LR=0x%08lx\r\n",
+           exc_return, (uint32_t)sp, sp[6], sp[5]);
+  }
+  /* USER CODE END HardFault_IRQn 0 */
+  while (1)
+  {
+    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
+    /* USER CODE END W1_HardFault_IRQn 0 */
+  }
+}
 
 /**
   * @brief This function handles Memory management fault.
