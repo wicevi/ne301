@@ -125,9 +125,15 @@ void sl_si91x_host_release_from_reset(void)
     HAL_GPIO_WritePin(WIFI_RESET_N_GPIO_Port, WIFI_RESET_N_Pin, GPIO_PIN_SET);
 }
 
+static sl_si91x_host_init_configuration_t bus_config = { 0 };
+
 sl_status_t sl_si91x_host_init(const sl_si91x_host_init_configuration_t *config)
 {
-    UNUSED_PARAMETER(config);
+    // 4.1.x bus model: the driver passes rx_irq/rx_done; the GPIO ISR must call
+    // rx_irq (sli_si91x_bus_rx_irq_handler) instead of the legacy set_event.
+    bus_config.rx_irq      = config->rx_irq;
+    bus_config.rx_done     = config->rx_done;
+    bus_config.boot_option = config->boot_option;
     // printf("sl_si91x_host_init\r\n");
     pwr_manager_acquire(pwr_manager_get_handle(PWR_WIFI));
     if (sem_spi4 == NULL) {
@@ -322,43 +328,42 @@ void sl_si91x_host_disable_bus_interrupt(void)
     HAL_NVIC_DisableIRQ(EXTI8_IRQn);
 }
 
-static uint32_t sleep_state = GPIO_PIN_SET;
-
+// Sleep-confirm pin handshake. 4.1.1 toggles this per SPI transaction
+// (sli_si91x_req_wakeup sets, post-tx/rx clears) regardless of performance
+// profile — 4.0.2 gated the toggle on != HIGH_PERFORMANCE, so the old
+// "wup 0/1" debug only fired in low-power mode. 4.1.1 fires it every
+// transaction by design (the reference STM32 port does the same). The toggle
+// is harmless: the NCP firmware decides whether to actually sleep. Debug
+// printf removed to stop per-transaction log spam; re-add here if debugging
+// power-save.
 void sl_si91x_host_set_sleep_indicator(void)
 {
-    if (sleep_state != GPIO_PIN_SET) {
-        sleep_state = GPIO_PIN_SET;
-        printf("wup 1\n");
-    }
     HAL_GPIO_WritePin(WIFI_ULP_WAKEUP_GPIO_Port, WIFI_ULP_WAKEUP_Pin, GPIO_PIN_SET);
 }
 
 void sl_si91x_host_clear_sleep_indicator(void)
 {
-    if (sleep_state != GPIO_PIN_RESET) {
-        sleep_state = GPIO_PIN_RESET;
-        printf("wup 0\n");
-    }
     HAL_GPIO_WritePin(WIFI_ULP_WAKEUP_GPIO_Port, WIFI_ULP_WAKEUP_Pin, GPIO_PIN_RESET);
 }
 
 uint32_t sl_si91x_host_get_wake_indicator(void)
 {
-    static uint32_t wake_up_state = GPIO_PIN_SET;
-    osSemaphoreAcquire(sem_sta, 10);
-    if (wake_up_state != HAL_GPIO_ReadPin(WIFI_STA_GPIO_Port, WIFI_STA_Pin)) {
-        wake_up_state = HAL_GPIO_ReadPin(WIFI_STA_GPIO_Port, WIFI_STA_Pin);
-        printf("sta %lu\n", (unsigned long)wake_up_state);
-    }
-    return wake_up_state;
+    // Plain GPIO read — matches the SDK reference ports (stm32/efx32).
+    // req_wakeup() busy-loops on this once per SPI transaction, so a blocking
+    // call here kills throughput: the old osSemaphoreAcquire(sem_sta,10) added
+    // a 10ms stall on EVERY transaction (HIGH_PERFORMANCE: NCP never sleeps,
+    // EXTI5 never fires, sem never released => full timeout). That cost was
+    // hidden in 4.0.2 (req_wakeup gated on != HIGH_PERFORMANCE) and exposed by
+    // 4.1.1's unconditional per-transaction handshake, cutting throughput >5x.
+    return HAL_GPIO_ReadPin(WIFI_STA_GPIO_Port, WIFI_STA_Pin);
 }
 
-extern sl_wifi_system_performance_profile_t current_performance_profile;
 static void si91x_gpio_interrupt(void)
 {
-    // Trigger SiWx91x BUS Event
-    if (current_performance_profile != HIGH_PERFORMANCE) printf("#\r\n");
-    sli_wifi_set_event(SL_SI91X_NCP_HOST_BUS_RX_EVENT);
+    // Trigger SiWx91x BUS Event (4.1.x rx_irq callback model)
+    if (bus_config.rx_irq != NULL) {
+        bus_config.rx_irq();
+    }
 }
 
 static void si91x_sta_interrupt(void)

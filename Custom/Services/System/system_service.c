@@ -1830,7 +1830,7 @@ static uint32_t configure_u0_wakeup_sources(system_controller_t *controller, uin
             }
             
             // Step 4: Enter low power mode
-            result = sl_net_netif_low_power_mode_ctrl(1);
+            result = sl_net_netif_low_power_mode_ctrl(1, NULL);
             if (result != AICAM_OK) {
                 LOG_SVC_WARN("Failed to enable low power mode: %d", result);
                 mqtt_service_stop();

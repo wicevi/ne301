@@ -432,12 +432,47 @@ static int netif_manager_cmd(int argc, char* argv[])
         if (argc > 3) enable = atoi(argv[3]);
         ret = sl_net_netif_filter_broadcast_ctrl(enable);
     } else if (strcmp(argv[2], "lpwr") == 0) {
+        // Low-power connected-sleep; only valid on WiFi. Optional test knobs,
+        // effective only on enable: profile, dtim_skip, monitor_ms, beacon_miss.
+        //   profile:    0=LOW_LATENCY/FAST PSP (default), 1=MAX PSP
+        //   dtim_skip:  DTIM beacons to skip (0=none)
+        //   monitor_ms: monitor interval ms, LOW_LATENCY only (0=SDK default 50)
+        //   beacon_miss: missed beacons tolerated (1-10, default 1)
         if (strcmp(if_name, NETIF_NAME_WIFI_STA) && strcmp(if_name, NETIF_NAME_WIFI_AP)) {
             LOG_SIMPLE("Only wl/ap support lpwr cmd\r\n");
             return -1;
         }
         if (argc > 3) enable = atoi(argv[3]);
-        ret = sl_net_netif_low_power_mode_ctrl(enable);
+        sl_net_lpwr_config_t lpwr_cfg = { .profile = 0, .num_of_dtim_skip = 0,
+                                          .monitor_interval = 0, .beacon_miss_ignore_limit = 1 };
+        const sl_net_lpwr_config_t *cfg_ptr = NULL;
+        if (enable && argc > 4) {
+            lpwr_cfg.profile = (uint8_t)atoi(argv[4]);
+            if (argc > 5) lpwr_cfg.num_of_dtim_skip        = (uint8_t)atoi(argv[5]);
+            if (argc > 6) lpwr_cfg.monitor_interval         = (uint16_t)atoi(argv[6]);
+            if (argc > 7) lpwr_cfg.beacon_miss_ignore_limit = (uint8_t)atoi(argv[7]);
+            cfg_ptr = &lpwr_cfg;
+        }
+        ret = sl_net_netif_low_power_mode_ctrl(enable, cfg_ptr);
+    } else if (strcmp(argv[2], "twt") == 0) {
+        // TWT setup/teardown; only valid in remote wakeup mode. Optional params,
+        // effective only on setup: tx_kbps, tx_latency_ms, rx_latency_ms.
+        if (strcmp(if_name, NETIF_NAME_WIFI_STA) && strcmp(if_name, NETIF_NAME_WIFI_AP)) {
+            LOG_SIMPLE("Only wl/ap support twt cmd\r\n");
+            return -1;
+        }
+        if (argc > 3) enable = atoi(argv[3]);
+        sl_net_twt_config_t twt_cfg  = { 0 };
+        const sl_net_twt_config_t *cfg_ptr = NULL;
+        if (enable && argc > 4) {
+            twt_cfg.average_tx_throughput = (uint16_t)atoi(argv[4]);
+            if (argc > 5) twt_cfg.tx_latency = (uint32_t)atoi(argv[5]);
+            if (argc > 6) twt_cfg.rx_latency = (uint32_t)atoi(argv[6]);
+            cfg_ptr = &twt_cfg;
+        }
+        // SYNC: block up to 5s for the real AP-negotiation result (TWT callback)
+        // instead of the meaningless command-accepted status.
+        ret = sl_net_netif_twt_ctrl(enable, cfg_ptr, SL_NET_TWT_SYNC, 5000);
     } else if (strcmp(argv[2], "rmode") == 0) {
         if (strcmp(if_name, NETIF_NAME_WIFI_STA) && strcmp(if_name, NETIF_NAME_WIFI_AP)) {
             LOG_SIMPLE("Only wl/ap support rmode cmd\r\n");

@@ -883,7 +883,11 @@ LDFLAGS += -Wl,--out-implib=$(BUILD_DIR)/secure_nsclib.o
 LDFLAGS += -Wl,--start-group $(LIBS) -Wl,--end-group
 
 ##################################################################
-include ../Custom/Common/Lib/SiliconLabs_SDK/silabs_sdk.mk
+# WiseConnect SDK. Was: SiliconLabs_SDK (v4.0.2). Switched to the
+# 4.1.1 port (Custom/Hal now uses 4.1.1 APIs: sli_wifi_send_command,
+# sli_buffer_manager_free_buffer, rx_irq bus model). Rollback to 4.0.2
+# = git revert the 4.1.1 port commit (restores SDK tree + Custom/Hal + this line).
+include ../Custom/Common/Lib/SiliconLabs_SDK_4_1_1/silabs_sdk.mk
 include ../Custom/Common/Lib/mmx108/mmx108.mk
 
 ######################################

@@ -15,6 +15,10 @@
 #include "sli_net_utility.h"
 #include "sli_net_constants.h"
 #include "sli_wifi_constants.h"
+#include "sli_wifi_utility.h"
+#include "sli_wifi_power_profile.h"
+#include "sli_wifi.h"
+#include "sli_buffer_manager.h"
 #include "sl_net_dns.h"
 #include "Log/debug.h"
 #include "dhcpserver.h"
@@ -1365,6 +1369,14 @@ static sl_status_t sl_net_client_scan_callback_handler(sl_wifi_event_t event, sl
      * but result_length may be set to count * sizeof(sl_wifi_extended_scan_result_t).
      * Old SDK always passed result_length == 0 for this case. */
     if (now_scan_type == SL_WIFI_SCAN_TYPE_EXTENDED) {
+        /* EXTENDED scan: firmware pushes each found AP as a
+         * SLI_WIFI_RSP_SCAN_RESULTS beacon (result != NULL), which the SDK
+         * auto-accumulates into its scan database via sli_handle_wifi_beacon().
+         * The empty-payload completion event (result == NULL) signals scan-done.
+         * Ignore intermediate beacons so restore/dispatch run exactly once. */
+        if (result != NULL) {
+            return SL_STATUS_OK;
+        }
         default_scan_result_parameters.result_count = &scan_result_num;
         status = sl_wifi_get_stored_scan_results(SL_WIFI_CLIENT_INTERFACE, &default_scan_result_parameters);
         if (status != SL_STATUS_OK) {
@@ -2143,6 +2155,11 @@ int sl_net_ap_netif_info(netif_info_t *netif_info)
     memcpy(netif_info->netmask, &ap_netif.netmask, sizeof(netif_info->netmask));
 
     memset(netif_info->wireless_cfg.ssid, 0x00, sizeof(netif_info->wireless_cfg.ssid));
+    if (netif_info->state != NETIF_STATE_DEINIT && wifi_ap_profile.config.ssid.length < 1) {
+        snprintf((char *)wifi_ap_profile.config.ssid.value, sizeof(wifi_ap_profile.config.ssid.value), "NE301_%02X%02X%02X", ap_netif.hwaddr[3], ap_netif.hwaddr[4], ap_netif.hwaddr[5]);
+        wifi_ap_profile.config.ssid.length = strlen((char *)wifi_ap_profile.config.ssid.value);
+        LOG_DRV_INFO("Use default ap name: %s\r\n", wifi_ap_profile.config.ssid.value);
+    }
     memcpy(netif_info->wireless_cfg.ssid, wifi_ap_profile.config.ssid.value, wifi_ap_profile.config.ssid.length);
     memset(netif_info->wireless_cfg.pw, 0x00, sizeof(netif_info->wireless_cfg.pw));
     if (wifi_ap_credential.data_length >= 8) memcpy(netif_info->wireless_cfg.pw, wifi_ap_credential.data, wifi_ap_credential.data_length);
@@ -2235,7 +2252,7 @@ void sl_net_thread(void *arg)
                 client_state = sl_net_client_netif_state();
                 if (client_state == NETIF_STATE_UP) {
                     sl_net_client_netif_down();
-                    status = sli_si91x_driver_send_command(SLI_WIFI_REQ_INIT,
+                    status = sli_wifi_send_command(SLI_WIFI_REQ_INIT,
                                                               SLI_WIFI_WLAN_CMD,
                                                               NULL,
                                                               0,
@@ -2547,12 +2564,27 @@ int sl_net_netif_filter_broadcast_ctrl(uint8_t enable)
     return status;
 }
 
-extern sl_wifi_system_performance_profile_t current_performance_profile;
-int sl_net_netif_low_power_mode_ctrl(uint8_t enable){
+int sl_net_netif_low_power_mode_ctrl(uint8_t enable, const sl_net_lpwr_config_t *cfg){
     sl_status_t status = SL_STATUS_OK;
-    sl_wifi_performance_profile_v2_t performance_profile = {0};
+    sl_wifi_performance_profile_v2_t performance_profile = {
+        .profile           = HIGH_PERFORMANCE,
+        .dtim_aligned_type = SL_SI91X_ALIGN_WITH_BEACON,
+        .num_of_dtim_skip  = 0,
+        .listen_interval   = 0,
+        .monitor_interval  = 0,
+        .twt_request       = {0},
+        .twt_selection     = {0},
+        .beacon_miss_ignore_limit = 1,
+    };
+    sl_wifi_performance_profile_v2_t current_profile     = {0};
     if (sl_net_thread_ID == NULL) return SL_STATUS_INVALID_STATE;
     osMutexAcquire(sl_net_mutex, osWaitForever);
+    // 4.1.1: the SDK no longer maintains the current_performance_profile global
+    // (initialized to HIGH_PERFORMANCE and never written), so reading it always
+    // yields HIGH_PERFORMANCE and the exit-to-high-perf branch below was dead
+    // code (low-power mode could be entered but never left). Query the live
+    // profile via the getter instead.
+    sli_wifi_get_current_performance_profile(&current_profile);
 
     do {
         if (sl_net_ap_netif_state() == NETIF_STATE_DEINIT && sl_net_client_netif_state() == NETIF_STATE_DEINIT && remote_wakeup_mode == WAKEUP_MODE_NORMAL) {
@@ -2560,7 +2592,7 @@ int sl_net_netif_low_power_mode_ctrl(uint8_t enable){
             break;
         }
 
-        if (enable && current_performance_profile == HIGH_PERFORMANCE) {
+        if (enable && current_profile.profile == HIGH_PERFORMANCE) {
 #if IS_ENABLE_BLE
             // If BLE wakeup mode and not scanning / connecting, return not supported
             if (remote_wakeup_mode == WAKEUP_MODE_BLE && !sl_ble_is_scanning() && sl_ble_connected_num() == 0) {
@@ -2570,6 +2602,16 @@ int sl_net_netif_low_power_mode_ctrl(uint8_t enable){
 #endif
             
             performance_profile.profile = ASSOCIATED_POWER_SAVE_LOW_LATENCY;
+            if (cfg != NULL) {
+                if (cfg->profile == 1) performance_profile.profile = ASSOCIATED_POWER_SAVE;
+                performance_profile.num_of_dtim_skip         = cfg->num_of_dtim_skip;
+                performance_profile.monitor_interval          = cfg->monitor_interval;
+                performance_profile.beacon_miss_ignore_limit  = cfg->beacon_miss_ignore_limit ? cfg->beacon_miss_ignore_limit : 1;
+                LOG_DRV_INFO("lpwr cfg: profile=%s dtim_skip=%u monitor=%ums bmiss=%u\r\n",
+                             performance_profile.profile == ASSOCIATED_POWER_SAVE ? "MAX_PSP" : "LOW_LATENCY",
+                             cfg->num_of_dtim_skip, cfg->monitor_interval,
+                             performance_profile.beacon_miss_ignore_limit);
+            }
             if (remote_wakeup_mode == WAKEUP_MODE_WIFI || remote_wakeup_mode == WAKEUP_MODE_NORMAL) {
                 status = sl_wifi_filter_broadcast(5000, 1, 1);
                 if (status != SL_STATUS_OK) {
@@ -2591,7 +2633,7 @@ int sl_net_netif_low_power_mode_ctrl(uint8_t enable){
                 LOG_DRV_ERROR("Failed to set performance profile: 0x%lX\r\n", status);
                 break;
             }
-        } else if (current_performance_profile != HIGH_PERFORMANCE) {
+        } else if (current_profile.profile != HIGH_PERFORMANCE) {
             performance_profile.profile = HIGH_PERFORMANCE;
 #if IS_ENABLE_BLE
             if (remote_wakeup_mode == WAKEUP_MODE_BLE) {
@@ -2607,7 +2649,7 @@ int sl_net_netif_low_power_mode_ctrl(uint8_t enable){
                 LOG_DRV_ERROR("Failed to set performance profile: 0x%lX\r\n", status);
                 break;
             }
-            if (status == SL_STATUS_OK && current_performance_profile != performance_profile.profile) {
+            if (status == SL_STATUS_OK && current_profile.profile != performance_profile.profile) {
                 status = sl_wifi_set_performance_profile_v2(&performance_profile);
             }
         }
@@ -2615,6 +2657,143 @@ int sl_net_netif_low_power_mode_ctrl(uint8_t enable){
     
     osMutexRelease(sl_net_mutex);
     return status;
+}
+
+// ---- TWT (Target Wake Time) async-result rendezvous ----
+// sl_wifi_target_wake_time_auto_selection_v2() returns OK as soon as the firmware
+// ACCEPTS the config command, not when the AP actually agrees a TWT session. The
+// real outcome arrives later via the SL_WIFI_TWT_RESPONSE_EVENTS callback. SYNC
+// mode of sl_net_netif_twt_ctrl() blocks on s_twt_cb_sem until that callback posts
+// the result; ASYNC returns the command-accepted status right away (read the
+// negotiated outcome from the callback log). The wait is done OUTSIDE sl_net_mutex
+// so the event-thread callback and the rest of the netif stack are not stalled.
+static volatile sl_wifi_event_t s_twt_cb_event;
+static volatile sl_status_t     s_twt_cb_status;
+static osSemaphoreId_t          s_twt_cb_sem    = NULL;
+static uint8_t                  s_twt_cb_inited = 0;
+
+static const char *sl_net_twt_event_name(sl_wifi_event_t ev)
+{
+    switch (ev) {
+    case SL_WIFI_TWT_UNSOLICITED_SESSION_SUCCESS_EVENT: return "SESSION_SUCCESS";
+    case SL_WIFI_TWT_RESPONSE_EVENT:                    return "GENERIC_RESPONSE";
+    case SL_WIFI_TWT_INACTIVE_NO_AP_SUPPORT_EVENT:      return "NO_AP_SUPPORT";
+    case SL_WIFI_TWT_AP_REJECTED_EVENT:                 return "AP_REJECTED";
+    case SL_WIFI_TWT_FAIL_MAX_RETRIES_REACHED_EVENT:    return "MAX_RETRIES";
+    case SL_WIFI_TWT_TEARDOWN_SUCCESS_EVENT:            return "TEARDOWN_SUCCESS";
+    case SL_WIFI_TWT_AP_TEARDOWN_SUCCESS_EVENT:         return "AP_TEARDOWN_SUCCESS";
+    case SL_WIFI_TWT_OUT_OF_TOLERANCE_EVENT:            return "OUT_OF_TOLERANCE";
+    case SL_WIFI_TWT_RESPONSE_NOT_MATCHED_EVENT:        return "RESPONSE_NOT_MATCHED";
+    case SL_WIFI_TWT_UNSUPPORTED_RESPONSE_EVENT:        return "UNSUPPORTED_RESPONSE";
+    case SL_WIFI_TWT_INACTIVE_DUE_TO_ROAMING_EVENT:     return "INACTIVE_ROAMING";
+    case SL_WIFI_TWT_INACTIVE_DUE_TO_DISCONNECT_EVENT:  return "INACTIVE_DISCONNECT";
+    case SL_WIFI_TWT_INFO_FRAME_EXCHANGE_FAILED_EVENT:  return "INFO_FRAME_FAILED";
+    case SL_WIFI_RESCHEDULE_TWT_SUCCESS_EVENT:          return "RESCHEDULE_SUCCESS";
+    default:                                            return "OTHER";
+    }
+}
+
+// SL_WIFI_TWT_RESPONSE_EVENTS callback: runs in the SDK event thread. Records the
+// negotiated outcome and wakes any SYNC waiter.
+static sl_status_t sl_net_twt_response_cb(sl_wifi_event_t event,
+                                          sl_status_t status_code,
+                                          sl_wifi_twt_response_t *data,
+                                          uint32_t data_length,
+                                          void *arg)
+{
+    (void)data_length; (void)arg;
+    s_twt_cb_event  = event;
+    s_twt_cb_status = status_code;
+    LOG_DRV_INFO("TWT callback: %s (event=0x%lX status=0x%lX)",
+                 sl_net_twt_event_name(event), (unsigned long)event, (unsigned long)status_code);
+    // Dump the AP-negotiated schedule: wake_interval = mantissa << exp (µs).
+    // All-zero ⇒ no real schedule negotiated (AP gave nothing useful).
+    if (data != NULL) {
+        uint32_t wake_us = (uint32_t)((uint64_t)data->wake_int_mantissa << data->wake_int_exp);
+        LOG_DRV_INFO("TWT negotiated: wake_int=%luus dur=%u(unit=%u) nego=%u flow_id=%u",
+                     (unsigned long)wake_us, data->wake_duration, data->wake_duration_unit,
+                     data->negotiation_type, data->twt_flow_id);
+    }
+    if (s_twt_cb_sem != NULL) osSemaphoreRelease(s_twt_cb_sem);
+    return SL_STATUS_OK;
+}
+
+// TWT setup/teardown. Gates on remote wakeup mode (TWT is a remote-wakeup
+// power-save feature). Uses the SDK auto-select API: throughput/latency hints in
+// cfg (or SDK defaults when NULL) drive the firmware's wake-interval/duration
+// derivation. mode=SYNC blocks up to timeout_ms for the real AP-negotiation
+// result instead of the meaningless command-accepted status; mode=ASYNC returns
+// immediately. Pre-condition: active Wi-Fi client connection (SDK-validated).
+int sl_net_netif_twt_ctrl(uint8_t enable, const sl_net_twt_config_t *cfg,
+                          sl_net_twt_mode_t mode, uint32_t timeout_ms)
+{
+    sl_status_t status;
+    // Use the public v2 API. Measured: only average_tx_throughput/tx_latency/
+    // rx_latency affect the negotiated schedule (wake_int ∝ 1/throughput); the
+    // internal fields (default_wake_interval_ms etc.) are ignored by firmware, so
+    // v2's hardcoded internal defaults are harmless. The sli_ lower layer is
+    // SDK-private and the v1 API is @deprecated — prefer v2.
+    sl_wifi_twt_selection_v2_t twt = {
+        .twt_enable = enable ? 1 : 0,
+    };
+
+    if (sl_net_thread_ID == NULL) return SL_STATUS_INVALID_STATE;
+
+    osMutexAcquire(sl_net_mutex, osWaitForever);
+    if (remote_wakeup_mode == WAKEUP_MODE_NORMAL) {
+        osMutexRelease(sl_net_mutex);
+        return SL_STATUS_INVALID_STATE;
+    }
+
+    // Lazy one-time setup of the result semaphore + response callback (wifi is up
+    // at this point, so the callback registration is valid).
+    if (!s_twt_cb_inited) {
+        s_twt_cb_sem = osSemaphoreNew(4, 0, NULL);
+        sl_wifi_set_twt_config_callback_v2(sl_net_twt_response_cb, NULL);
+        s_twt_cb_inited = 1;
+    }
+    // SYNC: drain stale tokens before sending so the next token is from this op.
+    if (mode == SL_NET_TWT_SYNC) {
+        while (osSemaphoreAcquire(s_twt_cb_sem, 0) == osOK) { /* drain */ }
+    }
+
+    if (enable && cfg != NULL) {
+        twt.average_tx_throughput = cfg->average_tx_throughput;
+        twt.tx_latency            = cfg->tx_latency;
+        twt.rx_latency            = cfg->rx_latency;
+    }
+    LOG_DRV_INFO("TWT req: thr=%lu tx_lat=%lums rx_lat=%lums",
+                 (unsigned long)twt.average_tx_throughput, (unsigned long)twt.tx_latency,
+                 (unsigned long)twt.rx_latency);
+    status = sl_wifi_target_wake_time_auto_selection_v2(&twt);
+    osMutexRelease(sl_net_mutex);
+
+    if (status != SL_STATUS_OK) {
+        LOG_DRV_ERROR("TWT command rejected: 0x%lX\r\n", (unsigned long)status);
+        return status;   // firmware refused the command itself
+    }
+    if (mode == SL_NET_TWT_ASYNC) return SL_STATUS_OK;   // command accepted
+
+    // SYNC: block for the AP-negotiation callback (outside the mutex).
+    if (osSemaphoreAcquire(s_twt_cb_sem, timeout_ms) != osOK) {
+        LOG_DRV_ERROR("TWT sync wait timed out (%lu ms)\r\n", (unsigned long)timeout_ms);
+        return SL_STATUS_TIMEOUT;
+    }
+    int ok = enable ? (s_twt_cb_event == SL_WIFI_TWT_UNSOLICITED_SESSION_SUCCESS_EVENT
+                       // 0x9 generic response: this AP/firmware combo reports TWT setup
+                       // success as the base event instead of SESSION_SUCCESS. Confirmed
+                       // by the firmware returning 0x10071 ("session already active") on
+                       // any subsequent twt command.
+                       || s_twt_cb_event == SL_WIFI_TWT_RESPONSE_EVENT)
+                    : (s_twt_cb_event == SL_WIFI_TWT_TEARDOWN_SUCCESS_EVENT
+                       || s_twt_cb_event == SL_WIFI_TWT_AP_TEARDOWN_SUCCESS_EVENT);
+    if (!ok) {
+        LOG_DRV_ERROR("TWT %s failed: %s (0x%lX)\r\n",
+                      enable ? "setup" : "teardown",
+                      sl_net_twt_event_name(s_twt_cb_event), (unsigned long)s_twt_cb_status);
+    }
+    if (ok) return SL_STATUS_OK;
+    return (s_twt_cb_status != SL_STATUS_OK) ? s_twt_cb_status : SL_STATUS_FAIL;
 }
 
 // Resolve a host name to an IP address using DNS
@@ -2639,17 +2818,17 @@ sl_status_t sl_net_dns_resolve_hostname(const char *host_name,
     dns_query_request.ip_version[0] = (dns_resolution_ip == SL_NET_DNS_TYPE_IPV4) ? 4 : 6;
     memcpy(dns_query_request.url_name, host_name, sizeof(dns_query_request.url_name));
 
-    status = sli_si91x_driver_send_command(SLI_WLAN_REQ_DNS_QUERY,
+    status = sli_wifi_send_command(SLI_WIFI_REQ_DNS_QUERY,
         SLI_SI91X_NETWORK_CMD,
         &dns_query_request,
         sizeof(dns_query_request),
         wait_period,
         NULL,
-        &buffer);
+        (void **)&buffer);
 
     // Check if the command failed and free the buffer if it was allocated
     if ((status != SL_STATUS_OK) && (buffer != NULL)) {
-    sli_si91x_host_free_buffer(buffer);
+    sli_buffer_manager_free_buffer(buffer);
     }
     VERIFY_STATUS_AND_RETURN(status);
 
@@ -2659,7 +2838,7 @@ sl_status_t sl_net_dns_resolve_hostname(const char *host_name,
 
     // Convert the SI91X DNS response to the sl_ip_address format
     sli_convert_si91x_dns_response(sl_ip_address, dns_response);
-    sli_si91x_host_free_buffer(buffer);
+    sli_buffer_manager_free_buffer(buffer);
     return SL_STATUS_OK;
 }
 

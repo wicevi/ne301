@@ -1211,7 +1211,7 @@ int quick_network_switch_remote_wakeup_mode(void)
     }
 
     /* 4) Enter WiFi low power mode (required before sleep). */
-    ret = sl_net_netif_low_power_mode_ctrl(1);
+    ret = sl_net_netif_low_power_mode_ctrl(1, NULL);
     if (ret != 0) {
         (void)si91x_mqtt_client_disconnect_sync(3000);
         (void)sl_net_netif_romote_wakeup_mode_ctrl(WAKEUP_MODE_NORMAL);

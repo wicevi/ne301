@@ -110,7 +110,7 @@ static int wifi_ant_flag = 0;
 static int wifi_update_flag = 0;
 static uint32_t wifi_update_times = 0;
 const sl_wifi_data_rate_t rate               = SL_WIFI_DATA_RATE_6;
-const sl_si91x_request_tx_test_info_t default_tx_test_info = {
+const sl_wifi_request_tx_test_info_t default_tx_test_info = {
   .enable      = 1,
   .power       = 127,
   .rate        = rate,
@@ -888,13 +888,13 @@ static int wifi_set_antenna_cmd(int argc, char* argv[])
 static int wifi_transmit_test_start_cmd(int argc, char* argv[]) 
 {
     sl_status_t status = SL_STATUS_OK;
-    sl_si91x_request_tx_test_info_t tx_test_info = { 0 };
+    sl_wifi_request_tx_test_info_t tx_test_info = { 0 };
 
     if (!is_wifi_ant()) {
         LOG_SIMPLE("Please use [wifitest] cmd to enter wifi test mode first!\r\n");
         return -1;
     }
-    memcpy(&tx_test_info, &default_tx_test_info, sizeof(sl_si91x_request_tx_test_info_t));
+    memcpy(&tx_test_info, &default_tx_test_info, sizeof(sl_wifi_request_tx_test_info_t));
     // wifi_ax_transmit_test_start power data rate length mode channel aggr.enable enable_11ax coding_type nominal_pe ul_dl he_ppdu_type beam_change bw stbc tx_bf gi_ltf dcm nsts_midamble spatial_reuse bss_color he_siga2_reserved ru_allocation n_heltf_tot sigb_dcm sigb_mcs user_sta_id user_idx sigb_compression_field
     if (argc > 1) {
         tx_test_info.power = atoi(argv[1]);
