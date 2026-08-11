@@ -1013,16 +1013,6 @@ aicam_result_t web_server_ap_sleep_timer_check(void)
         }
 
         if(communication_is_interface_connected(NETIF_NAME_WIFI_AP) == AICAM_FALSE) {
-            // Skip AP startup when cellular is active to avoid SPI/UART DMA bus contention
-            if (communication_is_type_connected(COMM_TYPE_CELLULAR)) {
-                static uint32_t last_skip_log_time = 0;
-                if (current_time - last_skip_log_time >= 30) {
-                    last_skip_log_time = current_time;
-                    LOG_SVC_DEBUG("[WEB_SERVER] Skipping AP startup while cellular is active");
-                }
-                return AICAM_OK;
-            }
-
             LOG_SVC_INFO("[WEB_SERVER] AP is not connected, starting AP");
             aicam_result_t ret = communication_start_interface(NETIF_NAME_WIFI_AP);
             if (ret != AICAM_OK) {
