@@ -502,7 +502,7 @@ static int firmware_upgrade_from_flash(void)
     printf("\n[FW UPGRADE] Starting firmware upgrade from flash\r\n");
 
     // Direct memory access via memory mapping
-    storage_lock();
+    storage_lock_ext();
     flash_addr = (const uint8_t *)WIFI_FLASH_BASE_ADDR;
     
     printf("[FLASH] WiFi FW base address: 0x%08lX\r\n", (unsigned long)WIFI_FLASH_BASE_ADDR);
@@ -520,14 +520,14 @@ static int firmware_upgrade_from_flash(void)
         printf("[ERROR] Invalid flash header flags: 0x%08lX (expected: 0x%08lX)\r\n",
                (unsigned long)flash_header->valid_flags,
                (unsigned long)WIFI_FLASH_VALID_FLAGS);
-        storage_unlock();
+        storage_unlock_ext();
         return -1;
     }
 
     // Step 3: Validate total size
     if (flash_header->fw_total_size == 0 || flash_header->fw_total_size > (4 * 1024 * 1024)) {
         printf("[ERROR] Invalid firmware total size: %lu\r\n", flash_header->fw_total_size);
-        storage_unlock();
+        storage_unlock_ext();
         return -1;
     }
 
@@ -542,7 +542,7 @@ static int firmware_upgrade_from_flash(void)
     if (total_size != flash_header->fw_total_size) {
         printf("[ERROR] Size mismatch: FW header+image=%lu, Flash header=%lu\r\n",
                total_size, flash_header->fw_total_size);
-        storage_unlock();
+        storage_unlock_ext();
         return -1;
     }
 
@@ -563,7 +563,7 @@ static int firmware_upgrade_from_flash(void)
     if (calculated_crc != flash_header->fw_crc) {
         printf("[ERROR] CRC mismatch! Calculated: 0x%08lX, Expected: 0x%08lX\r\n",
                calculated_crc, flash_header->fw_crc);
-        storage_unlock();
+        storage_unlock_ext();
         return -1;
     }
 
@@ -623,7 +623,7 @@ static int firmware_upgrade_from_flash(void)
         status = sl_si91x_app_task_fw_update_via_xmodem(recv_buffer, SI91X_CHUNK_SIZE);
         if (status != SL_STATUS_OK) {
             printf("[ERROR] Chunk %lu processing failed: 0x%lx\r\n", i, status);
-            storage_unlock();
+            storage_unlock_ext();
             return -1;
         }
         
@@ -637,7 +637,7 @@ static int firmware_upgrade_from_flash(void)
     if (si91x_wlan_app_cb.state == SI91X_WLAN_FW_UPGRADE_DONE) {
         printf("\n[UPGRADE] Triggering final upgrade state\r\n");
         status = sl_si91x_app_task_fw_update_via_xmodem(NULL, 0);
-        storage_unlock();
+        storage_unlock_ext();
         return (status == SL_STATUS_OK) ? 0 : -1;
     }
     
@@ -648,12 +648,12 @@ static int firmware_upgrade_from_flash(void)
         if (si91x_wlan_app_cb.state == SI91X_WLAN_FW_UPGRADE_DONE) {
             printf("\n[UPGRADE] Triggering final upgrade state\r\n");
             status = sl_si91x_app_task_fw_update_via_xmodem(NULL, 0);
-            storage_unlock();
+            storage_unlock_ext();
             return (status == SL_STATUS_OK) ? 0 : -1;
         }
     }
     
-    storage_unlock();
+    storage_unlock_ext();
     return -1;
 }
 
@@ -812,11 +812,11 @@ int wifi_get_flash_version(char *buf, size_t size)
     //                      major           [31:24]  major
     //   44               fw_version_ext_info:
     //                      patch_num        [7:0]   security ← SDK naming quirk
-    storage_lock();
+    storage_lock_ext();
     const uint8_t *rps = flash_addr + WIFI_FLASH_HEADER_SIZE;
     uint32_t ver_info = *(const uint32_t *)(rps + 12);
     uint32_t ver_ext  = *(const uint32_t *)(rps + 44);
-    storage_unlock();
+    storage_unlock_ext();
 
     uint8_t major    = (ver_info >> 24) & 0xFF;
     uint8_t minor    = (ver_info >> 16) & 0xFF;

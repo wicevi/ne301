@@ -280,7 +280,7 @@ extern void sl_debug_log(const char *format, ...);
 #endif
 
 #ifndef SLI_HOST_CURRENT_DBGLOG_LEVEL
-#define SLI_HOST_CURRENT_DBGLOG_LEVEL SLI_HOST_DBGLOG_LVL_INFO
+#define SLI_HOST_CURRENT_DBGLOG_LEVEL SLI_HOST_DBGLOG_LVL_WARN
 #endif
 
 #define SL_DEBUG_LOG_V2(level, fmt, ...)                                \

@@ -74,7 +74,7 @@ endif
 # =============================================================================
 # Set component-specific versions (leave empty to use main version)
 # Format: MAJOR.MINOR.PATCH.BUILD or empty
-FSBL_VERSION_OVERRIDE    := 1.0.3.0
+FSBL_VERSION_OVERRIDE    := 1.0.3.1
 APP_VERSION_OVERRIDE     := 
 WEB_VERSION_OVERRIDE     := 1.5.0.3
 # Model OTA: $(STEDGEAI_BIT).$(MODEL_VERSION_OVERRIDE) — BIT auto in stedgeai.mk (2.2->2, 3.0->3, 4.0->4)
@@ -104,7 +104,7 @@ WAKECORE_VERSION := $(if $(WAKECORE_VERSION_OVERRIDE),$(WAKECORE_VERSION_OVERRID
 # user to upgrade when a mismatch is detected.
 #
 # NOTE: keep EXPECTED_FSBL_VERSION in sync with FSBL_VERSION_OVERRIDE above.
-EXPECTED_FSBL_VERSION := 1.0.3.0
+EXPECTED_FSBL_VERSION := 1.0.3.1
 
 # Expected WiFi (SiWG917) firmware version.  Must match the .rps bundled under
 # Custom/Common/Lib/SiliconLabs_SDK/firmware/ using the same encoding as the
