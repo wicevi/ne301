@@ -313,7 +313,7 @@ export default function DeviceTool() {
               />
             </div>
             <div
-              className=" w-full  bg-white pt-4 px-4"
+              className=" w-full bg-white pt-4"
             >
               {isLoading ? (
                 <DeviceToolSkeleton />
