@@ -1790,6 +1790,13 @@ static uint32_t configure_u0_wakeup_sources(system_controller_t *controller, uin
             // Step 2: Switch to si91x mqtt client
             mqtt_service_stop();
             mqtt_service_set_api_type(MQTT_API_TYPE_SI91X);
+            // From here on all publishes go through the Si91x embedded MQTT. Its command
+            // buffer (CE_TX) is only 2324B; si91x_mqtt_client_publish rejects payloads
+            // >1800B with MQTT_ERR_SIZE (prevents a memcpy overflow that corrupts the
+            // shared heap -- see the guard in si91x_mqtt_client.c). So PIR-triggered
+            // captures (~50KB base64) during remote wakeup CANNOT be uploaded via Si91x
+            // and are dropped. Architectural direction TBD (queue until MS wakes /
+            // suppress capture during remote wakeup / use Si91x socket transport).
             result = sl_net_netif_romote_wakeup_mode_ctrl(WAKEUP_MODE_WIFI);
             if (result != AICAM_OK) {
                 LOG_SVC_WARN("Failed to enable remote wakeup mode: %d", result);

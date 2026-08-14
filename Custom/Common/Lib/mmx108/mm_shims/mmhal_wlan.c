@@ -329,7 +329,6 @@ void mmhal_wlan_set_busy_irq_enabled(bool enabled)
     }
     else
     {
-        printf("mmhal_wlan_set_busy_irq_enabled: disabling busy irq\n");
         HAL_NVIC_DisableIRQ(MM_HALOW_BUSY_IRQn);
     }
 }

@@ -922,6 +922,7 @@ sl_status_t sl_net_wifi_client_up(sl_net_interface_t interface, sl_net_profile_i
         status = sl_wifi_connect(SL_WIFI_CLIENT_INTERFACE, &wifi_client_profile.config, 18000);
     // } while (status != SL_STATUS_OK && cnt_try_times++ < 3);
     if (status != SL_STATUS_OK) {
+        sl_wifi_disconnect(SL_WIFI_CLIENT_INTERFACE);
         LOG_DRV_ERROR("Failed to connect to Wi-Fi: 0x%0lX\r\n", status);
         return status;
     }
@@ -1852,9 +1853,13 @@ static sl_status_t ap_connected_event_handler(sl_wifi_event_t event, void *data,
     UNUSED_PARAMETER(arg);
     UNUSED_PARAMETER(event);
 
-    printf("Remote Client connected: ");
-    print_mac_address((sl_mac_address_t *)mac_address);
-    printf("\r\n");
+    printf("Remote Client connected: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+           mac_address->octet[0],
+           mac_address->octet[1],
+           mac_address->octet[2],
+           mac_address->octet[3],
+           mac_address->octet[4],
+           mac_address->octet[5]);
 #if IS_TCP_IP_DUAL_MODE && IS_SELF_DHCP_SERVER
     dhcps_add_client_by_mac(mac_address->octet);
 #else
@@ -1873,9 +1878,13 @@ static sl_status_t ap_disconnected_event_handler(sl_wifi_event_t event, void *da
     UNUSED_PARAMETER(arg);
     UNUSED_PARAMETER(event);
 
-    printf("Remote Client disconnected: ");
-    print_mac_address(mac_address);
-    printf("\r\n");
+    printf("Remote Client disconnected: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+           mac_address->octet[0],
+           mac_address->octet[1],
+           mac_address->octet[2],
+           mac_address->octet[3],
+           mac_address->octet[4],
+           mac_address->octet[5]);
 #if IS_TCP_IP_DUAL_MODE && IS_SELF_DHCP_SERVER
     dhcps_del_client_by_mac(mac_address->octet);
 #else

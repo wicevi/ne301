@@ -432,9 +432,14 @@ void device_service_update_device_mac_address()
  */
 void device_service_update_communication_type()
 {
-    
-    // Check WiFi connection status
-    communication_type_t communication_type = communication_get_selected_type();
+    /* Report the type actually carrying data (active), not the user's UI
+     * selection (selected) — the upload JSON must tell the server how this
+     * payload was delivered. Fall back to selected only when nothing is
+     * connected yet. */
+    communication_type_t communication_type = communication_get_current_type();
+    if (communication_type == COMM_TYPE_NONE) {
+        communication_type = communication_get_selected_type();
+    }
     snprintf(g_device_service.device_info.communication_type, sizeof(g_device_service.device_info.communication_type), "%s", communication_type_to_string(communication_type));
 
     LOG_SVC_DEBUG("Communication type updated: %s", g_device_service.device_info.communication_type);
@@ -1059,6 +1064,12 @@ aicam_result_t device_service_get_cached_info(device_info_config_t *info)
 
     /* Battery is dynamic but fast (HAL GPIO read); update it here. */
     update_battery_info(&g_device_service.device_info);
+
+    /* communication_type must reflect the live active connection (the link
+     * actually delivering this upload), not a stale boot-time default.
+     * Refresh here so every MQTT publish — real-time and batch — stamps the
+     * current type (both paths build JSON via this getter). */
+    device_service_update_communication_type();
 
     memcpy(info, &g_device_service.device_info, sizeof(device_info_config_t));
     return AICAM_OK;

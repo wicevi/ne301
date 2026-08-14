@@ -246,6 +246,7 @@ sl_status_t sl_si91x_host_spi_transfer(const void *tx_buffer, void *rx_buffer, u
             if (sem_status != osOK) {
                 printf("sem_spi4 dma failed(ret = %d)!\r\n", (int)sem_status);
                 HAL_SPI_Abort(&hspi4);
+                sl_si91x_host_enable_high_speed_bus();
                 osMutexRelease(mtx_id);
                 return SL_STATUS_TIMEOUT;
             }
@@ -348,14 +349,19 @@ void sl_si91x_host_clear_sleep_indicator(void)
 
 uint32_t sl_si91x_host_get_wake_indicator(void)
 {
-    // Plain GPIO read — matches the SDK reference ports (stm32/efx32).
-    // req_wakeup() busy-loops on this once per SPI transaction, so a blocking
-    // call here kills throughput: the old osSemaphoreAcquire(sem_sta,10) added
-    // a 10ms stall on EVERY transaction (HIGH_PERFORMANCE: NCP never sleeps,
-    // EXTI5 never fires, sem never released => full timeout). That cost was
-    // hidden in 4.0.2 (req_wakeup gated on != HIGH_PERFORMANCE) and exposed by
-    // 4.1.1's unconditional per-transaction handshake, cutting throughput >5x.
-    return HAL_GPIO_ReadPin(WIFI_STA_GPIO_Port, WIFI_STA_Pin);
+    uint32_t awake = HAL_GPIO_ReadPin(WIFI_STA_GPIO_Port, WIFI_STA_Pin);
+    // Already awake (HIGH_PERFORMANCE never sleeps): return immediately, zero
+    // per-transaction overhead. Only when sleeping do we block on the WIFI_STA
+    // rising-edge semaphore (EXTI5) for up to 10ms — this yields the RT1 thread
+    // so a wedged chip can't starve the scheduler (console dies / no reboot
+    // because wdgTask RT7 keeps feeding IWDG), and returns the instant the chip
+    // actually asserts WIFI_STA. req_wakeup() loops this up to 5s. 4.0.2 form,
+    // but gated on !awake so HIGH_PERFORMANCE keeps the old 10ms-per-tx hit off.
+    if (!awake) {
+        osSemaphoreAcquire(sem_sta, 10);
+        awake = HAL_GPIO_ReadPin(WIFI_STA_GPIO_Port, WIFI_STA_Pin);
+    }
+    return awake;
 }
 
 static void si91x_gpio_interrupt(void)

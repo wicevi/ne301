@@ -154,6 +154,18 @@ void HardFault_Handler(void)
            cfsr, bfar, mmfar, hfsr);
     printf("  EXC_RETURN=0x%08lx SP=0x%08lx PC=0x%08lx LR=0x%08lx\r\n",
            exc_return, (uint32_t)sp, sp[6], sp[5]);
+    printf("  R0=0x%08lx R1=0x%08lx R2=0x%08lx R3=0x%08lx\r\n",
+           sp[0], sp[1], sp[2], sp[3]);
+    /* Walk the faulting task's stack for OCTOSPI-region (0x90xxxxxx) return
+     * addresses so addr2line can resolve frames above the stacked PC/LR. */
+    { uint32_t v; int i;
+      printf("  BT:");
+      for(i = 8; i < 256; i++) {
+        v = sp[i];
+        if((v >> 24) == 0x90u) { printf(" 0x%08lx", (unsigned long)(v & ~1u)); }
+      }
+      printf("\r\n");
+    }
   }
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
@@ -169,7 +181,31 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-  printf("MemManage_Handler\r\n");
+  {
+    volatile uint32_t cfsr  = SCB->CFSR;
+    volatile uint32_t mmfar = SCB->MMFAR;
+    register uint32_t exc_return __asm("lr");
+    volatile uint32_t *sp = (volatile uint32_t *)((exc_return & 0x4U) ? __get_PSP() : __get_MSP());
+    uint32_t mmfsr = cfsr & 0xFFU;   /* low byte of CFSR = MMFSR */
+
+    printf("MemManage CFSR=0x%08lx MMFAR=0x%08lx EXC_RETURN=0x%08lx SP=0x%08lx\r\n",
+           cfsr, mmfar, exc_return, (uint32_t)sp);
+
+    /* MSP stack-guard (region 1, [&_sstack, &_sstack+0x100)): a faulting access
+     * whose address lands in this band is the sentinel catching MSP overflow
+     * into the newlib heap. Needs MMARVALID (MMFSR bit7) for a meaningful MMFAR. */
+    extern uint32_t _sstack;
+    if ((mmfsr & (1U << 7)) &&
+        mmfar >= (uint32_t)&_sstack && mmfar < (uint32_t)&_sstack + 0x100U)
+      printf("  *** MSP STACK GUARD TRIP (overflow into heap) ***\r\n");
+
+    /* Stacked frame is valid unless a stacking fault (MSTKERR/MUNSTKERR) means it
+     * was never stored. PRIV_RO keeps reads of the guard band non-faulting. */
+    if ((mmfsr & ((1U << 4) | (1U << 3))) == 0U)
+      printf("  PC=0x%08lx LR=0x%08lx\r\n", sp[6], sp[5]);
+    else
+      printf("  (stacking fault: stacked frame unreliable)\r\n");
+  }
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {

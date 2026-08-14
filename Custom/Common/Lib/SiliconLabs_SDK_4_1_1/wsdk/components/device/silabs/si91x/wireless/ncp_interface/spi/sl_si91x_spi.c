@@ -43,6 +43,7 @@
 #include "sli_hal_si91x.h"
 #include <stdint.h>
 #include <stddef.h>
+#include "cmsis_os2.h" // ponytail: osDelay for spin-loop yield guards (sli_send_c1c2 / sli_wait_start_token)
 
 // This macro converts a 32-bit value from host to little-endian byte order
 #define htole32(x) (x)
@@ -89,6 +90,7 @@ static sl_status_t sli_send_c1c2(uint16_t data)
   uint8_t rx_buffer[2] = { 0, 0 };
 
   const uint32_t timestamp = sl_si91x_host_get_timestamp();
+  uint32_t poll = 0;
 
   do {
     // Send C1/C2 and receive the response in rx_buffer
@@ -100,6 +102,14 @@ static sl_status_t sli_send_c1c2(uint16_t data)
     }
     if ((rx_buffer[1] == SLI_SPI_SUCCESS) || (rx_buffer[1] == 0x00)) {
       return SL_STATUS_OK;
+    }
+    // ponytail: chip busy / garbage (0xFF matches no token). A healthy transfer
+    // blocks on DMA so the loop yields naturally, but a desynced bus returns
+    // instantly and this 1s poll would monopolise the RT1 HAL thread — console/
+    // business die while wdgTask (RT7) keeps feeding IWDG → silent hang, no
+    // reboot. Success returns above, so this only costs the retry path.
+    if ((++poll & 0x3F) == 0) {
+      osDelay(1);
     }
     // If a timeout occurs while waiting for a response, return a timeout status
   } while (sl_si91x_host_elapsed_time(timestamp) < 1000);
@@ -121,6 +131,7 @@ static sl_status_t sli_wait_start_token(uint32_t timeout)
   // If not found within the timeout time, error out
   // Timeout value needs to be passed since context is important
   const uint32_t timestamp = sl_si91x_host_get_timestamp();
+  uint32_t poll = 0;
 
   while (temp != SLI_SPI_START_TOKEN) {
     if (sl_si91x_host_elapsed_time(timestamp) > timeout) {
@@ -129,6 +140,12 @@ static sl_status_t sli_wait_start_token(uint32_t timeout)
 
     // Continuously send/receive data until the start token is found
     status = sl_si91x_host_spi_transfer(NULL, &temp, sizeof(temp));
+    // ponytail: same yield guard as sli_send_c1c2 — a desynced bus returns 0xFF
+    // (never == START_TOKEN 0x55) and this poll (up to 10s) would spin without
+    // yielding. Normal start-token arrival is a few iters, so < 64 → no cost.
+    if ((++poll & 0x3F) == 0) {
+      osDelay(1);
+    }
   }
   return status;
 }
@@ -535,6 +552,15 @@ void sli_si91x_bus_rx_done_handler(void)
   return;
 }
 
+// ponytail: original ulp_wakeup_init was while(1) with no exit on garbage —
+// rxbuff[1]==0xFF matches neither FAIL(0x52)/0x00/SUCCESS(0x58), so a desynced
+// bus (e.g. after a rare host DMA-completion glitch) spun here forever inside
+// req_wakeup() (called every HAL-thread iteration), hard-locking the RT1 thread:
+// console/business die but wdgTask (RT7) keeps feeding IWDG → one
+// "sem_spi4 dma failed" then total silence, no reboot. Bail on a failed transfer
+// too, and cap retries. Normal re-sync is 1-2 tries, so the bound never bites.
+#define SLI_SI91X_ULP_WAKEUP_INIT_RETRIES 1000
+
 //! Initialize with modules Slave SPI interface on ulp wakeup.
 void sli_si91x_ulp_wakeup_init(void)
 {
@@ -548,15 +574,19 @@ void sli_si91x_ulp_wakeup_init(void)
   txCmd[3] = ((SLI_SI91X_INIT_CMD >> 24) & 0xFF);
   sl_si91x_host_spi_cs_assert();
 
-  while (1) {
+  for (uint16_t retry = 0; retry < SLI_SI91X_ULP_WAKEUP_INIT_RETRIES; retry++) {
     // Transfer the initialization command to the SI91x module and check the response
-    sl_si91x_host_spi_transfer(txCmd, rxbuff, 2);
+    if (sl_si91x_host_spi_transfer(txCmd, rxbuff, 2) != SL_STATUS_OK) {
+      break; // bus error (e.g. DMA timeout) — can't re-sync, bail out
+    }
 
     if (rxbuff[1] == SLI_SPI_FAIL) {
       break; // Initialization failed, exit the loop
     } else if (rxbuff[1] == 0x00) {
       // If the response indicates success, transfer the remaining part of the command
-      sl_si91x_host_spi_transfer(&txCmd[2], rxbuff, 2);
+      if (sl_si91x_host_spi_transfer(&txCmd[2], rxbuff, 2) != SL_STATUS_OK) {
+        break;
+      }
       if (rxbuff[1] == SLI_SPI_SUCCESS) {
         break; // Initialization succeeded, exit the loop
       }

@@ -156,13 +156,15 @@ void NPURam_disable()
 
 static void Setup_Mpu()
 {
-    MPU_Attributes_InitTypeDef attr;
-    MPU_Region_InitTypeDef region;
+    extern uint32_t _sstack;            /* linker: MSP bottom = _estack - _Min_Stack_Size */
+    MPU_Attributes_InitTypeDef attr = {0};
+    MPU_Region_InitTypeDef region = {0};
 
     attr.Number = MPU_ATTRIBUTES_NUMBER0;
     attr.Attributes = MPU_NOT_CACHEABLE;
     HAL_MPU_ConfigMemoryAttributes(&attr);
 
+    /* Region 0: .uncached_bss (SPI/DMA buffers) -- non-cacheable. */
     region.Enable = MPU_REGION_ENABLE;
     region.Number = MPU_REGION_NUMBER0;
     region.BaseAddress = (uint32_t)&__uncached_bss_start__;
@@ -171,6 +173,27 @@ static void Setup_Mpu()
     region.AccessPermission = MPU_REGION_ALL_RW;
     region.DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE;
     region.IsShareable = MPU_ACCESS_NOT_SHAREABLE;
+    HAL_MPU_ConfigRegion(&region);
+
+    /* Region 1: MSP stack-overflow sentinel. The bottom 256B of the 4KB MSP
+     * stack is privileged read-only, so a push that would overflow the stack
+     * into the newlib heap sitting directly below _sstack faults here instead
+     * of silently corrupting heap metadata. All handler-mode code and the
+     * pre-scheduler boot path run on MSP, so this is the stack at risk.
+     *
+     * This N6 MPU has no NO_ACCESS mode: its 2-bit AP field only encodes
+     * PRIV_RW/ALL_RW/PRIV_RO/ALL_RO. PRIV_RO faults on a privileged *write*,
+     * which is exactly what a stack push is (privileged reads of the guard are
+     * still allowed, so HardFault_Handler's frame dump won't double-fault). A
+     * survivable trip shows up as DACCVIOL + MMFAR=0x341b10xx in the existing
+     * HardFault print; a catastrophic deep overflow escalates to lockup+IWDG,
+     * which is itself the deterministic "4KB is too small" signal. */
+    #define MSP_GUARD_SIZE  0x100U          /* 256B tripwire at stack bottom */
+    region.Number = MPU_REGION_NUMBER1;
+    region.BaseAddress = (uint32_t)&_sstack;
+    region.LimitAddress = (uint32_t)&_sstack + MSP_GUARD_SIZE - 1;
+    region.AccessPermission = MPU_REGION_PRIV_RO;
+    region.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;   /* guard is never executed */
     HAL_MPU_ConfigRegion(&region);
 
     HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
@@ -379,7 +402,7 @@ void StartMainTask(void *argument)
     }
     
     printf("MAIN: %lu ms\r\n", (unsigned long)rtc_get_uptime_ms());
-    
+
     /* Infinite loop */
     uint32_t flush_poll_div = 0;  /* counts osDelay(100) ticks; poll flush every ~150 (15s) */
     for(;;)
