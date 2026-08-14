@@ -362,11 +362,11 @@ export default function RtspConfig() {
               <Label className="text-sm text-text-primary mb-2 block">
                 {i18n._('sys.device_tool.rtsp.stream_url')}
               </Label>
-              <div className="flex items-center gap-2 bg-gray-100 border border-dashed border-gray-300 rounded-md px-3 py-2">
+              <div className="flex items-center gap-2 min-w-0 overflow-hidden bg-gray-100 border border-dashed border-gray-300 rounded-md px-3 py-2">
                 <span className="text-sm text-orange-500 font-medium shrink-0">
                   {i18n._('sys.device_tool.rtsp.video_stream')}
                 </span>
-                <span className="flex-1 font-mono text-sm text-text-primary truncate select-all">
+                <span className="flex-1 min-w-0 font-mono text-sm text-text-primary truncate select-all">
                   {streamUrl}
                 </span>
                 <button
