@@ -475,7 +475,7 @@ static int sli_send_response_buffer(sl_http_server_t *server, sl_http_server_res
   char *http_version      = NULL;
   size_t buffer_length    = 0;
 
-  char *response_buffer = malloc(HTTP_MAX_HEADER_LENGTH);
+  char *response_buffer = SLI_MALLOC(HTTP_MAX_HEADER_LENGTH);
 
   // Check if memory allocation was successful
   if (response_buffer == NULL) {
@@ -542,12 +542,12 @@ static int sli_send_response_buffer(sl_http_server_t *server, sl_http_server_res
   if (sli_process_socket_buffered_data(server->client_socket, (char *)response_buffer, buffer_length, window_size)
       != 0) {
     SL_DEBUG_LOG_V2(DEBUG, "Response header send failed.\r\n");
-    free(response_buffer);
+    SLI_FREE(response_buffer);
     return -1;
   }
 
   // Free the header buffer
-  free(response_buffer);
+  SLI_FREE(response_buffer);
 
   // Send response data separately in chunks
   if ((NULL != response->data) && (response->current_data_length > 0)) {

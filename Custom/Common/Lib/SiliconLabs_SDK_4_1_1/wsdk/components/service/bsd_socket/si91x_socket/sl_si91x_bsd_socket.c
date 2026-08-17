@@ -811,12 +811,12 @@ static int sli_handle_sl_so_verify_domain_name(sli_si91x_socket_t *si91x_socket,
 
   // Free any existing domain name
   if (si91x_socket->domain_name != NULL) {
-    free(si91x_socket->domain_name);
+    SLI_FREE(si91x_socket->domain_name);
     si91x_socket->domain_name = NULL;
   }
 
   // Allocate memory for the new domain name
-  si91x_socket->domain_name = (uint8_t *)malloc(option_length + 1);
+  si91x_socket->domain_name = (uint8_t *)SLI_MALLOC(option_length + 1);
   if (si91x_socket->domain_name == NULL) {
     errno = ENOMEM;
     return -1;

@@ -237,7 +237,7 @@ static void sli_si91x_remove_and_free_all_subscriptions(sl_mqtt_client_t *client
   while ((node_to_be_freed = (sl_mqtt_client_topic_subscription_info_t *)(sl_slist_pop(
             (sl_slist_node_t **)&client->subscription_list_head)))
          != NULL) {
-    free(node_to_be_freed);
+    SLI_FREE(node_to_be_freed);
   }
 }
 static inline bool is_connect_previously_called(const sl_mqtt_client_t *client)
@@ -257,7 +257,7 @@ sl_status_t sli_si91x_build_mqtt_sdk_context_if_async(sl_mqtt_client_event_t eve
     return SL_STATUS_OK;
   }
 
-  sl_si91x_mqtt_client_context_t *mqtt_client_sdk_context = calloc(1, sizeof(sl_si91x_mqtt_client_context_t));
+  sl_si91x_mqtt_client_context_t *mqtt_client_sdk_context = SLI_CALLOC(1, sizeof(sl_si91x_mqtt_client_context_t));
 
   if (mqtt_client_sdk_context == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
@@ -340,7 +340,7 @@ static sl_status_t sli_si91x_fetch_mqtt_client_credentials(sl_net_credential_id_
   uint32_t maximum_credential_size = sizeof(sl_mqtt_client_credentials_t) + SI91X_MQTT_CLIENT_USERNAME_MAXIMUM_LENGTH
                                      + SI91X_MQTT_CLIENT_PASSWORD_MAXIMUM_LENGTH;
 
-  sl_mqtt_client_credentials_t *mqtt_credentials = malloc(maximum_credential_size);
+  sl_mqtt_client_credentials_t *mqtt_credentials = SLI_MALLOC(maximum_credential_size);
 
   if (mqtt_credentials == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
@@ -352,13 +352,13 @@ static sl_status_t sli_si91x_fetch_mqtt_client_credentials(sl_net_credential_id_
   sl_status_t status = sl_net_get_credential(credential_id, &type, mqtt_credentials, &maximum_credential_size);
 
   if (status != SL_STATUS_OK || type != SL_NET_MQTT_CLIENT_CREDENTIAL) {
-    free(mqtt_credentials);
+    SLI_FREE(mqtt_credentials);
     return status != SL_STATUS_OK ? status : SL_STATUS_INVALID_CREDENTIALS;
   }
 
   if (mqtt_credentials->username_length >= SI91X_MQTT_CLIENT_USERNAME_MAXIMUM_LENGTH
       || mqtt_credentials->password_length >= SI91X_MQTT_CLIENT_PASSWORD_MAXIMUM_LENGTH) {
-    free(mqtt_credentials);
+    SLI_FREE(mqtt_credentials);
     return SL_STATUS_INVALID_PARAMETER;
   }
 
@@ -678,7 +678,7 @@ sl_status_t sl_mqtt_client_publish(sl_mqtt_client_t *client,
   sl_si91x_mqtt_client_context_t *sdk_context = NULL;
   uint32_t publish_request_size = sizeof(sli_si91x_mqtt_client_publish_request_t) + message->content_length;
 
-  sli_si91x_mqtt_client_publish_request_t *si91x_publish_request = calloc(1, publish_request_size);
+  sli_si91x_mqtt_client_publish_request_t *si91x_publish_request = SLI_CALLOC(1, publish_request_size);
   if (si91x_publish_request == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -714,7 +714,7 @@ sl_status_t sl_mqtt_client_publish(sl_mqtt_client_t *client,
                                  timeout <= 0 ? SLI_WIFI_RETURN_IMMEDIATELY : SLI_WIFI_WAIT_FOR(timeout),
                                  sdk_context,
                                  NULL);
-  free(si91x_publish_request);
+  SLI_FREE(si91x_publish_request);
 
   if (status == SL_STATUS_IN_PROGRESS) {
     return status;
@@ -749,7 +749,7 @@ sl_status_t sl_mqtt_client_subscribe(sl_mqtt_client_t *client,
   sl_si91x_mqtt_client_context_t *sdk_context               = NULL;
 
   sl_mqtt_client_topic_subscription_info_t *subscription =
-    calloc(1, sizeof(sl_mqtt_client_topic_subscription_info_t) + topic_length);
+    SLI_CALLOC(1, sizeof(sl_mqtt_client_topic_subscription_info_t) + topic_length);
 
   status = sli_si91x_build_mqtt_sdk_context_if_async(SL_MQTT_CLIENT_SUBSCRIBED_EVENT,
                                                      client,
@@ -789,7 +789,7 @@ sl_status_t sl_mqtt_client_subscribe(sl_mqtt_client_t *client,
     return status;
   } else if (status != SL_STATUS_OK) {
 
-    free(subscription);
+    SLI_FREE(subscription);
     SL_CLEANUP_MALLOC(sdk_context);
     return status;
   }
@@ -850,7 +850,7 @@ sl_status_t sl_mqtt_client_unsubscribe(sl_mqtt_client_t *client,
 
   if (subscription != NULL) {
     sl_slist_remove((sl_slist_node_t **)&client->subscription_list_head, (sl_slist_node_t *)subscription);
-    free(subscription);
+    SLI_FREE(subscription);
   }
 
   return status;
@@ -898,9 +898,9 @@ sl_status_t sli_si91x_mqtt_event_handler(sl_status_t status,
   // Populate the error status only if the event is an error event.
   sl_mqtt_client_error_status_t *error_status = NULL;
   if (is_error_event) {
-    error_status = malloc(sizeof(sl_mqtt_client_error_status_t));
+    error_status = SLI_MALLOC(sizeof(sl_mqtt_client_error_status_t));
     if (error_status == NULL) {
-      free(sdk_context);
+      SLI_FREE(sdk_context);
       return SL_STATUS_ALLOCATION_FAILED;
     }
     *error_status = sli_si91x_get_event_error_status(sdk_context->event);
@@ -912,10 +912,10 @@ sl_status_t sli_si91x_mqtt_event_handler(sl_status_t status,
                                             sdk_context->user_context);
 
   // Free the sdk_context after event handler is triggered.
-  free(sdk_context);
+  SLI_FREE(sdk_context);
   // Free error_status if it was allocated.
   if (error_status != NULL) {
-    free(error_status);
+    SLI_FREE(error_status);
   }
   return SL_STATUS_OK;
 }
@@ -964,7 +964,7 @@ static void sli_si91x_handle_subscribed_event(sl_status_t status,
 {
   if (status != SL_STATUS_OK) {
     // Free subscription passed in subscribe() call if subscription call failed.
-    free(sdk_context->sdk_data);
+    SLI_FREE(sdk_context->sdk_data);
     *is_error_event = true;
     return;
   }
@@ -987,7 +987,7 @@ static void sli_si91x_handle_unsubscribed_event(sl_status_t status,
   // Free subscription if the unsubscription API call is successful.
   sl_slist_remove((sl_slist_node_t **)&sdk_context->client->subscription_list_head,
                   (sl_slist_node_t *)sdk_context->sdk_data);
-  free(sdk_context->sdk_data);
+  SLI_FREE(sdk_context->sdk_data);
   return;
 }
 
@@ -1009,7 +1009,7 @@ static void sli_si91x_handle_message_received_event(sl_status_t status,
                                               SL_MQTT_CLIENT_ERROR_EVENT,
                                               (void *)&error_status,
                                               sdk_context->user_context);
-    free(sdk_context);
+    SLI_FREE(sdk_context);
     return;
   }
 
@@ -1018,7 +1018,7 @@ static void sli_si91x_handle_message_received_event(sl_status_t status,
     const sli_si91x_mqtt_client_received_chunk_t *chunk =
       (const sli_si91x_mqtt_client_received_chunk_t *)rx_packet->data;
     sli_si91x_handle_subsequent_chunk(sdk_context, chunk);
-    free(sdk_context);
+    SLI_FREE(sdk_context);
     return;
   }
 
@@ -1034,7 +1034,7 @@ static void sli_si91x_handle_message_received_event(sl_status_t status,
     sli_si91x_handle_first_chunk(sdk_context, message);
   }
 
-  free(sdk_context);
+  SLI_FREE(sdk_context);
 }
 
 /**
@@ -1265,7 +1265,7 @@ static void sli_si91x_handle_first_chunk(sl_si91x_mqtt_client_context_t *sdk_con
   // Allocate single buffer for both topic and reassembly payload (optimization: single malloc)
   // Layout: [topic (topic_length bytes)][payload (total_length bytes)]
   uint32_t combined_buffer_size = topic_length + total_length;
-  uint8_t *combined_buffer      = (uint8_t *)malloc(combined_buffer_size);
+  uint8_t *combined_buffer      = (uint8_t *)SLI_MALLOC(combined_buffer_size);
   if (combined_buffer == NULL) {
     SL_DEBUG_LOG_V2(ERROR, "MQTT reassembly: Failed to allocate buffer of %lu bytes", combined_buffer_size);
 
@@ -1326,7 +1326,7 @@ static void sli_si91x_mqtt_reset_reassembly_state(void)
   // topic points to the start of the combined buffer (topic + reassembly_buffer)
   // Only free topic since reassembly_buffer is an offset into the same allocation
   if (mqtt_rx_reassembly.topic != NULL) {
-    free(mqtt_rx_reassembly.topic);
+    SLI_FREE(mqtt_rx_reassembly.topic);
   }
   memset(&mqtt_rx_reassembly, 0, sizeof(mqtt_rx_reassembly));
 }
@@ -1428,7 +1428,7 @@ sl_status_t sl_mqtt_client_connect_v2(sl_mqtt_client_t *client,
         return SL_STATUS_INVALID_PARAMETER; // SNI hostname length invalid or exceeds max size
       }
       sli_si91x_tls_extension_info_t *internal_sni =
-        (sli_si91x_tls_extension_info_t *)malloc(sizeof(sli_si91x_tls_extension_info_t) + sni_host_name_len);
+        (sli_si91x_tls_extension_info_t *)SLI_MALLOC(sizeof(sli_si91x_tls_extension_info_t) + sni_host_name_len);
       if (internal_sni == NULL) {
         return SL_STATUS_ALLOCATION_FAILED;
       }
@@ -1436,13 +1436,13 @@ sl_status_t sl_mqtt_client_connect_v2(sl_mqtt_client_t *client,
       internal_sni->length = (uint16_t)sni_host_name_len;
       memcpy(internal_sni->value, broker->sni_host_name, sni_host_name_len);
       status = sli_configure_sni(internal_sni, broker->sni_host_name, SI91X_SNI_FOR_MQTT);
-      free(internal_sni);
+      SLI_FREE(internal_sni);
       if (status != SL_STATUS_OK) {
         return status;
       }
     }
     // Convert sl_mqtt_broker_v2_t to sl_mqtt_broker_t for legacy API compatibility
-    legacy_broker_ptr = (sl_mqtt_broker_t *)malloc(sizeof(sl_mqtt_broker_t));
+    legacy_broker_ptr = (sl_mqtt_broker_t *)SLI_MALLOC(sizeof(sl_mqtt_broker_t));
     if (legacy_broker_ptr == NULL) {
       return SL_STATUS_ALLOCATION_FAILED;
     }
@@ -1456,7 +1456,7 @@ sl_status_t sl_mqtt_client_connect_v2(sl_mqtt_client_t *client,
 
   status = sli_mqtt_client_connect(client, legacy_broker_ptr, last_will_message, configuration, connect_timeout);
   if (legacy_broker_ptr != NULL) {
-    free(legacy_broker_ptr);
+    SLI_FREE(legacy_broker_ptr);
   }
   return status;
 }

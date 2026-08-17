@@ -85,14 +85,14 @@ static sl_status_t sli_callback_with_status(sli_wifi_callback_entry_t *entry,
     return entry->function_v2(event, status, data, length, entry->arg);
   }
 
-  sl_status_t *status_pointer = (sl_status_t *)malloc(sizeof(status));
+  sl_status_t *status_pointer = (sl_status_t *)SLI_MALLOC(sizeof(status));
   if (status_pointer == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
   *status_pointer = status;
 
   sl_status_t result = entry->function(event, status_pointer, length, entry->arg);
-  free(status_pointer);
+  SLI_FREE(status_pointer);
   return result;
 }
 
@@ -131,7 +131,7 @@ static sl_status_t sli_handle_tx_transceiver_event(sli_wifi_callback_entry_t *en
     return SL_STATUS_NULL_POINTER;
   }
   sl_wifi_transceiver_tx_data_confirmation_t *tx_cfm_cb_data =
-    (sl_wifi_transceiver_tx_data_confirmation_t *)malloc(sizeof(sl_wifi_transceiver_tx_data_confirmation_t));
+    (sl_wifi_transceiver_tx_data_confirmation_t *)SLI_MALLOC(sizeof(sl_wifi_transceiver_tx_data_confirmation_t));
   if (tx_cfm_cb_data == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -155,7 +155,7 @@ static sl_status_t sli_handle_rx_transceiver_event(sli_wifi_callback_entry_t *en
     return SL_STATUS_NULL_POINTER;
   }
   sl_wifi_transceiver_rx_data_t *rx_cb_data =
-    (sl_wifi_transceiver_rx_data_t *)malloc(sizeof(sl_wifi_transceiver_rx_data_t));
+    (sl_wifi_transceiver_rx_data_t *)SLI_MALLOC(sizeof(sl_wifi_transceiver_rx_data_t));
   if (rx_cb_data == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -186,6 +186,12 @@ static sl_status_t sli_handle_rx_transceiver_event(sli_wifi_callback_entry_t *en
 
 sl_status_t sl_wifi_default_event_handler(sl_wifi_event_t event, sl_wifi_buffer_t *buffer)
 {
+  // Firmware-level failure: hand it to the host recovery hook before normal
+  // dispatch (netif layer maps this exact value to a STA-disconnect event).
+  if (event == (SL_WIFI_EVENT_FAIL_INDICATION_EVENTS | SL_WIFI_JOIN_EVENTS)) {
+    sli_firmware_error_callback((int)event);
+  }
+
   sli_wifi_callback_entry_t *entry = sli_get_callback_entry((sl_wifi_event_group_t)event);
 
   // Verify there is a entry registered, if not return immediately

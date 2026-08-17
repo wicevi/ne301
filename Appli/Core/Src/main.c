@@ -107,6 +107,20 @@ const osThreadAttr_t mainTask_attributes = {
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/// @brief Project-wide assert destination: newlib assert() override AND SDK
+/// SL_ASSERT/BREAKPOINT (declared in SDK sl_constants.h) land here.
+/// Production policy: print the exact site, then reboot. Halts on bkpt only
+/// when a debug session is live — a raw bkpt executed without a debugger
+/// escalates to HardFault (lockup in IRQ context) and silently hangs the unit.
+void __assert_func(const char *file, int line, const char *func, const char *failedexpr)
+{
+    printf("[ASSERT] %s:%d (%s): %s\r\n", file, line, func ? func : "?", failedexpr ? failedexpr : "?");
+    if ((CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) != 0u) {
+        __asm volatile ("bkpt 0"); /* debugger attached: halt for inspection */
+    }
+    HAL_NVIC_SystemReset();
+    while (1) { } /* not reached */
+}
 
 void NPURam_enable()
 {

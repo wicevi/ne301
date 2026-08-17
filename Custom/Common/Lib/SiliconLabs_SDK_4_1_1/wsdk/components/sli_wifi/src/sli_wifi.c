@@ -2579,7 +2579,7 @@ sl_status_t sli_wifi_update_gain_table(uint8_t band, uint8_t bandwidth, const ui
     return SL_STATUS_INVALID_PARAMETER;
   }
 
-  uint8_t *su_tb_payload = malloc(
+  uint8_t *su_tb_payload = SLI_MALLOC(
     SLI_MAX_GAIN_TABLE_SIZE_WITH_SU_TB); // Allocate memory for gain table with separate gain value entries for 11ax SU and TB
 
   if (su_tb_payload == NULL) {
@@ -2590,12 +2590,12 @@ sl_status_t sli_wifi_update_gain_table(uint8_t band, uint8_t bandwidth, const ui
   status =
     sli_wifi_convert_old_gain_table_to_su_gain_table(payload, su_tb_payload, payload_length, &su_tb_payload_length);
   if (status != SL_STATUS_OK) {
-    free(su_tb_payload);
+    SLI_FREE(su_tb_payload);
     return status;
   }
-  sli_wifi_gain_table_info_t *gain_table_info = malloc(sizeof(sli_wifi_gain_table_info_t) + su_tb_payload_length);
+  sli_wifi_gain_table_info_t *gain_table_info = SLI_MALLOC(sizeof(sli_wifi_gain_table_info_t) + su_tb_payload_length);
   if (gain_table_info == NULL) {
-    free(su_tb_payload);
+    SLI_FREE(su_tb_payload);
     return SL_STATUS_ALLOCATION_FAILED;
   }
   memset(gain_table_info, 0, sizeof(sli_wifi_gain_table_info_t) + su_tb_payload_length);
@@ -2616,8 +2616,8 @@ sl_status_t sli_wifi_update_gain_table(uint8_t band, uint8_t bandwidth, const ui
                                  SLI_WIFI_RSP_GAIN_TABLE_WAIT_TIME,
                                  NULL,
                                  NULL);
-  free(su_tb_payload);
-  free(gain_table_info);
+  SLI_FREE(su_tb_payload);
+  SLI_FREE(gain_table_info);
   VERIFY_STATUS_AND_RETURN(status);
   return status;
 }
@@ -2644,7 +2644,7 @@ sl_status_t sli_wifi_update_su_gain_table(uint8_t band,
     return SL_STATUS_NOT_INITIALIZED;
   }
 
-  sli_wifi_gain_table_info_t *gain_table_info = malloc(sizeof(sli_wifi_gain_table_info_t) + payload_length);
+  sli_wifi_gain_table_info_t *gain_table_info = SLI_MALLOC(sizeof(sli_wifi_gain_table_info_t) + payload_length);
   if (gain_table_info == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -2665,7 +2665,7 @@ sl_status_t sli_wifi_update_su_gain_table(uint8_t band,
                                  SLI_WIFI_RSP_GAIN_TABLE_WAIT_TIME,
                                  NULL,
                                  NULL);
-  free(gain_table_info);
+  SLI_FREE(gain_table_info);
   VERIFY_STATUS_AND_RETURN(status);
   return status;
 }
@@ -3371,7 +3371,7 @@ sl_status_t sli_wifi_add_vendor_ie(sl_wifi_vendor_ie_t *vendor_ie, uint8_t *fw_u
     return SL_STATUS_INVALID_PARAMETER;
   }
 
-  packet = (sli_wifi_manage_vendor_ie_packet_t *)malloc(sizeof(sli_wifi_manage_vendor_ie_packet_t) + ie_buffer_size);
+  packet = (sli_wifi_manage_vendor_ie_packet_t *)SLI_MALLOC(sizeof(sli_wifi_manage_vendor_ie_packet_t) + ie_buffer_size);
   if (packet == NULL) {
     return SL_STATUS_FAIL;
   }
@@ -3394,7 +3394,7 @@ sl_status_t sli_wifi_add_vendor_ie(sl_wifi_vendor_ie_t *vendor_ie, uint8_t *fw_u
                                  NULL,
                                  (void **)&buffer);
 
-  free(packet);
+  SLI_FREE(packet);
   if ((status != SL_STATUS_OK) && (NULL != buffer)) {
     sli_buffer_manager_free_buffer(buffer);
   }

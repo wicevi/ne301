@@ -72,14 +72,14 @@ sl_status_t sl_si91x_default_handler(sl_net_event_t event, sl_wifi_buffer_t *buf
     }
 #ifdef SLI_SI91X_INTERNAL_MDNS
     case SL_NET_MDNS_EVENT: {
-      sl_mdns_response_t *mdns_result = malloc(sizeof(sl_mdns_response_t));
+      sl_mdns_response_t *mdns_result = SLI_MALLOC(sizeof(sl_mdns_response_t));
       if (mdns_result == NULL) {
         return SL_STATUS_ALLOCATION_FAILED;
       }
 
       sl_status_t conv_status = sli_convert_si91x_mdns_response(mdns_result, (sli_net_mdns_response_t *)packet->data);
       if (conv_status != SL_STATUS_OK) {
-        free(mdns_result);
+        SLI_FREE(mdns_result);
         return conv_status;
       }
 
@@ -136,13 +136,13 @@ sl_status_t sl_si91x_default_handler(sl_net_event_t event, sl_wifi_buffer_t *buf
   if (event == SL_NET_MDNS_EVENT) {
     sl_mdns_response_t *mdns_result = (sl_mdns_response_t *)data;
     if (mdns_result->txt.txt != NULL) {
-      free(mdns_result->txt.txt);
+      SLI_FREE(mdns_result->txt.txt);
     }
     if (mdns_result->addr.addr != NULL) {
-      free(mdns_result->addr.addr);
+      SLI_FREE(mdns_result->addr.addr);
       mdns_result->addr.addr = NULL;
     }
-    free(mdns_result);
+    SLI_FREE(mdns_result);
   }
 #endif
   return SL_STATUS_OK;

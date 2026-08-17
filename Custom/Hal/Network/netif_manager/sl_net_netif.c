@@ -2200,6 +2200,9 @@ extern void netif_manager_change_default_if(void);
 extern void sli_generate_c1c2_error(void);
 extern void sli_reset_c1c2_error(void);
 #endif
+#ifdef SIMULATION_SPI4_DMA_ERROR
+extern void sl_si91x_host_sim_spi4_dma(uint8_t mode);
+#endif
 void sl_net_thread(void *arg)
 {
     int event_flag = 0, ret = 0;
@@ -2229,6 +2232,12 @@ void sl_net_thread(void *arg)
                     osMutexAcquire(sl_net_mutex, osWaitForever);
                 #ifdef SLI_SI91X_SIMULATION_C1C2_ERROR
                     sli_reset_c1c2_error();
+                #endif
+                #ifdef SIMULATION_SPI4_DMA_ERROR
+                    // Also clear a dma_ff/dma_once fault injection before re-init, so a
+                    // simulated bus fault self-heals via recovery (mirrors c1c2 above).
+                    // Comment out to test the 10-retry exhaustion path instead.
+                    sl_si91x_host_sim_spi4_dma(0);
                 #endif
                     if (client_state > NETIF_STATE_DEINIT) {
                         ret = sl_net_client_netif_init();

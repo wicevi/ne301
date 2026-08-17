@@ -293,7 +293,7 @@ sl_status_t sli_event_engine_deinit(void)
     sli_queue_manager_deinit(temp->event_queue, sli_event_engine_queue_flush_handler, NULL);
 
     event_handler_list = event_handler_list->next; // Advance to next node
-    free(temp);                                    // Release node memory
+    SLI_FREE(temp);                                    // Release node memory
   }
 
   if (event_engine_Id != NULL) {
@@ -323,7 +323,7 @@ sl_status_t sli_event_engine_register_event(sli_queue_t *event_queue,
     return SL_STATUS_INVALID_PARAMETER;
   }
 
-  node = (sli_event_engine_handler_node_t *)malloc(sizeof(sli_event_engine_handler_node_t)); // Allocate node
+  node = (sli_event_engine_handler_node_t *)SLI_MALLOC(sizeof(sli_event_engine_handler_node_t)); // Allocate node
   if (NULL == node) { // Allocation failure handling
     return SL_STATUS_NO_MORE_RESOURCE;
   }
@@ -336,7 +336,7 @@ sl_status_t sli_event_engine_register_event(sli_queue_t *event_queue,
   // Enqueue the handler node into the registration queue for the event engine thread to process
   status = sli_queue_manager_enqueue(&event_handler_registration_queue, (void *)node);
   if (SL_STATUS_OK != status) { // If enqueue fails release memory
-    free(node);
+    SLI_FREE(node);
     return status;
   }
 
@@ -355,7 +355,7 @@ sl_status_t sli_event_engine_register_event(sli_queue_t *event_queue,
   // Check if success flag was set; if not, treat as failure
   if (SLI_EVENT_ENGINE_REGISTER_EVENT_HANDLER_SUCCESS_EVENT
       != (events_received & SLI_EVENT_ENGINE_REGISTER_EVENT_HANDLER_SUCCESS_EVENT)) {
-    free(node); // Free node on failure (thread did not adopt it)
+    SLI_FREE(node); // Free node on failure (thread did not adopt it)
     return SL_STATUS_FAIL;
   }
 

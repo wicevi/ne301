@@ -653,7 +653,7 @@ static void sli_command_engine_control_queue_flush_handler(const sli_queue_t *ha
   UNUSED_PARAMETER(context); // No extra context required
 
   // Release the buffer associated with this queue node
-  free(data);
+  SLI_FREE(data);
 
   return; // Explicit for clarity
 }
@@ -752,7 +752,7 @@ static void sli_command_engine_thread(void *args)
               sli_queue_manager_deinit(&(ntbr->queue_info.inflight_packet_queue),
                                        sli_command_engine_packet_queue_flush_handler,
                                        (void *)&flush_context);
-              free(ntbr); // Release node memory
+              SLI_FREE(ntbr); // Release node memory
               break;      // Removal complete
             }
             prev = node;       // Track previous for unlink
@@ -762,7 +762,7 @@ static void sli_command_engine_thread(void *args)
 
         // Notify requesting thread its request has been processed
         sli_command_engine_set_thread_event(request->thread_id, SLI_COMMAND_ENGINE_CONFIGURE_PACKET_TYPE_REQUEST_EVENT);
-        free(request);
+        SLI_FREE(request);
       }
     }
 
@@ -1269,7 +1269,7 @@ sl_status_t sli_command_engine_deinit(sli_command_engine_t *instance)
     sli_queue_manager_deinit(&(node->queue_info.inflight_packet_queue),
                              sli_command_engine_packet_queue_flush_handler,
                              (void *)&flush_context);
-    free(node); // Free node memory
+    SLI_FREE(node); // Free node memory
   }
 
   if (NULL != instance->error_buffer) {
@@ -1307,17 +1307,17 @@ sl_status_t sli_command_engine_add_packet_type(sli_command_engine_t *instance,
   }
 
   // Allocate node for the dynamic packet type
-  new_node = (sli_command_engine_packet_type_configuration_node_t *)malloc(
+  new_node = (sli_command_engine_packet_type_configuration_node_t *)SLI_MALLOC(
     sizeof(sli_command_engine_packet_type_configuration_node_t));
   if (NULL == new_node) {
     return SL_STATUS_NO_MORE_RESOURCE;
   }
 
   // Allocate control request object
-  request = (sli_command_engine_packet_type_configuration_request_t *)malloc(
+  request = (sli_command_engine_packet_type_configuration_request_t *)SLI_MALLOC(
     sizeof(sli_command_engine_packet_type_configuration_request_t));
   if (NULL == request) {
-    free(new_node);
+    SLI_FREE(new_node);
     return SL_STATUS_NO_MORE_RESOURCE;
   }
 
@@ -1329,17 +1329,17 @@ sl_status_t sli_command_engine_add_packet_type(sli_command_engine_t *instance,
   // Initialize TX queue for this packet type
   status = sli_queue_manager_init(&new_node->queue_info.packet_queue, SLI_BUFFER_MANAGER_QUEUE_NODE_POOL);
   if (SL_STATUS_OK != status) {
-    free(new_node);
-    free(request);
+    SLI_FREE(new_node);
+    SLI_FREE(request);
     VERIFY_STATUS_AND_RETURN(status);
   }
 
   // Initialize in-flight (awaiting response) queue
   status = sli_queue_manager_init(&new_node->queue_info.inflight_packet_queue, SLI_BUFFER_MANAGER_QUEUE_NODE_POOL);
   if (SL_STATUS_OK != status) {
-    free(request);
+    SLI_FREE(request);
     sli_queue_manager_deinit(&new_node->queue_info.packet_queue, sli_command_engine_queue_flush_handler, NULL);
-    free(new_node);
+    SLI_FREE(new_node);
     VERIFY_STATUS_AND_RETURN(status);
   }
   new_node->queue_info.in_flight_command_count = 0;
@@ -1366,10 +1366,10 @@ sl_status_t sli_command_engine_add_packet_type(sli_command_engine_t *instance,
   events_received = osThreadFlagsWait(SLI_COMMAND_ENGINE_CONFIGURE_PACKET_TYPE_REQUEST_EVENT, osFlagsWaitAny, 10000);
   if (!(events_received & SLI_COMMAND_ENGINE_CONFIGURE_PACKET_TYPE_REQUEST_EVENT)) {
     // Timed out / failed: cleanup (thread never took ownership)
-    free(request);
+    SLI_FREE(request);
     sli_queue_manager_deinit(&new_node->queue_info.packet_queue, sli_command_engine_queue_flush_handler, NULL);
     sli_queue_manager_deinit(&new_node->queue_info.inflight_packet_queue, sli_command_engine_queue_flush_handler, NULL);
-    free(new_node);
+    SLI_FREE(new_node);
     return SL_STATUS_FAIL;
   }
 
@@ -1395,7 +1395,7 @@ sl_status_t sli_command_engine_remove_packet_type(sli_command_engine_t *instance
   }
 
   // Allocate control request
-  request = (sli_command_engine_packet_type_configuration_request_t *)malloc(
+  request = (sli_command_engine_packet_type_configuration_request_t *)SLI_MALLOC(
     sizeof(sli_command_engine_packet_type_configuration_request_t));
   if (NULL == request) {
     return SL_STATUS_NO_MORE_RESOURCE;
@@ -1419,7 +1419,7 @@ sl_status_t sli_command_engine_remove_packet_type(sli_command_engine_t *instance
   events_received = osThreadFlagsWait(SLI_COMMAND_ENGINE_CONFIGURE_PACKET_TYPE_REQUEST_EVENT, osFlagsWaitAny, 10000);
   if (!(events_received & SLI_COMMAND_ENGINE_CONFIGURE_PACKET_TYPE_REQUEST_EVENT)) {
     // Thread did not acknowledge in time
-    free(request);
+    SLI_FREE(request);
     return SL_STATUS_FAIL;
   }
 

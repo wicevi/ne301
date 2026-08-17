@@ -87,7 +87,7 @@ static sl_status_t sl_si91x_http_client_put_delete(void)
   sl_status_t status = SL_STATUS_OK;
 
   sl_si91x_http_client_put_request_t *request =
-    (sl_si91x_http_client_put_request_t *)malloc(sizeof(sl_si91x_http_client_put_request_t));
+    (sl_si91x_http_client_put_request_t *)SLI_MALLOC(sizeof(sl_si91x_http_client_put_request_t));
   if (request == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -103,7 +103,7 @@ static sl_status_t sl_si91x_http_client_put_delete(void)
                                  NULL,
                                  NULL);
   // Free the memory allocated
-  free(request);
+  SLI_FREE(request);
 
   // Verify the status
   VERIFY_STATUS_AND_RETURN(status);
@@ -128,7 +128,7 @@ sl_status_t sli_http_client_default_event_handler(sl_http_client_event_t event,
   sl_status_t status = sli_wifi_convert_and_save_firmware_status(sli_wifi_get_wifi_frame_status(packet));
 
   // Initialize an HTTP client response structure
-  sl_http_client_response_t *http_response = (sl_http_client_response_t *)malloc(sizeof(sl_http_client_response_t));
+  sl_http_client_response_t *http_response = (sl_http_client_response_t *)SLI_MALLOC(sizeof(sl_http_client_response_t));
   if (http_response == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -143,7 +143,7 @@ sl_status_t sli_http_client_default_event_handler(sl_http_client_event_t event,
   http_response->response_headers = NULL;
 
   if ((entry == NULL) && (entry->callback_function == NULL)) {
-    free(http_response);
+    SLI_FREE(http_response);
     return SL_STATUS_FAIL;
   }
 
@@ -174,7 +174,7 @@ sl_status_t sli_http_client_default_event_handler(sl_http_client_event_t event,
         }
       } else if (status == SL_STATUS_SI91X_HTTP_GET_CMD_IN_PROGRESS) {
         // Don't trigger the callback, If the HTTP GET execution is in progress
-        free(http_response);
+        SLI_FREE(http_response);
         return status;
       }
       break;
@@ -219,6 +219,6 @@ sl_status_t sli_http_client_default_event_handler(sl_http_client_event_t event,
       break;
   }
   status = entry->callback_function(&entry->client_handle, event, http_response, sdk_context);
-  free(http_response);
+  SLI_FREE(http_response);
   return status;
 }

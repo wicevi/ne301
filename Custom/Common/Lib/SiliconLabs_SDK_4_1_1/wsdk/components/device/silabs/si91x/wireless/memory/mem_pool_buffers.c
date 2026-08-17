@@ -54,7 +54,7 @@ uint32_t sli_allocated_buffers = 0;
 uint32_t sli_freed_buffers     = 0;
 sl_status_t sli_si91x_host_init_buffer_manager(void)
 {
-  allocated_wifi_buffer = malloc(SLI_WIFI_BUFFER_SIZE);
+  allocated_wifi_buffer = SLI_MALLOC(SLI_WIFI_BUFFER_SIZE);
   if (allocated_wifi_buffer == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -68,7 +68,7 @@ sl_status_t sli_si91x_host_init_buffer_manager(void)
 
 sl_status_t sli_si91x_host_deinit_buffer_manager(void)
 {
-  free(allocated_wifi_buffer);
+  SLI_FREE(allocated_wifi_buffer);
   return SL_STATUS_OK;
 }
 

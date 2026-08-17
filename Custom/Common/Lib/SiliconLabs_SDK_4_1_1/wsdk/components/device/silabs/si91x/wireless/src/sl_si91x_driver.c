@@ -124,6 +124,17 @@ extern osMutexId_t side_band_crypto_mutex;
 // Note: This is the extended block size for the transceiver APIs.
 #define SLI_WIFI_EXTENDED_BLOCK_SIZE 2324
 
+#ifdef SPI_EXTENDED_TX_LEN_2K
+#define SLI_WIFI_PACKET_BLOCK_SIZE SLI_WIFI_EXTENDED_BLOCK_SIZE
+#else
+#define SLI_WIFI_PACKET_BLOCK_SIZE SLI_WIFI_BUFFER_BLOCK_SIZE
+#endif
+// Max payload fitting one CE TX/DATA pool block (block size minus hidden pool
+// management pointer and sl_wifi_system_packet_t header). Larger payloads
+// would memcpy past the block and corrupt the pool.
+#define SLI_WIFI_MAX_PACKET_PAYLOAD \
+  (SLI_WIFI_PACKET_BLOCK_SIZE - sizeof(void *) - sizeof(sl_wifi_system_packet_t))
+
 /*========================================================================*/
 // 11ax params
 /*========================================================================*/
@@ -319,6 +330,17 @@ static void sli_si91x_set_device_initialized_status(const sl_wifi_device_configu
   }
 }
 
+// Roll back a partially completed driver init so a retry starts clean.
+// Without this a failed init leaks pools/threads and the next attempt
+// double-allocates (lab-port fix, SDK_LOCAL_MODIFICATIONS.md §3.2).
+static void sli_si91x_driver_init_rollback(void)
+{
+  sl_si91x_host_disable_bus_interrupt();
+  sli_si91x_wifi_platform_deinit();
+  sl_si91x_host_deinit();
+  sli_buffer_manager_deinit();
+}
+
 sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, sl_wifi_event_handler_t event_handler)
 {
   sl_status_t status;
@@ -460,18 +482,27 @@ sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, s
 
   // Initialize the SI91x host
   status = sl_si91x_host_init(&init_config);
-  VERIFY_STATUS_AND_RETURN(status);
+  if (status != SL_STATUS_OK) {
+    sli_si91x_driver_init_rollback();
+    return status;
+  }
 
   // Initialize the SI91x platform
   status = sli_si91x_wifi_platform_init();
-  VERIFY_STATUS_AND_RETURN(status);
+  if (status != SL_STATUS_OK) {
+    sli_si91x_driver_init_rollback();
+    return status;
+  }
 
 #ifdef SLI_SI91X_MCU_INTERFACE
   // firmware bootup is require only for the first time, no need to do it again if we call init after deinit
   static bool is_bootup_firmware_required = true;
   if (is_bootup_firmware_required) {
     status = sli_si91x_bootup_firmware(select_option, config->nwp_fw_image_number);
-    VERIFY_STATUS_AND_RETURN(status);
+    if (status != SL_STATUS_OK) {
+      sli_si91x_driver_init_rollback();
+      return status;
+    }
     is_bootup_firmware_required = false;
   } else {
     // Initialize NWP interrupt and submit RX packets
@@ -479,7 +510,10 @@ sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, s
   }
 #else
   status = sli_si91x_bootup_firmware(select_option, config->nwp_fw_image_number);
-  VERIFY_STATUS_AND_RETURN(status);
+  if (status != SL_STATUS_OK) {
+    sli_si91x_driver_init_rollback();
+    return status;
+  }
 #endif
 
   if (select_option == BURN_NWP_FW) {
@@ -508,6 +542,7 @@ sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, s
   if (sli_wifi_get_card_ready_required()) {
     uint32_t events = sli_si91x_wait_for_event(SL_WIFI_HOST_COMMON_RESPONSE_EVENT, 5000);
     if (!(events & SL_WIFI_HOST_COMMON_RESPONSE_EVENT)) {
+      sli_si91x_driver_init_rollback();
       return SL_STATUS_CARD_READY_TIMEOUT;
     }
     sli_wifi_set_card_ready_required(false);
@@ -515,6 +550,7 @@ sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, s
 #else
   uint32_t events = sli_si91x_wait_for_event(SL_WIFI_HOST_COMMON_RESPONSE_EVENT, 5000);
   if (!(events & SL_WIFI_HOST_COMMON_RESPONSE_EVENT)) {
+    sli_si91x_driver_init_rollback();
     return SL_STATUS_CARD_READY_TIMEOUT;
   }
 #endif
@@ -680,6 +716,10 @@ sl_status_t sl_si91x_driver_deinit(void)
     return SL_STATUS_NOT_INITIALIZED;
   }
 
+  // Disable the bus interrupt first: nothing may touch host buffers/pools
+  // while they are being torn down (lab-port fix for incomplete power-down).
+  sl_si91x_host_disable_bus_interrupt();
+
 #ifdef SLI_SI91X_MCU_INTERFACE
   // If the SLI_SI91X_MCU_INTERFACE is defined, perform a soft reset
   status = sl_si91x_soft_reset();
@@ -700,10 +740,6 @@ sl_status_t sl_si91x_driver_deinit(void)
 
   // Deinitialize the SI91x platform
   status = sli_si91x_wifi_platform_deinit();
-  VERIFY_STATUS_AND_RETURN(status);
-
-  // Deinitialize the SI91x host
-  status = sl_si91x_host_deinit();
   VERIFY_STATUS_AND_RETURN(status);
 
 #if defined(SLI_SI91X_OFFLOAD_NETWORK_STACK) && defined(SLI_SI91X_SOCKETS)
@@ -737,10 +773,10 @@ sl_status_t sl_si91x_driver_deinit(void)
   VERIFY_STATUS_AND_RETURN(status);
 
   // Deinitialize the buffer manager
+  // TODO: When the WiFi chip malfunctions and cannot communicate, this step
+  // can fail probabilistically (lab-port note).
   status = sli_buffer_manager_deinit();
   VERIFY_STATUS_AND_RETURN(status);
-
-  sl_si91x_host_disable_bus_interrupt();
 
   status = sl_si91x_host_power_cycle();
   VERIFY_STATUS_AND_RETURN(status);
@@ -756,6 +792,11 @@ sl_status_t sl_si91x_driver_deinit(void)
   // Reset all the interfaces
   memset(interface_is_up, 0, sizeof(interface_is_up));
 
+  // Deinitialize the SI91x host last so power-cycling completes cleanly
+  // (lab-port fix: running it before power_cycle left the chip powered).
+  status = sl_si91x_host_deinit();
+  VERIFY_STATUS_AND_RETURN(status);
+
   return status;
 }
 
@@ -767,6 +808,11 @@ sl_status_t sl_si91x_driver_raw_send_command(uint8_t command,
   UNUSED_PARAMETER(wait_time);
   sl_wifi_system_packet_t *packet = NULL;
   sl_status_t status              = SL_STATUS_OK;
+
+  // Reject payloads that cannot fit in one pool block
+  if (data_length > SLI_WIFI_MAX_PACKET_PAYLOAD) {
+    return SL_STATUS_INVALID_PARAMETER;
+  }
 
   // Allocate a buffer for the command with appropriate size
   status = sli_buffer_manager_allocate_buffer(SLI_BUFFER_MANAGER_CE_DATA_POOL,
@@ -1207,7 +1253,7 @@ sl_status_t sl_si91x_m4_ta_secure_handshake(uint8_t sub_cmd_type,
 
   SL_VERIFY_POINTER_OR_RETURN(input_data, SL_STATUS_INVALID_PARAMETER);
 
-  handshake_request = malloc(sizeof(sli_si91x_ta_m4_handshake_parameters_t) + input_len);
+  handshake_request = SLI_MALLOC(sizeof(sli_si91x_ta_m4_handshake_parameters_t) + input_len);
   SL_VERIFY_POINTER_OR_RETURN(handshake_request, SL_STATUS_ALLOCATION_FAILED);
   memset(handshake_request, 0, sizeof(sli_si91x_ta_m4_handshake_parameters_t) + input_len);
   handshake_request->sub_cmd         = sub_cmd_type;
@@ -1222,7 +1268,7 @@ sl_status_t sl_si91x_m4_ta_secure_handshake(uint8_t sub_cmd_type,
                                  SLI_COMMON_RSP_TA_M4_COMMANDS_WAIT_TIME,
                                  NULL,
                                  NULL);
-  free(handshake_request);
+  SLI_FREE(handshake_request);
   VERIFY_STATUS_AND_RETURN(status);
   return status;
 }
@@ -1234,7 +1280,7 @@ sl_status_t sl_si91x_configure_timestamp_memory_location(uint8_t addr_len, const
 
   SL_VERIFY_POINTER_OR_RETURN(address, SL_STATUS_INVALID_PARAMETER);
 
-  handshake_request = malloc(sizeof(sli_si91x_ta_m4_handshake_parameters_t) + addr_len);
+  handshake_request = SLI_MALLOC(sizeof(sli_si91x_ta_m4_handshake_parameters_t) + addr_len);
   SL_VERIFY_POINTER_OR_RETURN(handshake_request, SL_STATUS_ALLOCATION_FAILED);
   memset(handshake_request, 0, sizeof(sli_si91x_ta_m4_handshake_parameters_t) + addr_len);
   handshake_request->sub_cmd         = SL_SI91X_SET_TIMESTAMP_MEMORY_ADDRESS;
@@ -1248,7 +1294,7 @@ sl_status_t sl_si91x_configure_timestamp_memory_location(uint8_t addr_len, const
                                  SLI_COMMON_RSP_TA_M4_COMMANDS_WAIT_TIME,
                                  NULL,
                                  NULL);
-  free(handshake_request);
+  SLI_FREE(handshake_request);
   VERIFY_STATUS_AND_RETURN(status);
   return status;
 }
@@ -1612,6 +1658,11 @@ sl_status_t sl_si91x_driver_send_transceiver_data(sl_wifi_transceiver_tx_data_co
   if (SLI_IS_EIA_PKT(control->ctrl_flags)) {
     // If it is an EIA packet, add 5 bytes for the following fields: channel, tx_power, is_last_packet, reserved1, reserved2
     ext_desc_size += SLI_EXT_DESC_SIZE_IF_EIA_PKT;
+  }
+
+  // Reject frames that cannot fit in one pool block
+  if ((uint32_t)(ext_desc_size + mac_hdr_len) + payload_len > SLI_WIFI_MAX_PACKET_PAYLOAD) {
+    return SL_STATUS_INVALID_PARAMETER;
   }
 
   // Allocate a buffer for the command with appropriate size

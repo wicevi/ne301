@@ -76,7 +76,7 @@ static sl_status_t load_credential_table(void)
   if (nvm3_getObjectInfo(nvm3_defaultHandle, SL_NET_CREDENTIAL_TABLE_KEY, &type, &credential_table_size) != 0) {
     credential_table_size = SL_WIFI_MAX_CREDENTIAL_COUNT * sizeof(sl_wifi_nvm_credential_entry_t);
   }
-  credential_table = malloc(credential_table_size);
+  credential_table = SLI_MALLOC(credential_table_size);
   if (credential_table == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }

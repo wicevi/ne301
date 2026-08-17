@@ -32,6 +32,19 @@
 #define SL_STATUS_H
 
 #include <stdint.h>
+#include "mem.h"
+
+// Project memory interface: all SDK dynamic allocations route to the unified
+// host memory pools (MEM_LARGE = PSRAM) for fragmentation control and stats.
+#define SLI_MALLOC(size)  hal_mem_alloc(size, MEM_LARGE)
+#define SLI_CALLOC(n, sz) hal_mem_calloc((n), (sz), MEM_LARGE)
+#define SLI_FREE(ptr)     hal_mem_free(ptr)
+
+// Firmware error hook: SDK calls this on fatal firmware/bus failures
+// (C1/C2 timeout in sl_si91x_spi.c, FAIL_INDICATION event in
+// sl_wifi_callback_framework.c). Host overrides the weak default to run
+// its WiFi recovery flow (see sl_net_netif.c).
+void sli_firmware_error_callback(int error_code);
 
 /*******************************************************************************
  * @addtogroup status Status Codes

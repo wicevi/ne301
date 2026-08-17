@@ -308,7 +308,7 @@ void sli_wifi_flush_scan_results_database(void)
   while (NULL != scan_info) {
     node      = scan_info;
     scan_info = scan_info->next;
-    free(node);
+    SLI_FREE(node);
   }
   scan_info_database = NULL;
 
@@ -712,7 +712,7 @@ static sli_scan_info_t *sli_update_or_create_scan_info_element(const sli_scan_in
   }
 
   if (NULL == element) {
-    element = (sli_scan_info_t *)malloc(sizeof(sli_scan_info_t));
+    element = (sli_scan_info_t *)SLI_MALLOC(sizeof(sli_scan_info_t));
     if (element == NULL) {
       return NULL;
     }
@@ -1011,6 +1011,16 @@ sl_wifi_event_t sli_wifi_convert_event_to_sl_wifi_event(uint32_t command, uint16
   }
 }
 
+#ifdef SPI_EXTENDED_TX_LEN_2K
+#define SLI_WIFI_TX_BLOCK_SIZE 2324
+#else
+#define SLI_WIFI_TX_BLOCK_SIZE 1640
+#endif
+// Max command payload fitting one CE TX pool block (block size minus hidden
+// pool management pointer and sl_wifi_system_packet_t header). Larger
+// payloads would memcpy past the block and corrupt the pool.
+#define SLI_WIFI_MAX_CMD_PAYLOAD (SLI_WIFI_TX_BLOCK_SIZE - sizeof(void *) - sizeof(sl_wifi_system_packet_t))
+
 sl_status_t sli_wifi_send_command_with_custom_desc(uint32_t command,
                                                    sli_wifi_command_type_t command_type,
                                                    const void *data,
@@ -1023,6 +1033,11 @@ sl_status_t sli_wifi_send_command_with_custom_desc(uint32_t command,
 
   sl_wifi_system_packet_t *packet = NULL;
   sl_status_t status              = SL_STATUS_OK;
+
+  // Reject payloads that cannot fit in one pool block
+  if (data_length > SLI_WIFI_MAX_CMD_PAYLOAD) {
+    return SL_STATUS_INVALID_PARAMETER;
+  }
 
   // Allocate a buffer for the command with appropriate size
   status = sli_buffer_manager_allocate_buffer(SLI_BUFFER_MANAGER_CE_TX_POOL,
@@ -1054,6 +1069,11 @@ sl_status_t sli_wifi_send_command(uint32_t command,
 {
   sl_wifi_system_packet_t *packet = NULL;
   sl_status_t status              = SL_STATUS_OK;
+
+  // Reject payloads that cannot fit in one pool block
+  if (data_length > SLI_WIFI_MAX_CMD_PAYLOAD) {
+    return SL_STATUS_INVALID_PARAMETER;
+  }
 
   // Allocate a buffer for the command with appropriate size
   status = sli_buffer_manager_allocate_buffer(SLI_BUFFER_MANAGER_CE_TX_POOL,
@@ -1220,6 +1240,11 @@ sl_status_t sli_wifi_async_send_command(uint32_t command,
   sl_wifi_system_packet_t *packet      = NULL;
   sl_status_t status                   = SL_STATUS_OK;
   sli_command_engine_tx_info_t tx_info = { 0 };
+
+  // Reject payloads that cannot fit in one pool block
+  if (data_length > SLI_WIFI_MAX_CMD_PAYLOAD) {
+    return SL_STATUS_INVALID_PARAMETER;
+  }
 
   // Allocate a buffer for the command with appropriate size
   status = sli_buffer_manager_allocate_buffer(SLI_BUFFER_MANAGER_CE_TX_POOL,

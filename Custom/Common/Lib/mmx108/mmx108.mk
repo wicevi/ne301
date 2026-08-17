@@ -47,7 +47,10 @@ C_INCLUDES += -I$(MMX108_ROOT_PATH)/mmregdb
 C_INCLUDES += -I$(MMX108_ROOT_PATH)/mmutils
 C_INCLUDES += -I../Custom/Hal/Network/netif_manager
 
-CFLAGS += -DHALT_ON_ASSERT
+# No -DHALT_ON_ASSERT: that branch of mmosal_impl_assert() disables IRQs then
+# executes a raw bkpt — without a debugger attached it escalates to HardFault
+# (lockup) and silently hangs shipping units. The default branch prints and
+# resets, which is the production-safe behavior.
 
 # === HaLow target chip — toggle to rebuild for the other silicon ===
 #   mm8108 (default) — current NE301 silicon, matches the tested working tree

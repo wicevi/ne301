@@ -275,7 +275,7 @@ sl_websocket_error_t sl_websocket_connect(sl_websocket_client_t *handle)
   size_t origin_length   = strlen(handle->origin);
 
   // Allocate memory for websocket_info
-  si91x_socket->websocket_info = (sli_si91x_websocket_info_t *)malloc(sizeof(sli_si91x_websocket_info_t) + host_length
+  si91x_socket->websocket_info = (sli_si91x_websocket_info_t *)SLI_MALLOC(sizeof(sli_si91x_websocket_info_t) + host_length
                                                                       + resource_length + origin_length);
 
   // Check if memory allocation was successful
@@ -417,7 +417,7 @@ sl_websocket_error_t sl_websocket_deinit(sl_websocket_client_t *handle)
   // Free the allocated memory for websocket_info
   sli_si91x_socket_t *si91x_socket = sli_get_si91x_socket(handle->socket_fd);
   if (si91x_socket && si91x_socket->websocket_info) {
-    free(si91x_socket->websocket_info);
+    SLI_FREE(si91x_socket->websocket_info);
     si91x_socket->websocket_info = NULL;
   }
 

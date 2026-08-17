@@ -104,7 +104,7 @@ static sl_status_t sli_setup_sni_if_required(uint16_t flags, const uint8_t *host
     return SL_STATUS_NULL_POINTER;
   }
 
-  sli_si91x_tls_extension_info_t *set_sni = (sli_si91x_tls_extension_info_t *)malloc(
+  sli_si91x_tls_extension_info_t *set_sni = (sli_si91x_tls_extension_info_t *)SLI_MALLOC(
     sizeof(sli_si91x_tls_extension_info_t) + sl_strlen((const char *)host_name));
   if (set_sni == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
@@ -116,7 +116,7 @@ static sl_status_t sli_setup_sni_if_required(uint16_t flags, const uint8_t *host
   memcpy(set_sni->value, host_name, set_sni->length);
 
   sl_status_t status = sli_si91x_set_sni_for_embedded_socket(set_sni, SI91X_SNI_FOR_HTTPS);
-  free(set_sni);
+  SLI_FREE(set_sni);
 
   return status;
 }
@@ -239,7 +239,7 @@ static sl_status_t sli_validate_http_request(uint16_t http_length, const uint8_t
  */
 static sl_status_t sli_send_http_otaf_chunked(const sli_si91x_http_otaf_request_t *http_otaf, uint16_t http_length)
 {
-  sli_si91x_http_otaf_request_t *packet_buffer = malloc(sizeof(sli_si91x_http_otaf_request_t));
+  sli_si91x_http_otaf_request_t *packet_buffer = SLI_MALLOC(sizeof(sli_si91x_http_otaf_request_t));
   if (packet_buffer == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -265,7 +265,7 @@ static sl_status_t sli_send_http_otaf_chunked(const sli_si91x_http_otaf_request_
 
     // Bounds check to prevent out-of-bounds access
     if (offset + chunk_size > SLI_SI91X_HTTP_BUFFER_LEN) {
-      free(packet_buffer);
+      SLI_FREE(packet_buffer);
       return SL_STATUS_HAS_OVERFLOWED;
     }
 
@@ -289,7 +289,7 @@ static sl_status_t sli_send_http_otaf_chunked(const sli_si91x_http_otaf_request_
     rem_length -= chunk_size;
   }
 
-  free(packet_buffer);
+  SLI_FREE(packet_buffer);
   return status;
 }
 
@@ -553,7 +553,7 @@ sl_status_t sl_si91x_http_otaf_v2(const sl_si91x_http_otaf_params_t *http_otaf_p
   sl_status_t status                       = SL_STATUS_FAIL;
   uint16_t http_length                     = 0;
   uint16_t https_enable                    = 0;
-  sli_si91x_http_otaf_request_t *http_otaf = malloc(sizeof(sli_si91x_http_otaf_request_t));
+  sli_si91x_http_otaf_request_t *http_otaf = SLI_MALLOC(sizeof(sli_si91x_http_otaf_request_t));
   SL_VERIFY_POINTER_OR_RETURN(http_otaf, SL_STATUS_ALLOCATION_FAILED);
 
   memset(http_otaf, 0, sizeof(sli_si91x_http_otaf_request_t));
@@ -565,7 +565,7 @@ sl_status_t sl_si91x_http_otaf_v2(const sl_si91x_http_otaf_params_t *http_otaf_p
   // Setup SNI if required
   if (http_otaf_params->flags & SL_SI91X_HTTPS_USE_SNI) {
     if (http_otaf_params->host_name == NULL) {
-      free(http_otaf);
+      SLI_FREE(http_otaf);
       return SL_STATUS_NULL_POINTER;
     }
 
@@ -573,7 +573,7 @@ sl_status_t sl_si91x_http_otaf_v2(const sl_si91x_http_otaf_params_t *http_otaf_p
 
     status = sli_setup_sni_if_required(http_otaf_params->flags, http_otaf_params->host_name);
     if (status != SL_STATUS_OK) {
-      free(http_otaf);
+      SLI_FREE(http_otaf);
       return status;
     }
   }
@@ -589,14 +589,14 @@ sl_status_t sl_si91x_http_otaf_v2(const sl_si91x_http_otaf_params_t *http_otaf_p
   // Fill HTTP OTAF buffer with parameters
   status = sli_fill_http_otaf_buffer(http_otaf_params, http_otaf, &http_length);
   if (status != SL_STATUS_OK) {
-    free(http_otaf);
+    SLI_FREE(http_otaf);
     return status;
   }
 
   // Check if request buffer is overflowed or resource length is overflowed
   status = sli_validate_http_request(http_length, http_otaf_params->resource);
   if (status != SL_STATUS_OK) {
-    free(http_otaf);
+    SLI_FREE(http_otaf);
     return status;
   }
 
@@ -616,7 +616,7 @@ sl_status_t sl_si91x_http_otaf_v2(const sl_si91x_http_otaf_params_t *http_otaf_p
     status = sli_send_http_otaf_chunked(http_otaf, http_length);
   }
 
-  free(http_otaf);
+  SLI_FREE(http_otaf);
   VERIFY_STATUS_AND_RETURN(status);
   return status;
 }

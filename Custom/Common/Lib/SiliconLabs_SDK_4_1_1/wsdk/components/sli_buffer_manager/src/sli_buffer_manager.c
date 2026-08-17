@@ -112,7 +112,7 @@ static sl_status_t sli_buffer_manager_create_and_assign_mempool(sli_buffer_manag
 {
   CORE_irqState_t state = CORE_EnterAtomic();
   size_t buffer_size    = (size_t)configuration->block_count * SLI_MEM_POOL_BLOCK_SIZE(configuration->block_size);
-  mempool_handler->mempool_memory = malloc(buffer_size);
+  mempool_handler->mempool_memory = SLI_MALLOC(buffer_size);
   if (mempool_handler->mempool_memory == NULL) {
     CORE_ExitAtomic(state);
     return SL_STATUS_ALLOCATION_FAILED;
@@ -296,7 +296,7 @@ static sl_status_t sli_buffer_manager_create_new_common_mempool(void)
 {
 
   CORE_irqState_t state                                 = CORE_EnterAtomic();
-  sli_buffer_manager_mempool_handler_t *mempool_handler = malloc(sizeof(sli_buffer_manager_mempool_handler_t));
+  sli_buffer_manager_mempool_handler_t *mempool_handler = SLI_MALLOC(sizeof(sli_buffer_manager_mempool_handler_t));
 
   if (mempool_handler == NULL) {
     CORE_ExitAtomic(state);
@@ -309,7 +309,7 @@ static sl_status_t sli_buffer_manager_create_new_common_mempool(void)
     sli_buffer_manager_create_and_assign_mempool(&common_mempool_configuration, mempool_handler, true);
 
   if (status != SL_STATUS_OK) {
-    free(mempool_handler);
+    SLI_FREE(mempool_handler);
 
     CORE_ExitAtomic(state);
     return status;
@@ -355,8 +355,8 @@ static sl_status_t sli_buffer_manager_free_a_common_mempool_from_queue(
       common_mempool_queue.last_used_handler = common_mempool_queue.tail;
     }
 
-    free(common_pool_handler->mempool_memory);
-    free(common_pool_handler);
+    SLI_FREE(common_pool_handler->mempool_memory);
+    SLI_FREE(common_pool_handler);
 
     common_mempool_queue.size--;
     CORE_ExitAtomic(state);
@@ -391,8 +391,8 @@ static sl_status_t sli_buffer_manager_free_a_common_mempool_from_queue(
     common_mempool_queue.last_used_handler = common_mempool_queue.tail;
   }
 
-  free(current_node->mempool_memory);
-  free(current_node);
+  SLI_FREE(current_node->mempool_memory);
+  SLI_FREE(current_node);
 
   common_mempool_queue.size--;
 
@@ -423,8 +423,8 @@ static sl_status_t sli_buffer_manager_free_all_common_mempools(void)
     mempool_to_be_freed = head;
     head                = (sli_buffer_manager_mempool_handler_t *)mempool_to_be_freed->next.node;
 
-    free(mempool_to_be_freed->mempool_memory);
-    free(mempool_to_be_freed);
+    SLI_FREE(mempool_to_be_freed->mempool_memory);
+    SLI_FREE(mempool_to_be_freed);
   } while (mempool_to_be_freed != common_mempool_queue.tail);
 
   memset(&common_mempool_queue, 0, sizeof(sli_buffer_manager_mempool_queue_t));
@@ -444,7 +444,7 @@ static sl_status_t sli_buffer_manager_free_all_mempools(void)
     sli_buffer_manager_mempool_handler_t *mempool_handler = &dedicated_mempool_handlers[index];
 
     if (mempool_handler->mempool_memory != NULL) {
-      free(mempool_handler->mempool_memory);
+      SLI_FREE(mempool_handler->mempool_memory);
       memset(mempool_handler, 0, sizeof(sli_buffer_manager_mempool_handler_t));
     }
   }

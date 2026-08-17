@@ -61,9 +61,9 @@ sl_status_t sl_wifi_set_credential(sl_wifi_credential_id_t id,
   }
   // If a credential already exists for the given ID, free the allocated memory and allocate memory for the new credential
   if (credentials[id] != NULL) {
-    free(credentials[id]);
+    SLI_FREE(credentials[id]);
   }
-  credentials[id] = malloc(sizeof(sl_wifi_basic_credential_entry_t) + credential_length);
+  credentials[id] = SLI_MALLOC(sizeof(sl_wifi_basic_credential_entry_t) + credential_length);
   if (credentials[id] == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -119,7 +119,7 @@ sl_status_t sl_wifi_delete_credential(sl_wifi_credential_id_t id)
   }
 
   if (NULL != credentials[id]) {
-    free(credentials[id]);
+    SLI_FREE(credentials[id]);
     credentials[id] = NULL;
   }
 

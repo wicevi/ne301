@@ -70,11 +70,14 @@
 #define SLI_STATUS_ENUM(prefix, name, value) prefix##_##name = (prefix##_ENUM_OFFSET + value)
 #define SLI_STATUS_SHARED_ENUM(prefix, name) prefix##_##name = (SL_##name)
 
-#ifdef __CC_ARM
-#define BREAKPOINT() __asm__("bkpt #0")
-#else
-#define BREAKPOINT() __asm__("bkpt")
-#endif
+// Project-wide assert hook (strong definition in Custom/Hal sl_net_netif.c,
+// also the newlib assert() destination): prints file:line and reboots; halts
+// on bkpt only when a debugger session is live. A raw bkpt executed without a
+// debugger escalates to HardFault (lockup in IRQ context) and silently hangs
+// shipping units (lab-port fix, SDK_LOCAL_MODIFICATIONS.md §3.8).
+extern void __assert_func(const char *file, int line, const char *func, const char *failedexpr);
+
+#define BREAKPOINT() __assert_func(__FILE__, __LINE__, __func__, "BREAKPOINT")
 
 /// IPv4 address length in bytes.
 #define SL_IPV4_ADDRESS_LENGTH 4
@@ -104,11 +107,11 @@
 #define SLI_ARRAY_COUNT(x) (sizeof(x) / sizeof *(x))
 
 #ifndef FUZZING
-#define SL_ASSERT(condition, ...) \
-  do {                            \
-    if (!(condition)) {           \
-      BREAKPOINT();               \
-    }                             \
+#define SL_ASSERT(condition, ...)                                       \
+  do {                                                                  \
+    if (!(condition)) {                                                 \
+      __assert_func(__FILE__, __LINE__, __func__, #condition);          \
+    }                                                                   \
   } while (0)
 #else
 #define SL_ASSERT(condition, ...) \
@@ -196,7 +199,7 @@
 #define SL_CLEANUP_MALLOC(pointer) \
   do {                             \
     if ((pointer) != NULL) {       \
-      free(pointer);               \
+      SLI_FREE(pointer);              \
       pointer = NULL;              \
     }                              \
   } while (0)

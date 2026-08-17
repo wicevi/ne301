@@ -185,6 +185,23 @@ sl_status_t sl_si91x_host_deinit(void)
  * @section description
  * This API is used to transfer/receive data to the Wi-Fi module through the SPI interface.
  */
+// CLI fault injection ("ifconfig wl error_test dma_once|dma_ff|dma_off"):
+//   dma_once — next DMA transfer takes the semaphore-timeout path once (transient
+//              "sem_spi4 dma failed"), then auto-clears.
+//   dma_ff   — every transfer "succeeds" but returns all-0xFF data (stuck MISO /
+//              unresponding chip). C1/C2 then polls to its 1s timeout and the
+//              firmware-error recovery chain fires; recovery exhausts its 10
+//              retries by design. Clear with dma_off, then re-up the netif.
+//   dma_off  — clear injection.
+#ifdef SIMULATION_SPI4_DMA_ERROR
+static uint8_t sim_spi4_dma_mode = 0; // 0 off, 1 fail-sem-once, 2 rx all-0xFF
+
+void sl_si91x_host_sim_spi4_dma(uint8_t mode)
+{
+    sim_spi4_dma_mode = mode;
+}
+#endif
+
 sl_status_t sl_si91x_host_spi_transfer(const void *tx_buffer, void *rx_buffer, uint16_t buffer_length)
 {
     HAL_StatusTypeDef ret = HAL_OK;
@@ -243,6 +260,12 @@ sl_status_t sl_si91x_host_spi_transfer(const void *tx_buffer, void *rx_buffer, u
         ret = HAL_SPI_TransmitReceive_DMA(&hspi4, (uint8_t *)spi_tx_buffer, (uint8_t *)spi_rx_buffer, buffer_length);
         if (ret == HAL_OK) {
             sem_status = osSemaphoreAcquire(sem_spi4, 1000);
+        #ifdef SIMULATION_SPI4_DMA_ERROR
+            if (sim_spi4_dma_mode == 1) {
+                sim_spi4_dma_mode = 0;        // one-shot: next transfer is healthy again
+                sem_status     = (osStatus_t)osErrorTimeout; // fake the acquire failure
+            }
+        #endif
             if (sem_status != osOK) {
                 printf("sem_spi4 dma failed(ret = %d)!\r\n", (int)sem_status);
                 HAL_SPI_Abort(&hspi4);
@@ -251,6 +274,11 @@ sl_status_t sl_si91x_host_spi_transfer(const void *tx_buffer, void *rx_buffer, u
                 return SL_STATUS_TIMEOUT;
             }
             memcpy(rx_buffer, spi_rx_buffer, buffer_length);
+        #ifdef SIMULATION_SPI4_DMA_ERROR
+            if (sim_spi4_dma_mode == 2) {
+                memset(rx_buffer, 0xFF, buffer_length);
+            }
+        #endif
         } else {
             printf("HAL_SPI_TransmitReceive_DMA failed(ret = %d)!\r\n", ret);
             HAL_SPI_Abort(&hspi4);

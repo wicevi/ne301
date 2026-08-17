@@ -98,6 +98,9 @@ C_SOURCES += $(SL_WSDK)/components/service/sl_websocket_client/src/sl_websocket_
 C_SOURCES += $(SL_WSDK)/components/service/sl_websocket_client/src/sli_websocket_client_sync.c
 
 # --- include paths ---
+# Custom/Hal: mem.h (SLI_MALLOC/SLI_FREE injected into sl_status.h route all
+# SDK dynamic memory to the project memory pools)
+C_INCLUDES += -I../Custom/Hal
 C_INCLUDES += -I$(SL_PORT)/inc
 C_INCLUDES += -I$(SL_SISDK)/inc
 C_INCLUDES += -I$(SL_WSDK)/components/common/inc
@@ -159,6 +162,8 @@ C_DEFS += -DSLI_SI91X_NETWORK_DUAL_STACK_
 # C_DEFS += -DSLI_SI91X_ENABLE_BLE
 C_DEFS += -DSL_SI91X_ENABLE_LITTLE_ENDIAN
 C_DEFS += -DSPI_EXTENDED_TX_LEN_2K
+# CLI fault injection (test-only, validated 2026-08-17, disabled for release):
+# enable + rebuild to arm "error_test" C1C2 handshake fault injection.
 # C_DEFS += -DSLI_SI91X_SIMULATION_C1C2_ERROR
 # Suppress all accumulated WiseConnect API-deprecation warnings (3.5/4.0/4.1).
 # Each version's deprecations are guarded independently (sl_constants.h), so all

@@ -81,6 +81,32 @@ sl_status_t sli_wifi_select_option(const uint8_t configuration);
 sl_status_t sli_si91x_req_wakeup(void);
 sl_status_t sli_hal_si91x_notify_events(uint32_t flags);
 
+// Weak firmware-error hook; the netif layer overrides it to trigger WiFi
+// recovery (deinit + re-init) on bus-level failures.
+__attribute__((weak)) void sli_firmware_error_callback(int error_code)
+{
+  (void)error_code;
+}
+
+#ifdef SLI_SI91X_SIMULATION_C1C2_ERROR
+// CLI fault injection ("error_test"): sli_generate_c1c2_error() makes the next
+// C1/C2 handshake take the timeout path (sli_send_c1c2 below), exercising the
+// real firmware-error recovery chain. The netif recovery loop clears the flag
+// via sli_reset_c1c2_error() before each re-init attempt.
+#include <stdio.h>
+static int c1c2_error = 0;
+
+void sli_generate_c1c2_error(void)
+{
+  c1c2_error = 1;
+}
+
+void sli_reset_c1c2_error(void)
+{
+  c1c2_error = 0;
+}
+#endif
+
 /************************************************************************************
  ******************************** Static Functions *********************************
 ************************************************************************************/
@@ -95,6 +121,17 @@ static sl_status_t sli_send_c1c2(uint16_t data)
   do {
     // Send C1/C2 and receive the response in rx_buffer
     status = sl_si91x_host_spi_transfer(&data, rx_buffer, 2);
+
+  #ifdef SLI_SI91X_SIMULATION_C1C2_ERROR
+    if (c1c2_error == 1) {
+      printf("Error in C1C2\r\n");
+      // Yield for the recovery thread (sl_net_thread) to run deinit and clear
+      // c1c2_error via sli_reset_c1c2_error(). Without this delay the caller's
+      // retry loop spins on instant failures and starves recovery -> livelock.
+      osDelay(1000);
+      break;
+    }
+  #endif
 
     // Check if there was an error or if the response indicates success or idle state
     if (status != SL_STATUS_OK || rx_buffer[1] == SLI_SPI_FAIL) {
@@ -114,6 +151,8 @@ static sl_status_t sli_send_c1c2(uint16_t data)
     // If a timeout occurs while waiting for a response, return a timeout status
   } while (sl_si91x_host_elapsed_time(timestamp) < 1000);
 
+  // Chip stopped responding on C1/C2: notify host recovery before bailing out
+  sli_firmware_error_callback(rx_buffer[1]);
   return SL_STATUS_TIMEOUT;
 }
 

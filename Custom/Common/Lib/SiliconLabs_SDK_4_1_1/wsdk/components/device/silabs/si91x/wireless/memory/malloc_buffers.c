@@ -70,7 +70,7 @@ sl_status_t sli_si91x_host_allocate_buffer(sl_wifi_buffer_t **buffer,
   uint32_t start         = osKernelGetTickCount();
   sl_wifi_buffer_t *temp = NULL;
   do {
-    temp = (sl_wifi_buffer_t *)malloc(buffer_size + sizeof(*temp));
+    temp = (sl_wifi_buffer_t *)SLI_MALLOC(buffer_size + sizeof(*temp));
     if (temp != NULL) {
       break;
     } else {
@@ -105,6 +105,6 @@ void sli_si91x_host_free_buffer(sl_wifi_buffer_t *buffer)
     return;
   }
   osMutexAcquire(malloc_free_mutex, 0xFFFFFFFFUL);
-  free((void *)buffer);
+  SLI_FREE((void *)buffer);
   osMutexRelease(malloc_free_mutex);
 }

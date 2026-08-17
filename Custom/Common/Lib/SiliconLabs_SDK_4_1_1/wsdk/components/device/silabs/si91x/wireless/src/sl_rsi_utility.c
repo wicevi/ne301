@@ -267,7 +267,7 @@ sl_status_t sli_si91x_set_sni_for_embedded_socket(const sli_si91x_tls_extension_
     return SL_STATUS_WOULD_OVERFLOW;
   }
 
-  sli_si91x_sni_for_embedded_socket_request_t *request = (sli_si91x_sni_for_embedded_socket_request_t *)malloc(
+  sli_si91x_sni_for_embedded_socket_request_t *request = (sli_si91x_sni_for_embedded_socket_request_t *)SLI_MALLOC(
     sizeof(sli_si91x_sni_for_embedded_socket_request_t) + SLI_SI91X_MAX_SIZE_OF_EXTENSION_DATA);
   SLI_VERIFY_MALLOC_AND_RETURN(request);
 
@@ -287,7 +287,7 @@ sl_status_t sli_si91x_set_sni_for_embedded_socket(const sli_si91x_tls_extension_
                                  SLI_WIFI_WAIT_FOR_RESPONSE(SLI_WIFI_RSP_SET_SNI_EMBEDDED_WAIT_TIME),
                                  NULL,
                                  NULL);
-  free(request);
+  SLI_FREE(request);
 
   return status;
 }
@@ -311,7 +311,7 @@ sl_status_t sli_configure_sni(const sli_si91x_tls_extension_info_t *sni_extensio
     }
 
     sli_si91x_tls_extension_info_t *tls_sni =
-      (sli_si91x_tls_extension_info_t *)malloc(sizeof(sli_si91x_tls_extension_info_t) + host_name_length);
+      (sli_si91x_tls_extension_info_t *)SLI_MALLOC(sizeof(sli_si91x_tls_extension_info_t) + host_name_length);
     if (tls_sni == NULL) {
       return SL_STATUS_ALLOCATION_FAILED;
     }
@@ -321,7 +321,7 @@ sl_status_t sli_configure_sni(const sli_si91x_tls_extension_info_t *sni_extensio
     memcpy(tls_sni->value, host_name, tls_sni->length);
 
     status = sli_si91x_set_sni_for_embedded_socket(tls_sni, sni_target_protocol);
-    free(tls_sni);
+    SLI_FREE(tls_sni);
     return status;
   }
 

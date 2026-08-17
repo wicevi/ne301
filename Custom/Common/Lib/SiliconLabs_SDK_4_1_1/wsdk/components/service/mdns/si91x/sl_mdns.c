@@ -82,9 +82,9 @@ static void sli_si91x_clean_service_handle(sl_wifi_buffer_t *service_handle)
   uint16_t buffer_length           = 0;
 
   service = (sl_mdns_service_t *)sli_wifi_host_get_buffer_data(service_handle, 0, &buffer_length);
-  free((char *)service->instance_name);
-  free((char *)service->service_type);
-  free((char *)service->service_message);
+  SLI_FREE((char *)service->instance_name);
+  SLI_FREE((char *)service->service_type);
+  SLI_FREE((char *)service->service_message);
   sli_buffer_manager_free_buffer(service_handle);
 
   return;
@@ -280,13 +280,13 @@ sl_status_t sl_mdns_register_service(sl_mdns_t *mdns, sl_net_interface_t interfa
                                               (sli_buffer_t)&new_service);
   VERIFY_STATUS_AND_RETURN(status);
   srv                = (sl_mdns_service_t *)sli_wifi_host_get_buffer_data(new_service, 0, &buffer_length);
-  srv->instance_name = malloc(length_instance_name);
+  srv->instance_name = SLI_MALLOC(length_instance_name);
   memcpy((char *)srv->instance_name, service->instance_name, length_instance_name);
 
-  srv->service_type = malloc(length_service_type);
+  srv->service_type = SLI_MALLOC(length_service_type);
   memcpy((char *)srv->service_type, service->service_type, length_service_type);
 
-  srv->service_message = malloc(length_service_message);
+  srv->service_message = SLI_MALLOC(length_service_message);
   memcpy((char *)srv->service_message, service->service_message, length_service_message);
 
   srv->port = service->port;

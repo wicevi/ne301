@@ -148,7 +148,7 @@ sl_websocket_error_t sli_websocket_connect_sync(sl_websocket_client_t *client)
   size_t origin_length      = strlen(client->origin);
 
   // Allocate memory for websocket_info
-  si91x_socket->websocket_info = (sli_si91x_websocket_info_t *)malloc(
+  si91x_socket->websocket_info = (sli_si91x_websocket_info_t *)SLI_MALLOC(
     sizeof(sli_si91x_websocket_info_t) + host_length + resource_length + subprotocol_length + origin_length);
 
   if (si91x_socket->websocket_info == NULL) {

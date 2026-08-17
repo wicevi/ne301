@@ -422,6 +422,23 @@ static int netif_manager_cmd(int argc, char* argv[])
         if (strcmp(if_name, NETIF_NAME_ETH_WAN) == 0) {
             w5500_netif_reset_test();
         } else {
+        #ifdef SIMULATION_SPI4_DMA_ERROR
+            if (argc > 3) {
+                extern void sl_si91x_host_sim_spi4_dma(uint8_t mode);
+                if (strcmp(argv[3], "dma_once") == 0) {
+                    sl_si91x_host_sim_spi4_dma(1);
+                } else if (strcmp(argv[3], "dma_ff") == 0) {
+                    sl_si91x_host_sim_spi4_dma(2);
+                } else if (strcmp(argv[3], "dma_off") == 0) {
+                    sl_si91x_host_sim_spi4_dma(0);
+                } else {
+                    LOG_SIMPLE("usage: error_test [c1c2|dma_once|dma_ff|dma_off]\r\n");
+                    return -1;
+                }
+                LOG_SIMPLE("spi4 dma fault mode: %s\r\n", argv[3]);
+                return 0;
+            }
+        #endif
             sli_firmware_error_callback(0x1234);
         }
     } else if (strcmp(argv[2], "fbcast") == 0) {

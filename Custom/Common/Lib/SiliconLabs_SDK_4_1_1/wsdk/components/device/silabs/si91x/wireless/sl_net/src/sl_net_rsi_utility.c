@@ -187,7 +187,7 @@ sl_status_t sli_convert_si91x_mdns_response(sl_mdns_response_t *mdns_result, con
   // TXT records
   mdns_result->txt.txt = NULL;
   if (mdns_result->txt.txt_count > 0) {
-    mdns_result->txt.txt = malloc(mdns_result->txt.txt_count * sizeof(const char *));
+    mdns_result->txt.txt = SLI_MALLOC(mdns_result->txt.txt_count * sizeof(const char *));
     if (mdns_result->txt.txt == NULL) {
       return SL_STATUS_ALLOCATION_FAILED;
     }
@@ -200,11 +200,11 @@ sl_status_t sli_convert_si91x_mdns_response(sl_mdns_response_t *mdns_result, con
 
   mdns_result->addr.addr = NULL;
   if (mdns_result->addr.addr_count > 0) {
-    mdns_result->addr.addr = malloc(mdns_result->addr.addr_count * sizeof(sl_ip_address_t));
+    mdns_result->addr.addr = SLI_MALLOC(mdns_result->addr.addr_count * sizeof(sl_ip_address_t));
     if (mdns_result->addr.addr == NULL) {
       // Free previously allocated txt.txt
       if (mdns_result->txt.txt != NULL) {
-        free(mdns_result->txt.txt);
+        SLI_FREE(mdns_result->txt.txt);
         mdns_result->txt.txt = NULL;
       }
       return SL_STATUS_ALLOCATION_FAILED;

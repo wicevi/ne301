@@ -50,9 +50,9 @@
   do {                                                  \
     if (ptr == NULL) {                                  \
       if (ptr1 != NULL)                                 \
-        free(ptr1);                                     \
+        SLI_FREE(ptr1);                                     \
       if (ptr2 != NULL)                                 \
-        free(ptr2);                                     \
+        SLI_FREE(ptr2);                                     \
       return SL_STATUS_ALLOCATION_FAILED;               \
     }                                                   \
   } while (0)
@@ -176,7 +176,7 @@ sl_status_t sl_http_client_init(const sl_http_client_configuration_t *client_con
   sl_net_credential_type_t type;
   uint32_t max_credential_size = sizeof(sl_http_client_credentials_t) + SI91X_MAX_SUPPORTED_HTTP_CREDENTIAL_LENGTH;
 
-  http_client_handle.client_credentials = (sl_http_client_credentials_t *)malloc(max_credential_size);
+  http_client_handle.client_credentials = (sl_http_client_credentials_t *)SLI_MALLOC(max_credential_size);
   SLI_VERIFY_MALLOC_AND_RETURN(http_client_handle.client_credentials);
   memset(http_client_handle.client_credentials, 0, max_credential_size);
   sl_status_t status = sl_net_get_credential(SL_NET_HTTP_CLIENT_CREDENTIAL_ID(0),
@@ -236,7 +236,7 @@ sl_status_t sl_http_client_deinit(const sl_http_client_t *client)
 
   // Free HTTP client credentials
   if (http_client_handle.client_credentials != NULL) {
-    free(http_client_handle.client_credentials);
+    SLI_FREE(http_client_handle.client_credentials);
   }
 
   // Free extended headers
@@ -341,21 +341,21 @@ sl_status_t sl_http_client_add_header(sl_http_client_request_t *request, const c
   SL_WIFI_ARGS_CHECK_NULL_POINTER(value);
 
   // Allocate memory for the new header
-  sl_http_client_header_t *new_header = (sl_http_client_header_t *)malloc(sizeof(sl_http_client_header_t));
+  sl_http_client_header_t *new_header = (sl_http_client_header_t *)SLI_MALLOC(sizeof(sl_http_client_header_t));
   SLI_VERIFY_MALLOC_AND_RETURN(new_header);
 
   // Memset the heap chunk
   memset(new_header, 0, sizeof(sl_http_client_header_t));
 
   // Allocate memory for key
-  new_header->key = (char *)malloc(strlen(key) + 1);
+  new_header->key = (char *)SLI_MALLOC(strlen(key) + 1);
   VERIFY_MALLOC_AND_FREE_IF_FAIL(new_header->key, new_header, NULL);
 
   // Copy key in header
   snprintf(new_header->key, strlen(key) + 1, "%s", key);
 
   // Allocate memory for value
-  new_header->value = (char *)malloc(strlen(value) + 1);
+  new_header->value = (char *)SLI_MALLOC(strlen(value) + 1);
   VERIFY_MALLOC_AND_FREE_IF_FAIL(new_header->value, new_header->key, new_header);
 
   // Copy value in header
@@ -393,9 +393,9 @@ sl_status_t sl_http_client_delete_header(sl_http_client_request_t *request, cons
   sl_slist_remove((sl_slist_node_t **)&request->extended_header, (sl_slist_node_t *)current_header);
 
   if (current_header != NULL) {
-    free(current_header->key);
-    free(current_header->value);
-    free(current_header);
+    SLI_FREE(current_header->key);
+    SLI_FREE(current_header->value);
+    SLI_FREE(current_header);
   }
 
   return SL_STATUS_OK;
@@ -421,9 +421,9 @@ sl_status_t sl_http_client_delete_all_headers(sl_http_client_request_t *request)
     sl_slist_remove((sl_slist_node_t **)&request->extended_header, (sl_slist_node_t *)current_header);
 
     // Free current node
-    free(current_header->key);
-    free(current_header->value);
-    free(current_header);
+    SLI_FREE(current_header->key);
+    SLI_FREE(current_header->value);
+    SLI_FREE(current_header);
 
     // Traverse to next node
     current_header = next_header;
@@ -486,7 +486,7 @@ static void sli_si91x_load_extended_headers_into_request_buffer(uint8_t *buffer,
 static sli_si91x_http_client_request_t *sli_allocate_and_initialize_request()
 {
   sli_si91x_http_client_request_t *http_client_request =
-    (sli_si91x_http_client_request_t *)malloc(sizeof(sli_si91x_http_client_request_t));
+    (sli_si91x_http_client_request_t *)SLI_MALLOC(sizeof(sli_si91x_http_client_request_t));
   if (http_client_request != NULL) {
     memset(http_client_request, 0, sizeof(sli_si91x_http_client_request_t));
   }
@@ -548,7 +548,7 @@ static sl_status_t sli_configure_https(sli_si91x_http_client_request_t *http_cli
         return SL_STATUS_WOULD_OVERFLOW;
       }
 
-      internal_sni = (sli_si91x_tls_extension_info_t *)malloc(sizeof(sli_si91x_tls_extension_info_t)
+      internal_sni = (sli_si91x_tls_extension_info_t *)SLI_MALLOC(sizeof(sli_si91x_tls_extension_info_t)
                                                               + request->sni_extension->length);
       if (internal_sni == NULL) {
         return SL_STATUS_ALLOCATION_FAILED;
@@ -562,7 +562,7 @@ static sl_status_t sli_configure_https(sli_si91x_http_client_request_t *http_cli
     sl_status_t status = sli_configure_sni(internal_sni, request->host_name, SI91X_SNI_FOR_HTTPS);
 
     if (internal_sni != NULL) {
-      free(internal_sni);
+      SLI_FREE(internal_sni);
     }
 
     return status;
@@ -731,7 +731,7 @@ static sl_status_t sli_send_chunked_http_request(sl_http_client_method_type_t se
                                                  const sl_http_client_request_t *request)
 {
   // Allocate memory for a new packet buffer
-  sli_si91x_http_client_request_t *packet_buffer = malloc(sizeof(sli_si91x_http_client_request_t));
+  sli_si91x_http_client_request_t *packet_buffer = SLI_MALLOC(sizeof(sli_si91x_http_client_request_t));
   if (packet_buffer == NULL) {
     return SL_STATUS_ALLOCATION_FAILED;
   }
@@ -791,7 +791,7 @@ static sl_status_t sli_send_chunked_http_request(sl_http_client_method_type_t se
   }
 
   // Free request structure memory
-  free(packet_buffer);
+  SLI_FREE(packet_buffer);
   return status;
 }
 
@@ -813,21 +813,21 @@ static sl_status_t sli_si91x_send_http_client_request(sl_http_client_method_type
 
   status = sli_fill_http_request_common_fields(http_client_request, client_internal, request);
   if (status != SL_STATUS_OK) {
-    free(http_client_request);
+    SLI_FREE(http_client_request);
     return status;
   }
 
   status =
     sli_fill_http_request_buffer(http_client_request, client_internal, request, &http_buffer_offset, send_request);
   if (status != SL_STATUS_OK) {
-    free(http_client_request);
+    SLI_FREE(http_client_request);
     return status;
   }
 
   // Check if request buffer is overflowed or resource length is overflowed
   if (http_buffer_offset > SLI_SI91X_HTTP_BUFFER_LEN
       || sl_strnlen((char *)request->resource, SLI_SI91X_MAX_HTTP_URL_SIZE + 1) > SLI_SI91X_MAX_HTTP_URL_SIZE) {
-    free(http_client_request);
+    SLI_FREE(http_client_request);
     return SL_STATUS_HAS_OVERFLOWED;
   }
 
@@ -846,7 +846,7 @@ static sl_status_t sli_si91x_send_http_client_request(sl_http_client_method_type
   }
 
   // Free request structure memory
-  free(http_client_request);
+  SLI_FREE(http_client_request);
   return status;
 }
 
@@ -893,7 +893,7 @@ static sl_status_t sli_http_client_send_put_request(const sl_http_client_interna
 
   // Allocate memory for request structure
   sl_si91x_http_client_put_request_t *http_put_request =
-    (sl_si91x_http_client_put_request_t *)malloc(sizeof(sl_si91x_http_client_put_request_t));
+    (sl_si91x_http_client_put_request_t *)SLI_MALLOC(sizeof(sl_si91x_http_client_put_request_t));
   SLI_VERIFY_MALLOC_AND_RETURN(http_put_request);
 
   memset(http_put_request, 0, sizeof(sl_si91x_http_client_put_request_t));
@@ -917,7 +917,7 @@ static sl_status_t sli_http_client_send_put_request(const sl_http_client_interna
                                  NULL,
                                  NULL);
   if (status != SL_STATUS_OK) {
-    free(http_put_request);
+    SLI_FREE(http_put_request);
     return status;
   }
 
@@ -963,7 +963,7 @@ static sl_status_t sli_http_client_send_put_request(const sl_http_client_interna
       }
 #endif
       default:
-        free(http_put_request);
+        SLI_FREE(http_put_request);
         return SL_STATUS_INVALID_CONFIGURATION;
     }
 
@@ -1064,7 +1064,7 @@ static sl_status_t sli_http_client_send_put_request(const sl_http_client_interna
 
   // Check if request buffer is overflowed
   if (http_buffer_offset > SLI_SI91X_HTTP_BUFFER_LEN) {
-    free(http_put_request);
+    SLI_FREE(http_put_request);
     return SL_STATUS_HAS_OVERFLOWED;
   }
 
@@ -1081,7 +1081,7 @@ static sl_status_t sli_http_client_send_put_request(const sl_http_client_interna
                                  NULL);
 
   // Free memory of request struture
-  free(http_put_request);
+  SLI_FREE(http_put_request);
 
   return status;
 }
@@ -1170,7 +1170,7 @@ sl_status_t sl_http_client_write_chunked_data(const sl_http_client_t *client,
     case SL_HTTP_POST: {
       // Allocate memory for request structure
       sli_si91x_http_client_post_data_request_t *http_post_data =
-        (sli_si91x_http_client_post_data_request_t *)malloc(sizeof(sli_si91x_http_client_post_data_request_t));
+        (sli_si91x_http_client_post_data_request_t *)SLI_MALLOC(sizeof(sli_si91x_http_client_post_data_request_t));
       SLI_VERIFY_MALLOC_AND_RETURN(http_post_data);
       memset(http_post_data, 0, sizeof(sli_si91x_http_client_post_data_request_t));
       // Fill HTTP Post data current chunk length
@@ -1193,7 +1193,7 @@ sl_status_t sl_http_client_write_chunked_data(const sl_http_client_t *client,
                                      NULL);
 
       // Free memory of request struture
-      free(http_post_data);
+      SLI_FREE(http_post_data);
 
       break;
     }
@@ -1201,7 +1201,7 @@ sl_status_t sl_http_client_write_chunked_data(const sl_http_client_t *client,
     case SL_HTTP_PUT: {
       // Allocate memory for request structure
       sl_si91x_http_client_put_request_t *http_put_pkt_request =
-        (sl_si91x_http_client_put_request_t *)malloc(sizeof(sl_si91x_http_client_put_request_t));
+        (sl_si91x_http_client_put_request_t *)SLI_MALLOC(sizeof(sl_si91x_http_client_put_request_t));
       SLI_VERIFY_MALLOC_AND_RETURN(http_put_pkt_request);
       memset(http_put_pkt_request, 0, sizeof(sl_si91x_http_client_put_request_t));
       sli_si91x_http_client_put_data_request_t *http_put_data =
@@ -1230,7 +1230,7 @@ sl_status_t sl_http_client_write_chunked_data(const sl_http_client_t *client,
                                      NULL);
 
       // Free memory of request struture
-      free(http_put_pkt_request);
+      SLI_FREE(http_put_pkt_request);
 
       break;
     }

@@ -577,6 +577,10 @@ C_DEFS += -DUSE_MEMORY_POOL_ALLOCATION
 C_DEFS += -DUSE_OS04C10_SENSOR
 C_DEFS += -DSTM32_THREAD_SAFE_STRATEGY=2
 C_DEFS += -DENABLE_U0_MODULE=1
+# CLI fault injection on the Si91x SPI4 host transfer (test-only, validated
+# 2026-08-17, disabled for release): enable + rebuild to arm
+# "ifconfig wl error_test dma_once|dma_ff|dma_off".
+# C_DEFS += -DSIMULATION_SPI4_DMA_ERROR
 # C_DEFS += -DISP_MW_TUNING_TOOL_SUPPORT
 
 # AI Runtime

@@ -290,7 +290,7 @@ sl_status_t sli_si91x_socket_init(uint8_t max_select_count)
     sli_si91x_max_select_count = max_select_count; // Store the max number of selects.
 
     // Allocate memory for the select request table based on the max_select_count.
-    select_request_table = calloc(max_select_count, sizeof(sli_si91x_select_request_t));
+    select_request_table = SLI_CALLOC(max_select_count, sizeof(sli_si91x_select_request_t));
 
     // If memory allocation fails, return failure.
     if (select_request_table == NULL) {
@@ -318,7 +318,7 @@ sl_status_t sli_si91x_socket_deinit(void)
     si91x_socket_select_events = NULL;
   }
   if (select_request_table != NULL) {
-    free(select_request_table);
+    SLI_FREE(select_request_table);
     select_request_table = NULL;
   }
   return SL_STATUS_OK;
@@ -555,7 +555,7 @@ void sli_si91x_free_socket(int socket)
 
   // Free the domain name if it was allocated
   if (si91x_socket->domain_name != NULL) {
-    free(si91x_socket->domain_name);
+    SLI_FREE(si91x_socket->domain_name);
     si91x_socket->domain_name = NULL;
   }
   sl_status_t status =
@@ -571,7 +571,7 @@ void sli_si91x_free_socket(int socket)
   sli_queue_manager_deinit(&si91x_socket->rx_queue, &sli_si91x_socket_rx_queue_flush_handler, NULL);
 
   // Free the memory allocated for the socket structure.
-  free(si91x_socket);
+  SLI_FREE(si91x_socket);
 
   // Set the global socket pointer to NULL to prevent future use of freed memory.
   sli_si91x_sockets[socket] = NULL;
@@ -664,7 +664,7 @@ sl_status_t sli_get_free_socket(sli_si91x_socket_t **socket, int *socket_fd)
   // Allocate new socket
   // NOTE: The 'new_socket' variable is intentionally used to prevent race conditions between allocation and initialization.
   // Removing or optimizing this intermediate variable may lead to unexpected issues.
-  sli_si91x_socket_t *new_socket = malloc(sizeof(sli_si91x_socket_t));
+  sli_si91x_socket_t *new_socket = SLI_MALLOC(sizeof(sli_si91x_socket_t));
 
   if (new_socket == NULL) {
     osMutexRelease(sli_si91x_socket_mutex);
@@ -681,7 +681,7 @@ sl_status_t sli_get_free_socket(sli_si91x_socket_t **socket, int *socket_fd)
   status = sli_queue_manager_init(&sli_si91x_sockets[socket_index]->rx_queue, SLI_BUFFER_MANAGER_QUEUE_NODE_POOL);
   if (status != SL_STATUS_OK) {
     SL_DEBUG_LOG_V2(ERROR, "Socket RX queue init failed: 0x%lX\r\n", status);
-    free(sli_si91x_sockets[socket_index]);
+    SLI_FREE(sli_si91x_sockets[socket_index]);
     sli_si91x_sockets[socket_index] = NULL;
     osMutexRelease(sli_si91x_socket_mutex);
     return SL_STATUS_FAIL;
@@ -711,7 +711,7 @@ sl_status_t sli_get_free_socket(sli_si91x_socket_t **socket, int *socket_fd)
   if (status != SL_STATUS_OK) {
     SL_DEBUG_LOG_V2(ERROR, "Command engine add_packet_type failed: 0x%lX\r\n", status);
     sli_queue_manager_deinit(&sli_si91x_sockets[socket_index]->rx_queue, NULL, NULL);
-    free(sli_si91x_sockets[socket_index]);
+    SLI_FREE(sli_si91x_sockets[socket_index]);
     sli_si91x_sockets[socket_index] = NULL;
     osMutexRelease(sli_si91x_socket_mutex);
     return SL_STATUS_FAIL;
@@ -1472,13 +1472,13 @@ static sl_status_t sli_allocate_fd_sets(void **read_fd, void **write_fd, void **
   *exception_fd = NULL;
 
 #ifndef __ZEPHYR__
-  *read_fd      = malloc(sizeof(fd_set));
-  *write_fd     = malloc(sizeof(fd_set));
-  *exception_fd = malloc(sizeof(fd_set));
+  *read_fd      = SLI_MALLOC(sizeof(fd_set));
+  *write_fd     = SLI_MALLOC(sizeof(fd_set));
+  *exception_fd = SLI_MALLOC(sizeof(fd_set));
 #else
-  *read_fd = malloc(sizeof(sl_si91x_fdset_t));
-  *write_fd = malloc(sizeof(sl_si91x_fdset_t));
-  *exception_fd = malloc(sizeof(sl_si91x_fdset_t));
+  *read_fd = SLI_MALLOC(sizeof(sl_si91x_fdset_t));
+  *write_fd = SLI_MALLOC(sizeof(sl_si91x_fdset_t));
+  *exception_fd = SLI_MALLOC(sizeof(sl_si91x_fdset_t));
 #endif
 
   // Check if any allocation failed
@@ -1496,13 +1496,13 @@ static sl_status_t sli_allocate_fd_sets(void **read_fd, void **write_fd, void **
 static void sli_cleanup_fd_sets(void *read_fd, void *write_fd, void *exception_fd)
 {
   if (read_fd != NULL) {
-    free(read_fd);
+    SLI_FREE(read_fd);
   }
   if (write_fd != NULL) {
-    free(write_fd);
+    SLI_FREE(write_fd);
   }
   if (exception_fd != NULL) {
-    free(exception_fd);
+    SLI_FREE(exception_fd);
   }
 }
 
