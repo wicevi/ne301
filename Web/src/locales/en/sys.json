@@ -726,6 +726,7 @@
       "retry_hint": "When enabled, failed uploads are retried after the next capture uploads successfully. Unavailable for Store-Only or No-Storage modes.",
       "retry_max_attempts": "Max Retry Attempts (0=unlimited)",
       "keep_sent_hours": "Keep Uploaded Files (hours)",
+      "keep_sent_hours_hint": "72000 (default) keeps records permanently - the oldest are deleted only when storage is full or the record limit is reached; 0 deletes files immediately after a successful upload; values in between use time-based retention. Note: lowering this value immediately deletes history beyond the new limit; a newly inserted SD card is also cleaned according to this setting!",
       "saved": "Capture config saved",
       "storage_full": "Storage Full",
       "retry": "Retry",

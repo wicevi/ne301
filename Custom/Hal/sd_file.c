@@ -955,8 +955,13 @@ static void sdProcess(void *argument)
         }else{
             /* USER CODE BEGIN fx_app_thread_entry 1 */
             fx_media_close_notify_set(&sd->sdio_disk, media_close_callback);
-            sd->media_status = MEDIA_OPENED;
+            /* Register ops BEFORE publishing MEDIA_OPENED: sd_is_media_open()
+             * gates disk_file(FS_SD) callers (upload storage switch, count
+             * rebuild). If the flag went out first, a reader landing between
+             * the two would see "open" but instances[FS_SD].ops == NULL and
+             * cache an empty result (racy 0 record counts after hot-plug). */
             sd->file_ops_handle = file_ops_register(FS_SD, &sd_file_ops, &sd->sdio_disk);
+            sd->media_status = MEDIA_OPENED;
             sd->mode = SD_MODE_NORMAL;
             file_ops_switch(sd->file_ops_handle);
         }
@@ -982,13 +987,16 @@ static void sdProcess(void *argument)
                     sd->mode = SD_MODE_UNKNOWN;
                 }else{
                     fx_media_close_notify_set(&sd->sdio_disk, media_close_callback);
-                    sd->media_status = MEDIA_OPENED;
-                    sd->mode = SD_MODE_NORMAL;
+                    /* Same publish-last ordering as the boot open above:
+                     * register ops first, MEDIA_OPENED last - readers between
+                     * the two must not see "open" with no registered ops. */
                     if(sd->file_ops_handle == -1){
                         sd->file_ops_handle = file_ops_register(FS_SD, &sd_file_ops, &sd->sdio_disk);
                         LOG_DRV_DEBUG("SD file system register. :%d \r\n", sd->file_ops_handle);
                         file_ops_switch(sd->file_ops_handle);
                     }
+                    sd->media_status = MEDIA_OPENED;
+                    sd->mode = SD_MODE_NORMAL;
                 }
 
             }else if(!SD_IsDetected() && sd->media_status == MEDIA_OPENED){
@@ -1087,13 +1095,14 @@ int sd_format(void)
         LOG_DRV_INFO("SD opened successfully after format.\n");
         sd_disk_info_t info;
         fx_media_close_notify_set(&g_sd.sdio_disk, media_close_callback);
-        g_sd.media_status = MEDIA_OPENED;
-        g_sd.mode = SD_MODE_NORMAL;
+        /* Same publish-last ordering: ops registered before MEDIA_OPENED. */
         if(g_sd.file_ops_handle == -1){
             g_sd.file_ops_handle = file_ops_register(FS_SD, &sd_file_ops, &g_sd.sdio_disk);
             LOG_DRV_DEBUG("SD file system register. :%d \r\n", g_sd.file_ops_handle);
             file_ops_switch(g_sd.file_ops_handle);
         }
+        g_sd.media_status = MEDIA_OPENED;
+        g_sd.mode = SD_MODE_NORMAL;
         if (sd_get_disk_info(&info) == 0) {
             LOG_DRV_INFO("Format verification: Total %lu KB, Free %lu KB\n", 
                    info.total_KBytes, info.free_KBytes);
