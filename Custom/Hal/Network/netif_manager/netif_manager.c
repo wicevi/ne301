@@ -952,7 +952,11 @@ int nm_get_netif_list(netif_info_t **netif_info_list)
         if (ret != AICAM_OK) {
             hal_mem_free(*netif_info_list);
             *netif_info_list = NULL;
-            return ret;
+            /* negate: success returns a count, and error codes here can be
+             * positive (e.g. sl_status 0x7 timeout) -- a positive error would
+             * read as "N interfaces" at the caller and walk the NULL list;
+             * AICAM_ERROR_* are already negative, leave them alone */
+            return (ret > 0) ? -ret : ret;
         }
     }
     return netif_num;

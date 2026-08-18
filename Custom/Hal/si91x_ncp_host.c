@@ -206,60 +206,48 @@ sl_status_t sl_si91x_host_spi_transfer(const void *tx_buffer, void *rx_buffer, u
 {
     HAL_StatusTypeDef ret = HAL_OK;
     osStatus_t sem_status = osOK;
-    // TX_INTERRUPT_SAVE_AREA
+
+    if (mtx_id == NULL) return SL_STATUS_INVALID_STATE;
+    osMutexAcquire(mtx_id, osWaitForever);
 
     if (buffer_length < 1 || buffer_length > SPI_BUFFER_LENGTH) {
-        printf("Invalid buffer length: %d\r\n", buffer_length);
+        printf("[si91x]Invalid buffer length: %d\r\n", buffer_length);
+        osMutexRelease(mtx_id);
         return SL_STATUS_INVALID_PARAMETER;
     }
 
-    if (rx_buffer == NULL) {
-        rx_buffer = spi_rx_buffer;
+    if (rx_buffer != NULL) {
+        memset(spi_rx_buffer, 0x00, buffer_length);
     }
+
     if (tx_buffer == NULL) {
-        tx_buffer = spi_tx_buffer;
+        memset(spi_tx_buffer, 0xff, buffer_length);
+    } else {
+        memcpy(spi_tx_buffer, tx_buffer, buffer_length);
     }
-    
-    if (mtx_id == NULL) return SL_STATUS_INVALID_STATE;
-    osMutexAcquire(mtx_id, osWaitForever);
-    // printf("Transmitting data: ");
+
+    // printf("[si91x] => ");
     // for (uint16_t i = 0; i < buffer_length; i++) {
-    //     printf("%02X ", ((uint8_t *)tx_buffer)[i]);
+    //     printf("%02X ", ((uint8_t *)spi_tx_buffer)[i]);
     // }
     // printf("\r\n");
-    /*
-    if (buffer_length < 8) {
-        memcpy(spi_tx_buffer, tx_buffer, buffer_length);
-        memset(spi_rx_buffer, 0x00, buffer_length);
-        // TX_DISABLE
-        // ret = HAL_SPI_TransmitReceive_IT(&hspi4, (uint8_t *)spi_tx_buffer, (uint8_t *)spi_rx_buffer, buffer_length);
-        ret = HAL_SPI_TransmitReceive(&hspi4, (uint8_t *)spi_tx_buffer, (uint8_t *)spi_rx_buffer, buffer_length, 100);
-        // TX_RESTORE
-        if (ret == HAL_OK) {
-            // sem_status = osSemaphoreAcquire(sem_spi4, 100);
-            // if (sem_status != osOK) {
-            //     printf("sem_spi4 it failed(ret = %d)!\r\n", (int)sem_status);
-            //     HAL_SPI_Abort_IT(&hspi4);
-            //     osMutexRelease(mtx_id);
-            //     return SL_STATUS_TIMEOUT;
-            // }
-            memcpy(rx_buffer, spi_rx_buffer, buffer_length);
-            // printf("$\r\n");
-        } else {
-            printf("HAL_SPI_TransmitReceive failed(ret = %d)!\r\n", ret);
+
+    if (buffer_length < 4) {
+        ret = HAL_SPI_TransmitReceive(&hspi4, (uint8_t *)spi_tx_buffer, (uint8_t *)spi_rx_buffer, buffer_length, 200);
+        if (ret != HAL_OK) {
+            printf("[si91x]transmit failed(ret = %d)!\r\n", ret);
             HAL_SPI_Abort(&hspi4);
+            if (is_high_spi) sl_si91x_host_enable_high_speed_bus();
+            else MX_SPI4_Init();
             osMutexRelease(mtx_id);
             return SL_STATUS_ABORT;
         }
     } else {
-     */
+
 #ifdef DMA_ENABLED
-        memcpy(spi_tx_buffer, tx_buffer, buffer_length);
-        memset(spi_rx_buffer, 0x00, buffer_length);
-        // printf("Transmit\r\n");
         ret = HAL_SPI_TransmitReceive_DMA(&hspi4, (uint8_t *)spi_tx_buffer, (uint8_t *)spi_rx_buffer, buffer_length);
         if (ret == HAL_OK) {
-            sem_status = osSemaphoreAcquire(sem_spi4, 1000);
+            sem_status = osSemaphoreAcquire(sem_spi4, 200);
         #ifdef SIMULATION_SPI4_DMA_ERROR
             if (sim_spi4_dma_mode == 1) {
                 sim_spi4_dma_mode = 0;        // one-shot: next transfer is healthy again
@@ -267,37 +255,39 @@ sl_status_t sl_si91x_host_spi_transfer(const void *tx_buffer, void *rx_buffer, u
             }
         #endif
             if (sem_status != osOK) {
-                printf("sem_spi4 dma failed(ret = %d)!\r\n", (int)sem_status);
+                printf("[si91x]Wait DMA failed(ret = %d)!\r\n", (int)sem_status);
                 HAL_SPI_Abort(&hspi4);
-                sl_si91x_host_enable_high_speed_bus();
+                if (is_high_spi) sl_si91x_host_enable_high_speed_bus();
+                else MX_SPI4_Init();
                 osMutexRelease(mtx_id);
                 return SL_STATUS_TIMEOUT;
             }
-            memcpy(rx_buffer, spi_rx_buffer, buffer_length);
         #ifdef SIMULATION_SPI4_DMA_ERROR
             if (sim_spi4_dma_mode == 2) {
-                memset(rx_buffer, 0xFF, buffer_length);
+                memset(spi_rx_buffer, 0xFF, buffer_length);
             }
         #endif
         } else {
-            printf("HAL_SPI_TransmitReceive_DMA failed(ret = %d)!\r\n", ret);
+            printf("[si91x]DMA transmit failed(ret = %d)!\r\n", ret);
             HAL_SPI_Abort(&hspi4);
-            sl_si91x_host_enable_high_speed_bus();
+            if (is_high_spi) sl_si91x_host_enable_high_speed_bus();
+            else MX_SPI4_Init();
             osMutexRelease(mtx_id);
             return SL_STATUS_ABORT;
         }
 #else
-        HAL_SPI_TransmitReceive(&hspi4, (uint8_t *)tx_buffer, (uint8_t *)rx_buffer, buffer_length, 10);
+        HAL_SPI_TransmitReceive(&hspi4, (uint8_t *)spi_tx_buffer, (uint8_t *)spi_rx_buffer, buffer_length, 200);
 #endif
-/*
     }
-*/
-    osMutexRelease(mtx_id);
-    // printf("Received data: ");
+
+    // printf("[si91x] <= ");
     // for (uint16_t i = 0; i < buffer_length; i++) {
-    //     printf("%02X ", ((uint8_t *)rx_buffer)[i]);
+    //     printf("%02X ", ((uint8_t *)spi_rx_buffer)[i]);
     // }
     // printf("\r\n");
+
+    if (rx_buffer != NULL) memcpy(rx_buffer, spi_rx_buffer, buffer_length);
+    osMutexRelease(mtx_id);
     return SL_STATUS_OK;
 }
 
@@ -322,7 +312,7 @@ void sl_si91x_host_enable_high_speed_bus()
     hspi4.Init.CRCPolynomial = 0x7;
     hspi4.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
     hspi4.Init.NSSPolarity = SPI_NSS_POLARITY_LOW;
-    hspi4.Init.FifoThreshold = SPI_FIFO_THRESHOLD_01DATA;
+    hspi4.Init.FifoThreshold = SPI_FIFO_THRESHOLD_04DATA;
     hspi4.Init.MasterSSIdleness = SPI_MASTER_SS_IDLENESS_00CYCLE;
     hspi4.Init.MasterInterDataIdleness = SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
     hspi4.Init.MasterReceiverAutoSusp = SPI_MASTER_RX_AUTOSUSP_DISABLE;

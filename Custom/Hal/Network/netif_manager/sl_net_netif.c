@@ -550,6 +550,28 @@ static void sl_net_low_level_input(struct netif *netif, uint8_t *b, uint16_t len
 /// @param netif Network interface
 /// @param p Data buffer
 /// @return Error code
+// A wedged host<->NWP pipe fails every raw TX with SL_STATUS_ALLOCATION_FAILED
+// (0x19): the CE_DATA_POOL never frees, each send waits 1s for a buffer. Unlike
+// a dead NWP this never reaches the C1/C2 handshake timeout, so
+// sli_firmware_error_callback (the only recovery trigger) never fires and the
+// wedge persists until reboot (field log: 14h outage). Escalate to the existing
+// firmware-error recovery after N consecutive 0x19 failures.
+// Single-writer safe: lwIP calls linkoutput only from tcpip_thread.
+#define SL_NET_TX_WEDGE_THRESHOLD 30
+static uint32_t sl_net_tx_wedge_count = 0;
+static void sl_net_tx_failure_escalate(sl_status_t status)
+{
+    if (status != SL_STATUS_ALLOCATION_FAILED) {
+        sl_net_tx_wedge_count = 0; // any success / other error resets the streak
+        return;
+    }
+    if (++sl_net_tx_wedge_count < SL_NET_TX_WEDGE_THRESHOLD) return;
+    sl_net_tx_wedge_count = 0;
+    if (remote_wakeup_mode != WAKEUP_MODE_NORMAL) return; // same guard as sli_firmware_error_callback
+    LOG_DRV_ERROR("raw TX pool exhausted %u times in a row, triggering firmware recovery\r\n",
+                  SL_NET_TX_WEDGE_THRESHOLD);
+    osEventFlagsSet(sl_net_events, SL_NET_EVENT_FIRMWARE_ERROR);
+}
 static err_t sl_net_low_level_output(struct netif *netif, struct pbuf *p)
 {
     struct pbuf *q = NULL;
@@ -568,6 +590,7 @@ static err_t sl_net_low_level_output(struct netif *netif, struct pbuf *p)
             if (netif == &client_netif) status = sl_wifi_send_raw_data_frame(SL_WIFI_CLIENT_INTERFACE, out_buf, p->tot_len);
             else status = sl_wifi_send_raw_data_frame(SL_WIFI_AP_INTERFACE, out_buf, p->tot_len);
             hal_mem_free(out_buf);
+            sl_net_tx_failure_escalate(status);
             if (status != SL_STATUS_OK) {
                 LOG_DRV_ERROR(NETIF_NAME_STR_FMT ": Failed to send data frame: 0x%0lX.\r\n", NETIF_NAME_PARAMETER(netif), status);
                 return ERR_IF;
@@ -579,6 +602,7 @@ static err_t sl_net_low_level_output(struct netif *netif, struct pbuf *p)
         // printf("LWIP TX len : %d\r\n", q->len);
         if (netif == &client_netif) status = sl_wifi_send_raw_data_frame(SL_WIFI_CLIENT_INTERFACE, (uint8_t *)q->payload, q->len);
         else status = sl_wifi_send_raw_data_frame(SL_WIFI_AP_INTERFACE, (uint8_t *)q->payload, q->len);
+        sl_net_tx_failure_escalate(status);
         if (status != SL_STATUS_OK) {
             LOG_DRV_ERROR(NETIF_NAME_STR_FMT ": Failed to send data frame: 0x%0lX.\r\n", NETIF_NAME_PARAMETER(netif), status);
             return ERR_IF;

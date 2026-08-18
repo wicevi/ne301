@@ -539,7 +539,7 @@ static void handle_dhcp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     lease_unlock();
 
     if (!known) {
-        DHCPS_LOG("drop: unknown mac " MAC_STR_FMT "\r\n", MAC_STR_ARG(msg->chaddr));
+        // DHCPS_LOG("drop: unknown mac " MAC_STR_FMT "\r\n", MAC_STR_ARG(msg->chaddr));
         mem_free(msg);
         return;
     }
