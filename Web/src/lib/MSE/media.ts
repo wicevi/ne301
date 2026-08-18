@@ -27,6 +27,12 @@ declare global {
 class MsMediaSource {
     private mediaSource: MediaSource | null = null;
 
+    private mediaSourceCleanup: (() => void) | null = null;
+
+    private mseGeneration: number = 0;
+
+    private mseRecoveryTimer: number | null = null;
+
     private videoElement: HTMLVideoElement | null = null;
 
     private sourceBuffer: SourceBuffer | null = null;
@@ -244,36 +250,58 @@ class MsMediaSource {
             // create video
             this.videoElement?.addEventListener("error", this.boundVideoErrorCallback);
 
-            // create mse
-            this.mediaSource = new MediaSourceCtor();
+            // Bind every callback to the exact MediaSource that created it. An
+            // older sourceopen can arrive after a watchdog restart on Chrome.
+            const mediaSource = new MediaSourceCtor();
+            const generation = ++this.mseGeneration;
+            this.mediaSource = mediaSource;
 
             // video url
             if (this.videoElement) {
-                this.videoElement.src = window.URL.createObjectURL(this.mediaSource);
+                this.videoElement.src = window.URL.createObjectURL(mediaSource);
             }
 
             // mse event
-            this.mediaSource.addEventListener("sourceopen", () => {
-                this.uninitSourceBuffer();
-                this.initSourceBuffer();
+            const onSourceOpen = () => {
+                if (generation !== this.mseGeneration
+                    || this.mediaSource !== mediaSource
+                    || mediaSource.readyState !== 'open') {
+                    return;
+                }
+
+                this.uninitSourceBuffer(mediaSource);
+                if (this.initSourceBuffer(mediaSource) !== 0) return;
                 this.updateSourceBuffer();
-            });
+            };
 
-            this.mediaSource.addEventListener("sourceclose", () => {
+            const onSourceClose = () => {
                 console.log("ms mse close.");
-            });
+            };
 
-            this.mediaSource.addEventListener("sourceended", () => {
+            const onSourceEnded = () => {
                 console.log("ms mse ended.");
-            });
+            };
 
-            this.mediaSource.addEventListener("error", () => {
+            const onError = () => {
                 console.log("ms mse error.");
-            });
+            };
 
-            this.mediaSource.addEventListener("abort", () => {
+            const onAbort = () => {
                 console.log("ms mse abort.");
-            });
+            };
+
+            mediaSource.addEventListener("sourceopen", onSourceOpen);
+            mediaSource.addEventListener("sourceclose", onSourceClose);
+            mediaSource.addEventListener("sourceended", onSourceEnded);
+            mediaSource.addEventListener("error", onError);
+            mediaSource.addEventListener("abort", onAbort);
+            this.mediaSourceCleanup = () => {
+                mediaSource.removeEventListener("sourceopen", onSourceOpen);
+                mediaSource.removeEventListener("sourceclose", onSourceClose);
+                mediaSource.removeEventListener("sourceended", onSourceEnded);
+                mediaSource.removeEventListener("error", onError);
+                mediaSource.removeEventListener("abort", onAbort);
+            };
         } catch (e) {
             console.log((e as Error).message);
             return false;
@@ -329,9 +357,12 @@ class MsMediaSource {
             this.initFlag = MsMediaSource.statusIdel;
             if (codec && this.videoElement) {
                 // Slight delay to avoid immediate rebuild in the same event loop as error trigger
-                setTimeout(() => {
+                const recoveryGeneration = this.mseGeneration;
+                this.mseRecoveryTimer = window.setTimeout(() => {
+                    this.mseRecoveryTimer = null;
                     // Double check videoElement still exists before reinitializing
-                    if (this.videoElement && this.initMse(codec)) {
+                    if (recoveryGeneration !== this.mseGeneration || this.videoElement !== video) return;
+                    if (this.initMse(codec)) {
                         this.initFlag = MsMediaSource.statusNormal;
                         // If there are buffered frames, continue driving playback
                         this.updateSourceBuffer();
@@ -352,23 +383,39 @@ class MsMediaSource {
         return tmp;
     }
 
-    initSourceBuffer(): number {
+    initSourceBuffer(mediaSource: MediaSource | null = this.mediaSource): number {
         if (this.sourceBuffer !== null) {
             return -1;
         }
 
-        if (!this.mediaSource) {
+        if (!mediaSource
+            || mediaSource !== this.mediaSource
+            || mediaSource.readyState !== 'open') {
             return -1;
         }
 
-        this.sourceBuffer = this.mediaSource.addSourceBuffer(this.mimeCodec);
+        let sourceBuffer: SourceBuffer;
+        try {
+            sourceBuffer = mediaSource.addSourceBuffer(this.mimeCodec);
+        } catch (error) {
+            console.error('Failed to initialize MediaSource SourceBuffer', error);
+            this.initFlag = MsMediaSource.statusError;
+            return -1;
+        }
+
+        if (mediaSource !== this.mediaSource || mediaSource.readyState !== 'open') {
+            return -1;
+        }
+
+        this.sourceBuffer = sourceBuffer;
         this.currentSegmentIndex = 0;
-        const curMode = this.sourceBuffer.mode;
+        const curMode = sourceBuffer.mode;
         if (curMode === 'segments') {
-            this.sourceBuffer.mode = 'sequence';
+            sourceBuffer.mode = 'sequence';
         }
         
-        this.sourceBuffer.addEventListener("updateend", () => {
+        sourceBuffer.addEventListener("updateend", () => {
+            if (this.mediaSource !== mediaSource || this.sourceBuffer !== sourceBuffer) return;
             try {
                 if (this.sourceBuffer !== null && this.mediaSource?.readyState === 'open' && this.videoElement) {
                     const { buffered } = this.sourceBuffer;
@@ -440,15 +487,22 @@ class MsMediaSource {
         this.videoElement.play();
     }
 
-    uninitSourceBuffer(): void {
-        if (this.sourceBuffer === null || !this.mediaSource) {
+    uninitSourceBuffer(mediaSource: MediaSource | null = this.mediaSource): void {
+        const { sourceBuffer } = this;
+        if (sourceBuffer === null) {
             return;
         }
-        // this.sourceBuffer.removeEventListener("updateend", this.removeUpdateCallback);
-        for (let i = 0; i < this.mediaSource.sourceBuffers.length; i++) {
-            this.mediaSource.removeSourceBuffer(this.mediaSource.sourceBuffers[i]);
-        }
+
         this.sourceBuffer = null;
+        if (!mediaSource || mediaSource.readyState !== 'open') return;
+
+        try {
+            if (Array.from(mediaSource.sourceBuffers).includes(sourceBuffer)) {
+                mediaSource.removeSourceBuffer(sourceBuffer);
+            }
+        } catch (error) {
+            console.warn('Failed to remove MediaSource SourceBuffer', error);
+        }
     }
 
     updateSourceBuffer(): void {
@@ -603,6 +657,14 @@ class MsMediaSource {
     }
 
     uninitMse(): void {
+        this.mseGeneration++;
+        if (this.mseRecoveryTimer !== null) {
+            clearTimeout(this.mseRecoveryTimer);
+            this.mseRecoveryTimer = null;
+        }
+        this.mediaSourceCleanup?.();
+        this.mediaSourceCleanup = null;
+
         if (this.videoElement !== null) {
             if (this.boundOnVideoStall) {
                 this.videoElement.removeEventListener('waiting', this.boundOnVideoStall);
@@ -614,7 +676,7 @@ class MsMediaSource {
             this.videoElement.src = "";
         }
 
-        this.uninitSourceBuffer();
+        this.uninitSourceBuffer(this.mediaSource);
         this.mediaSource = null;
         this.videoElement = null;
         this.sourceBuffer = null;
