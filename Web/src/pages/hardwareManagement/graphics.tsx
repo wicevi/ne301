@@ -358,7 +358,7 @@ export default function Graphics() {
                               }
                             }}
                           >
-                            <SelectTrigger className="border-0 shadow-none focus-visible:ring-0 w-fit">
+                            <SelectTrigger className="border-0 shadow-none focus-visible:ring-0 w-fit min-w-0">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>

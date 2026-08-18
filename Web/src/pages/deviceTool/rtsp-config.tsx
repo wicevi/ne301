@@ -268,15 +268,15 @@ export default function RtspConfig() {
             <Separator />
 
             {/* Auth mode */}
-            <div className="flex justify-between items-center py-2">
-              <Label className="text-sm text-text-primary">
+            <div className="flex justify-between items-center gap-2 py-2">
+              <Label className="text-sm text-text-primary shrink-0">
                 {i18n._('sys.device_tool.rtsp.auth_mode')}
               </Label>
               <Select
                 value={config.auth_mode}
                 onValueChange={v => setConfig({ ...config, auth_mode: v as RtspAuthMode })}
               >
-                <SelectTrigger className="bg-transparent border-0 !shadow-none !outline-none text-right">
+                <SelectTrigger className="bg-transparent border-0 !shadow-none !outline-none text-right min-w-0">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
