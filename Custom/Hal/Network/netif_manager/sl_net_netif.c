@@ -137,6 +137,100 @@ static sl_wifi_device_configuration_t device_configuration = {
 #endif
                    .config_feature_bit_map = SL_SI91X_FEAT_SLEEP_GPIO_SEL_BITMAP }
 };
+#if IS_SELF_DHCP_SERVER
+/// Defined below (line ~399); needed early by sl_net_fw_dhcps_compat_check().
+extern struct netif client_netif;
+/// Set when the running NWP firmware predates host-side DHCP server support
+/// (< 2.16.5): the AP then uses the firmware DHCP server instead of lwip dhcps.
+static bool sl_net_fw_dhcps_fallback = false;
+/// Set via sl_net_netif_skip_fw_dhcps_compat_check(): STA-only boots (fast
+/// wakeup path, no AP) skip the check. The AP init still checks — it needs
+/// the fallback, so the skip only defers, never disables.
+static bool sl_net_fw_dhcps_check_skip = false;
+
+/// @brief One-shot firmware compatibility check for the host DHCP server.
+///        Runs at whichever of AP/STA initializes first. WiFi firmware older
+///        than 2.16.5 cannot serve DHCP from the host (lwip dhcps) — AP
+///        clients would connect but never obtain an IP. Reboot the NWP with
+///        SL_SI91X_TCP_IP_FEAT_DHCPV4_SERVER added, i.e. fall back to the
+///        firmware DHCP server like an IS_SELF_DHCP_SERVER==0 build.
+/// @param interface Interface currently being initialized
+/// @return SL_STATUS_OK when usable (fallback applied or not needed)
+static sl_status_t sl_net_fw_dhcps_compat_check(sl_net_interface_t interface)
+{
+    static bool checked = false;
+    sl_wifi_firmware_version_t fw = { 0 };
+    sl_status_t status;
+
+    if (checked) return SL_STATUS_OK;
+    checked = true;
+
+    status = sl_wifi_get_firmware_version(&fw);
+    if (status != SL_STATUS_OK) {
+        LOG_DRV_WARN("FW version unavailable (0x%lX), keep host DHCP server\r\n", status);
+        return SL_STATUS_OK;
+    }
+    /* "2.16.5" — the patch number lives in security_version (SDK swaps the
+     * field names, see wifi_get_running_version). */
+    if (fw.major > 2 || (fw.major == 2 && (fw.minor > 16 || (fw.minor == 16 && fw.security_version >= 5)))) {
+        return SL_STATUS_OK;
+    }
+
+    LOG_DRV_WARN("Wi-Fi FW %d.%d.%d < 2.16.5, fall back to firmware DHCP server\r\n",
+                 fw.major, fw.minor, fw.security_version);
+    /* Check deferred to AP init while the STA already brought the device up
+     * (fast-wakeup skip): a bare sl_net_deinit(interface) is not effective
+     * here — sl_wifi_deinit() resets the whole NWP including the live STA
+     * association, and the lwIP client netif would stay registered on a dead
+     * link. Tear the client netif down cleanly first (disconnect, device
+     * deinit, netif remove — same sequence as the recovery thread in
+     * sl_net_thread), reboot the NWP with the server bit, then restore the
+     * STA to its previous state (one-shot check → no recursion). */
+    bool sta_registered = (netif_get_by_index(client_netif.num + 1) == &client_netif);
+    netif_state_t sta_state = sl_net_client_netif_state();
+    if (sta_registered) sl_net_client_netif_deinit();
+    else sl_net_deinit(interface);
+
+    device_configuration.boot_config.tcp_ip_feature_bit_map |= SL_SI91X_TCP_IP_FEAT_DHCPV4_SERVER;
+    sl_net_fw_dhcps_fallback = true;
+    /* We just deinit'd the device: anything but a real init here means the
+     * deinit failed and the new bitmap was NOT applied — fail loudly instead
+     * of keeping a fallback flag that would skip the host DHCP server. */
+    status = sl_net_init(interface, &device_configuration, NULL, NULL);
+    if (status != SL_STATUS_OK) {
+        LOG_DRV_ERROR("Failed to re-init Wi-Fi with firmware DHCP server: 0x%lX\r\n", status);
+        return status;
+    }
+
+    if (sta_registered) {
+        int ret = sl_net_client_netif_init();
+        if (ret != SL_STATUS_OK) {
+            LOG_DRV_ERROR("Failed to restore Wi-Fi client after DHCP fallback: 0x%X\r\n", ret);
+            return ret;
+        }
+        if (sta_state == NETIF_STATE_UP) {
+            ret = sl_net_client_netif_up();
+            if (ret != SL_STATUS_OK) {
+                LOG_DRV_WARN("Wi-Fi client reconnect after DHCP fallback failed: 0x%X\r\n", ret);
+            }
+        }
+    }
+    return SL_STATUS_OK;
+}
+#endif
+
+/// @brief Skip the fw < 2.16.5 DHCP-server compatibility check for STA-only
+///        boots. Call before any netif init on fast-wakeup paths that never
+///        start the AP: saves the version query (and on old firmware the NWP
+///        deinit/re-init cycle). The check still runs before the AP is
+///        initialized, so skipping cannot reintroduce the no-IP problem.
+///        No-op in non-self-DHCP-server builds.
+void sl_net_netif_skip_fw_dhcps_compat_check(void)
+{
+#if IS_SELF_DHCP_SERVER
+    sl_net_fw_dhcps_check_skip = true;
+#endif
+}
 /// @brief Remote wake-up configuration (wifi mode)
 static sl_wifi_device_configuration_t remote_wake_up_wifi_cfg = {
   .boot_option = LOAD_NWP_FW,
@@ -948,15 +1042,29 @@ sl_status_t sl_net_wifi_client_up(sl_net_interface_t interface, sl_net_profile_i
     }
 
 #if IS_TCP_IP_DUAL_MODE
-    if (interface == SL_NET_WIFI_CLIENT_2_INTERFACE) {
-        status = sl_si91x_configure_ip_address(&wifi_client_profile.ip, SL_WIFI_CLIENT_VAP_ID_1);
-    } else {
-        status = sl_si91x_configure_ip_address(&wifi_client_profile.ip, SL_WIFI_CLIENT_VAP_ID);
-    }
-    if (status != SL_STATUS_OK) {
-        sl_wifi_disconnect(SL_WIFI_CLIENT_INTERFACE);
-        LOG_DRV_ERROR("Failed to configure client ip: 0x%0lX\r\n", status);
-        return status;
+    {
+        /* fw-compat diagnostic: a clean 0x07 (SL_STATUS_TIMEOUT, no bit16)
+         * here means the HOST-side response wait was aborted — firmware
+         * errors always come back as 0x1000X. Elapsed time separates an
+         * instant rejection (transport) from a delayed abort (matching). */
+        uint32_t ip_cfg_start = osKernelGetTickCount();
+        if (interface == SL_NET_WIFI_CLIENT_2_INTERFACE) {
+            status = sl_si91x_configure_ip_address(&wifi_client_profile.ip, SL_WIFI_CLIENT_VAP_ID_1);
+        } else {
+            status = sl_si91x_configure_ip_address(&wifi_client_profile.ip, SL_WIFI_CLIENT_VAP_ID);
+        }
+        if (status != SL_STATUS_OK) {
+            sl_status_t v4_reason = SL_STATUS_OK, v6_reason = SL_STATUS_OK;
+            char fw_ver[24] = { 0 };
+            sl_wifi_get_ip_config_failure_reason(&v4_reason, &v6_reason);
+            wifi_get_running_version(fw_ver, sizeof(fw_ver));
+            LOG_DRV_ERROR("Client ip configure failed: 0x%0lX (v4 raw 0x%lX, v6 raw 0x%lX, %lu ms) fw %s\r\n",
+                          status, v4_reason, v6_reason,
+                          (unsigned long)(osKernelGetTickCount() - ip_cfg_start),
+                          fw_ver);
+            sl_wifi_disconnect(SL_WIFI_CLIENT_INTERFACE);
+            return status;
+        }
     }
 #endif
 
@@ -1070,6 +1178,18 @@ int sl_net_client_netif_init(void)
         LOG_DRV_ERROR("Failed to init Wi-Fi Client interface: 0x%lX\r\n", status);
         return status;
     }
+
+#if IS_SELF_DHCP_SERVER
+    if (!sl_net_fw_dhcps_check_skip) {
+        status = sl_net_fw_dhcps_compat_check(SL_NET_WIFI_CLIENT_INTERFACE);
+        if (status != SL_STATUS_OK) {
+            if (netif_get_by_index(ap_netif.num + 1) != &ap_netif) {
+                sl_net_deinit(SL_NET_WIFI_CLIENT_INTERFACE);
+            }
+            return status;
+        }
+    }
+#endif
 
     // status = sl_net_set_profile(SL_NET_WIFI_CLIENT_INTERFACE, SL_NET_DEFAULT_WIFI_CLIENT_PROFILE_ID, &wifi_client_profile);
     // if (status != SL_STATUS_OK) {
@@ -1654,23 +1774,27 @@ sl_status_t sl_net_wifi_ap_up(sl_net_interface_t interface, sl_net_profile_id_t 
         }
     }
 
-#if IS_TCP_IP_DUAL_MODE && (IS_SELF_DHCP_SERVER == 0)
-    status = SL_STATUS_NOT_SUPPORTED;
-    if (interface == SL_NET_WIFI_AP_1_INTERFACE) {
-        status = sl_si91x_configure_ip_address(&wifi_ap_profile.ip, SL_WIFI_AP_VAP_ID);
-    } else if (interface == SL_NET_WIFI_AP_2_INTERFACE) {
-        status = sl_si91x_configure_ip_address(&wifi_ap_profile.ip, SL_WIFI_AP_VAP_ID_1);
+#if IS_TCP_IP_DUAL_MODE
+    /* Firmware-side AP IP configuration whenever the host lwip dhcps is not
+     * in charge: IS_SELF_DHCP_SERVER==0 builds, or the fw < 2.16.5 fallback
+     * flagged by sl_net_fw_dhcps_compat_check(). The firmware then also runs
+     * its own DHCP server for AP clients. */
+    if ((IS_SELF_DHCP_SERVER == 0)
+#if IS_SELF_DHCP_SERVER
+        || sl_net_fw_dhcps_fallback
+#endif
+    ) {
+        status = SL_STATUS_NOT_SUPPORTED;
+        if (interface == SL_NET_WIFI_AP_1_INTERFACE) {
+            status = sl_si91x_configure_ip_address(&wifi_ap_profile.ip, SL_WIFI_AP_VAP_ID);
+        } else if (interface == SL_NET_WIFI_AP_2_INTERFACE) {
+            status = sl_si91x_configure_ip_address(&wifi_ap_profile.ip, SL_WIFI_AP_VAP_ID_1);
+        }
+        if (status != SL_STATUS_OK) {
+            LOG_DRV_ERROR("Failed to configure ap ip: 0x%0lX\r\n", status);
+            return status;
+        }
     }
-    if (status != SL_STATUS_OK) {
-        LOG_DRV_ERROR("Failed to configure ap ip: 0x%0lX\r\n", status);
-        return status;
-    }
-
-    // status = sl_net_get_profile(SL_NET_WIFI_AP_INTERFACE, profile_id, &wifi_ap_profile);
-    // if (status != SL_STATUS_OK) {
-    //     printf("Failed to get ap profile: 0x%lx\r\n", status);
-    //     return status;
-    // }
 #endif
     status = sl_wifi_start_ap(SL_WIFI_AP_2_4GHZ_INTERFACE, &wifi_ap_profile.config);
     if (status != SL_STATUS_OK) {
@@ -1699,7 +1823,9 @@ sl_status_t sl_net_wifi_ap_up(sl_net_interface_t interface, sl_net_profile_id_t 
                                     &gateway);
     LOG_DRV_DEBUG(NETIF_NAME_STR_FMT " ip: %s\r\n", NETIF_NAME_PARAMETER(&ap_netif), ip4addr_ntoa((const ip4_addr_t *)&ap_netif.ip_addr));
 #if IS_SELF_DHCP_SERVER
-    if (err == ERR_OK) dhcps_start(&ap_netif);
+    /* fw < 2.16.5 fallback: the firmware DHCP server owns the leases; don't
+     * run a second (host) DHCP server on the same interface. */
+    if (err == ERR_OK && !sl_net_fw_dhcps_fallback) dhcps_start(&ap_netif);
 #endif
 #else
     if (SL_IP_MANAGEMENT_STATIC_IP == wifi_ap_profile.ip.mode) {
@@ -1948,6 +2074,16 @@ int sl_net_ap_netif_init(void)
         LOG_DRV_ERROR("Failed to init Wi-Fi AP interface: 0x%lX\r\n", status);
         return status;
     }
+
+#if IS_SELF_DHCP_SERVER
+    status = sl_net_fw_dhcps_compat_check(SL_NET_WIFI_AP_INTERFACE);
+    if (status != SL_STATUS_OK) {
+        if (netif_get_by_index(client_netif.num + 1) != &client_netif) {
+            sl_net_deinit(SL_NET_WIFI_AP_INTERFACE);
+        }
+        return status;
+    }
+#endif
 
 #if IS_ENABLE_NWP_DEBUG_PRINTS
     sl_si91x_assertion_t assertion = {

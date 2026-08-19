@@ -1081,6 +1081,10 @@ aicam_result_t communication_service_init(void *config)
     // If time-optimized mode is required, disable AP for faster startup
     if (requires_time_optimized) {
         g_communication_service.config.auto_start_wifi_ap = AICAM_FALSE;
+        // STA-only boot: skip the fw < 2.16.5 DHCP-server compat check (the
+        // version query, and on old firmware an NWP re-init). Still checked
+        // before the AP if it is ever initialized.
+        sl_net_netif_skip_fw_dhcps_compat_check();
         LOG_SVC_INFO("Time-optimized mode detected (wakeup source: %d), disabling AP for faster startup", wakeup_source);
     }
     

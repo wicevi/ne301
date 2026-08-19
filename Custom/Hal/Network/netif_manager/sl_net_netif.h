@@ -35,6 +35,10 @@ typedef enum {
 } sl_net_wakeup_mode_t;
 
 int sl_net_netif_init(void);
+/// @brief Skip the fw < 2.16.5 DHCP-server compatibility check for STA-only
+///        boots (fast wakeup path). Call before netif init; the check still
+///        runs before the AP is initialized. No-op in non-self-DHCP builds.
+void sl_net_netif_skip_fw_dhcps_compat_check(void);
 sl_net_wakeup_mode_t sl_net_netif_get_wakeup_mode(void);
 int sl_net_netif_romote_wakeup_mode_ctrl(sl_net_wakeup_mode_t wakeup_mode);
 int sl_net_netif_filter_broadcast_ctrl(uint8_t enable);

@@ -274,7 +274,12 @@ sl_status_t sli_net_configure_ip_address(sl_net_ip_configuration_t *ip_config,
   // Send IP address information to firmware for the successfully configured families.
   if (configured_type != 0) {
     status = sli_send_client_ip_address_info_if_applicable(ip_config, virtual_ap_id);
-    VERIFY_STATUS_AND_RETURN(status);
+    // Non-fatal: the address is already configured above. IP_ADDRESS_INFO (0x94)
+    // is not implemented by firmware < 2.16.5, which never answers and makes the
+    // notify time out — that must not fail an otherwise-successful config.
+    if (status != SL_STATUS_OK) {
+      SL_DEBUG_LOG_V2(WARN, "IP_ADDRESS_INFO notify failed (0x%lX) - continuing\r\n", status);
+    }
   }
 
   return sli_aggregate_ip_config_status(requested_type, configured_type);
