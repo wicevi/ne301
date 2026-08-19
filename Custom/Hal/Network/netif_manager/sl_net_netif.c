@@ -64,11 +64,7 @@ static sl_wifi_device_configuration_t device_configuration = {
 #else
                    .coex_mode = SL_SI91X_WLAN_ONLY_MODE,
 #endif
-                   .feature_bit_map = (SL_SI91X_FEAT_SECURITY_OPEN | SL_SI91X_FEAT_AGGREGATION | SL_SI91X_FEAT_ULP_GPIO_BASED_HANDSHAKE
-#ifdef SLI_SI91X_MCU_INTERFACE
-                      | SL_SI91X_FEAT_WPS_DISABLE
-#endif
-                      ),
+                   .feature_bit_map = SL_SI91X_FEAT_AGGREGATION,
                    .tcp_ip_feature_bit_map     = (
 #if IS_TCP_IP_DUAL_MODE
                         SL_SI91X_TCP_IP_FEAT_DHCPV4_CLIENT | SL_SI91X_TCP_IP_FEAT_ICMP | SL_SI91X_TCP_IP_FEAT_SSL
@@ -80,8 +76,8 @@ static sl_wifi_device_configuration_t device_configuration = {
                         SL_SI91X_TCP_IP_FEAT_BYPASS | 
 #endif
                         SL_SI91X_TCP_IP_FEAT_EXTENSION_VALID),
-                   .custom_feature_bit_map     = SL_SI91X_CUSTOM_FEAT_EXTENTION_VALID | SL_SI91X_CUSTOM_FEAT_DNS_SERVER_IN_DHCP_OFFER,
-                   .ext_custom_feature_bit_map = (SL_SI91X_EXT_FEAT_LOW_POWER_MODE | SL_SI91X_EXT_FEAT_XTAL_CLK | MEMORY_CONFIG
+                   .custom_feature_bit_map     = SL_SI91X_CUSTOM_FEAT_EXTENTION_VALID,
+                   .ext_custom_feature_bit_map = (SL_SI91X_EXT_FEAT_XTAL_CLK | MEMORY_CONFIG
 #if IS_ENABLE_NWP_DEBUG_PRINTS
                     | SL_SI91X_EXT_FEAT_UART_SEL_FOR_DEBUG_PRINTS
 #endif
@@ -139,7 +135,7 @@ static sl_wifi_device_configuration_t device_configuration = {
                    .ble_feature_bit_map        = 0,
                    .ble_ext_feature_bit_map    = 0,
 #endif
-                   .config_feature_bit_map = (SL_SI91X_FEAT_SLEEP_GPIO_SEL_BITMAP | SL_SI91X_ENABLE_ENHANCED_MAX_PSP) }
+                   .config_feature_bit_map = SL_SI91X_FEAT_SLEEP_GPIO_SEL_BITMAP }
 };
 /// @brief Remote wake-up configuration (wifi mode)
 static sl_wifi_device_configuration_t remote_wake_up_wifi_cfg = {
