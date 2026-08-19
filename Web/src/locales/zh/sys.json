@@ -507,6 +507,7 @@
       "wifi_upgrade_flash_ver_label": "Flash中保存的版本",
       "wifi_upgrade_running_ver_label": "当前运行版本",
       "wifi_upgrade_available_desc": "检测到新版本WiFi固件，是否升级？",
+      "wifi_upgrade_staged_outdated_desc": "待升级的WiFi固件版本为 {staged}，与期望版本 {expected} 不一致，建议重新导入最新固件后再升级。",
       "wifi_upgrade_start": "开始升级",
       "fw_mismatch_fsbl_title": "FSBL固件需要升级",
       "fw_mismatch_fsbl_desc": "当前FSBL版本为 {current}，期望版本为 {expected}，请升级FSBL固件。",

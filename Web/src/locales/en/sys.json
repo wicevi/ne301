@@ -508,6 +508,7 @@
       "wifi_upgrade_flash_ver_label": "Flash-stored version",
       "wifi_upgrade_running_ver_label": "Running version",
       "wifi_upgrade_available_desc": "New version of WiFi firmware detected. Upgrade now?",
+      "wifi_upgrade_staged_outdated_desc": "The staged WiFi firmware version is {staged}, which differs from the expected {expected}. Please re-import the latest firmware before upgrading.",
       "wifi_upgrade_start": "Start Upgrade",
       "fw_mismatch_fsbl_title": "FSBL Firmware Upgrade Needed",
       "fw_mismatch_fsbl_desc": "Current FSBL version is {current}, expected {expected}. Please upgrade the FSBL firmware.",
