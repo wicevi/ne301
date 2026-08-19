@@ -201,9 +201,11 @@ jobs:
           source /etc/profile.d/stedgeai.sh
           VARIANT="${{ matrix.stedgeai_variant }}"
 
-          # Save Halow APP pkg before it gets overwritten
+          # Save Halow APP pkg and ELF before they get overwritten
+          # (ELF = symbol source for addr2line post-mortem of field crashes)
           HALOW_PKG=$(ls build/ne301_App_signed_v*_pkg.bin 2>/dev/null | grep -v SensorExt | head -1)
           cp "$HALOW_PKG" build/.halow_pkg.bin
+          cp Appli/build/ne301_App.elf build/ne301_App_Halow.elf
 
           # Clean and rebuild APP without Halow (sensor extension board mode)
           make clean-app STEDGEAI_VARIANT=$VARIANT
@@ -225,6 +227,9 @@ jobs:
 
           # Restore Halow APP pkg (Halow hex already generated in previous step)
           mv build/.halow_pkg.bin "$HALOW_PKG"
+
+          # Keep the SensorExt APP ELF for post-mortem symbolication too
+          cp Appli/build/ne301_App.elf build/ne301_App_SensorExt.elf
 
           echo "::notice::SensorExt build completed successfully"
           echo "::endgroup::"
@@ -254,6 +259,9 @@ jobs:
           SE_PKG_COUNT=$(find build -name "*_SensorExt_pkg.bin" -type f 2>/dev/null | wc -l)
           SE_HEX_COUNT=$(find build -name "*_SensorExt.hex" -type f 2>/dev/null | wc -l)
           echo "Found $SE_PKG_COUNT SensorExt OTA package(s) and $SE_HEX_COUNT SensorExt hex file(s)"
+
+          echo "Debug ELF files (for addr2line crash symbolication):"
+          ls -lh build/*.elf 2>/dev/null || echo "::error::No APP ELF found in build/"
           echo "::endgroup::"
 
       - name: Upload build artifacts
@@ -264,6 +272,7 @@ jobs:
           path: |
             ./build/*.bin
             ./build/*.hex
+            ./build/*.elf
           retention-days: 30
           compression-level: 6
 
@@ -341,6 +350,9 @@ jobs:
             - **`*_SensorExt_pkg.bin`** — APP OTA package for sensor extension board (TFT/codec/sensors/I2C)
             - **`*_SensorExt.hex`** — Combined HEX with SensorExt APP (same FSBL/Web/Model/WakeCore)
 
+            **Debug symbols:**
+            - **`ne301_App_Halow.elf` / `ne301_App_SensorExt.elf`** — APP ELF with debug symbols; use with `arm-none-eabi-addr2line -e <elf> -f -C 0x<addr>` to symbolicate crash addresses
+
             Other STEdgeAI variants (`3.0`, `2.2`) can be built via **Actions → workflow_dispatch**.
 
             ---
@@ -350,6 +362,8 @@ jobs:
             ./build/*_pkg.bin
             ./build/*_WakeCore.bin
             ./build/*.hex
+            ./build/ne301_App_Halow.elf
+            ./build/ne301_App_SensorExt.elf
           draft: false
           prerelease: false
           generate_release_notes: false
