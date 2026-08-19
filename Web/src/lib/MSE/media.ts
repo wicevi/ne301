@@ -112,9 +112,16 @@ class MsMediaSource {
     static get skipCount(): number { return 5; } // Frame skip catch-up count
 
     private getLiveEdge(): number {
-        if (!this.sourceBuffer || this.sourceBuffer.buffered.length === 0) return 0;
-        const { buffered } = this.sourceBuffer;
-        return buffered.end(buffered.length - 1);
+        if (!this.sourceBuffer) return 0;
+        try {
+            const { buffered } = this.sourceBuffer;
+            if (buffered.length === 0) return 0;
+            return buffered.end(buffered.length - 1);
+        } catch {
+            // SourceBuffer detached from its MediaSource during teardown;
+            // treat as "no buffer" so recoverIfNeeded() backs off.
+            return 0;
+        }
     }
 
     private syncLivePreview(liveEdge: number, bufferTime: number): void {
@@ -546,7 +553,9 @@ class MsMediaSource {
                 });
             }
         } catch (e) {
-            console.error(`appending error: [update=${this.sourceBuffer.updating}, updateend=${this.updateend}, length=${batch.length}, buffered.length=${this.sourceBuffer.buffered.length}]==>${e}`);
+            // Do not touch sourceBuffer here: if appendBuffer failed because
+            // the buffer was detached, reading its attributes throws again.
+            console.error(`appending error: [updateend=${this.updateend}, length=${batch.length}]==>${e}`);
             this.initFlag = MsMediaSource.statusDestroy;
             this.cb({
                 t: 'mseError',

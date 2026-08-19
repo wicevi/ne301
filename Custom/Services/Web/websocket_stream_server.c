@@ -24,6 +24,14 @@
 #define MAX_CLIENTS 2
 #define MAX_FRAME_SIZE (1024 * 512)
 
+ /* ==================== Web Debug Logging (see WEB_DEBUG in web_config.h) ==================== */
+ /* Per-video-frame (MG_EV_WAKEUP) logs are deliberately NOT emitted: 30 fps flood. */
+ #if WEB_DEBUG
+ #define WS_LOG(fmt, ...)  printf("[WSDBG][tick %lums] " fmt "\r\n", (unsigned long) osKernelGetTickCount(), ##__VA_ARGS__)
+ #else
+ #define WS_LOG(fmt, ...)  do { } while (0)
+ #endif
+
 /* ==================== Global Variables ==================== */
 
 /**
@@ -527,7 +535,20 @@ static void ws_stream_server_task(void *argument) {
 }
 
 static void ws_stream_event_handler(struct mg_connection *c, int ev, void *ev_data) {
-    
+
+    /* Connection lifecycle logs (same purpose as web server's [CONN]):
+     * who disconnected the phone - us (replace/pong-timeout) or the peer */
+    if (ev == MG_EV_ACCEPT) {
+        WS_LOG("[WS] tcp-accept id=%lu", (unsigned long) c->id);
+    }
+    if (ev == MG_EV_ERROR) {
+        /* Socket-level failure on this conn (the mg_error "socket error" path
+         * the phone hits) - distinguish peer RST vs our tx failure */
+        WS_LOG("[WS] socket-error id=%lu err=%s",
+               (unsigned long) c->id,
+               ev_data ? (const char *) ev_data : "?");
+    }
+
     switch (ev) {
     #if IS_HTTPS
         case MG_EV_ACCEPT: {
@@ -598,6 +619,22 @@ static void ws_stream_event_handler(struct mg_connection *c, int ev, void *ev_da
         case MG_EV_WS_CTL: {
             // Handle WebSocket control frames (ping/pong)
             struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
+            WS_LOG("[WS] ctl op=0x%x len=%u conn=%lu",
+                   wm ? (wm->flags & 0x0F) : 0, wm ? (unsigned) wm->data.len : 0,
+                   (unsigned long) c->id);
+            // Close frame: decode code+reason so the log shows WHO closed and
+            // why ('teardown' = frontend worker cleanup, 1006/empty = link died)
+            if (wm && (wm->flags & 0x0F) == WEBSOCKET_OP_CLOSE && wm->data.len >= 2) {
+                char reason[32];
+                size_t rlen = wm->data.len - 2;
+                if (rlen > sizeof(reason) - 1) rlen = sizeof(reason) - 1;
+                if (rlen > 0) memcpy(reason, wm->data.buf + 2, rlen);
+                reason[rlen] = '\0';
+                WS_LOG("[WS] peer-close id=%lu code=%u reason=%s",
+                       (unsigned long) c->id,
+                       (unsigned) (((uint8_t) wm->data.buf[0] << 8) | (uint8_t) wm->data.buf[1]),
+                       reason);
+            }
             if (wm && (wm->flags & 0x0F) == WEBSOCKET_OP_PONG) {
                 // Received pong, update client status
                 // Note: Mongoose automatically sends pong in response to ping,
@@ -646,7 +683,8 @@ static void ws_stream_add_client(struct mg_connection *conn) {
         // Send close frame and close connection
         ws_stream_send_close(conn, 1000, "Too many clients");
         osMutexRelease(g_websocket_server.mutex);
-        LOG_SVC_WARN("Rejected connection from %s: too many clients", client_ip);
+        LOG_SVC_WARN("Rejected connection id=%lu from %s: too many clients",
+                     (unsigned long) conn->id, client_ip);
         return;
     }
     
@@ -668,8 +706,12 @@ static void ws_stream_add_client(struct mg_connection *conn) {
             
             g_websocket_server.client_count++;
             g_websocket_server.stats.total_connections++;
-            
-            LOG_SVC_INFO("Client connected - IP: %s, ID: %u, Total: %u", 
+
+            WS_LOG("[WS] open id=%lu ip=%s clients=%lu/%lu",
+                   (unsigned long) conn->id, client_ip,
+                   (unsigned long) g_websocket_server.client_count,
+                   (unsigned long) g_websocket_server.config.max_clients);
+            LOG_SVC_INFO("Client connected - IP: %s, ID: %u, Total: %u",
                         client_ip, g_websocket_server.clients[i].client_id, g_websocket_server.client_count);
             break;
         }
@@ -686,11 +728,15 @@ static void ws_stream_remove_client(struct mg_connection *conn) {
     
     for (uint32_t i = 0; i < g_websocket_server.config.max_clients; i++) {
         if (g_websocket_server.clients[i].is_active && g_websocket_server.clients[i].conn == conn) {
-            LOG_SVC_INFO("Client disconnected - IP: %s, ID: %u, Total: %u", 
+            LOG_SVC_INFO("Client disconnected - IP: %s, ID: %u, Total: %u",
                         g_websocket_server.clients[i].client_ip,
-                        g_websocket_server.clients[i].client_id, 
+                        g_websocket_server.clients[i].client_id,
                         g_websocket_server.client_count - 1);
-            
+            WS_LOG("[WS] closed id=%lu ip=%s clients=%lu (peer closed or our close finished)",
+                   (unsigned long) conn->id,
+                   g_websocket_server.clients[i].client_ip,
+                   (unsigned long) g_websocket_server.client_count - 1);
+
             g_websocket_server.clients[i].is_active = AICAM_FALSE;
             g_websocket_server.clients[i].client_ip[0] = '\0'; // Clear IP
             g_websocket_server.client_count--;
@@ -753,6 +799,8 @@ static void ws_stream_cleanup_old_connections(const char *client_ip) {
             g_websocket_server.clients[i].conn = NULL; // Clear connection pointer
             g_websocket_server.client_count--;
             g_websocket_server.stats.total_disconnections++;
+            WS_LOG("[WS] replace-close id=%lu ip=%s (superseded by new conn from same ip)",
+                   (unsigned long) conn_ids_to_close[close_count - 1], client_ip);
         }
     }
     
@@ -873,10 +921,12 @@ static void ws_stream_check_pong_timeout(void) {
             uint64_t time_since_ping = current_time_ms - g_websocket_server.clients[i].last_ping_time_ms;
             
             if (time_since_ping > g_websocket_server.config.pong_timeout_ms) {
-                LOG_SVC_WARN("Pong timeout for client %u (IP: %s), closing connection", 
+                LOG_SVC_WARN("Pong timeout for client %u (IP: %s), closing connection id=%lu since_ping=%lums",
                             g_websocket_server.clients[i].client_id,
-                            g_websocket_server.clients[i].client_ip);
-                
+                            g_websocket_server.clients[i].client_ip,
+                            (unsigned long) g_websocket_server.clients[i].conn->id,
+                            (unsigned long) time_since_ping);
+
                 // Close connection
                 ws_stream_send_close(g_websocket_server.clients[i].conn, 1000, "Pong timeout");
                 

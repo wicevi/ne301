@@ -687,7 +687,8 @@
       "power_high": "高电量",
       "power_low": "低电量",
       "power_middle": "中电量",
-      "is_edit_device_name": "是否修改设备名称"
+      "is_edit_device_name": "是否修改设备名称",
+      "net_fail_log": "网络失败日志（近50条，复现后截图）"
     },
     "capture_settings": {
       "config_tab": "抓拍配置",
@@ -777,6 +778,7 @@
   "common": {
     "setting": "设置",
     "delete": "删除",
-    "cancel": "取消"
+    "cancel": "取消",
+    "clear": "清空"
   }
 }

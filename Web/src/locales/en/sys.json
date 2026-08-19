@@ -689,7 +689,8 @@
       "power_high": "High Power",
       "power_low": "Low Power",
       "power_middle": "Middle Power",
-      "is_edit_device_name": "Is Edit Device Name"
+      "is_edit_device_name": "Is Edit Device Name",
+      "net_fail_log": "Recent failed requests (last 50, screenshot after repro)"
     },
     "capture_settings": {
       "config_tab": "Capture Config",
@@ -778,6 +779,7 @@
   },
   "common": {
     "delete": "Delete",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "clear": "Clear"
   }
 }
