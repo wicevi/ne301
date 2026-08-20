@@ -534,6 +534,113 @@ static void ws_stream_server_task(void *argument) {
     }
 }
 
+/* ==================== Frame copy FIFO (fix for the in-flight buffer race) ==
+ * Proven by probe ("WS RACE CONFIRMED ... after 48ms"): the wakeup pipe used
+ * to carry POINTERS into the encoder's single output buffer; a web-task
+ * stall > 40ms (one frame period) let the next encode's DMA overwrite the
+ * frame while mg_ws_send was reading it -> torn frame at every client
+ * (WebKit: MEDIA_ERR_DECODE; Chromium conceals).
+ * Frames are now COPIED into private PSRAM ring slots in the producer task
+ * (encoder context, mutex held) and drained by the web task on MG_EV_POLL -
+ * the copy can no longer be overwritten by the encoder.
+ * Overflow policy: drop new frames and resume at the next keyframe so P
+ * chains stay decodable (drops counted). */
+#define WS_FIFO_SLOTS      5
+#define WS_FIFO_SLOT_SIZE  (128u * 1024u)
+static uint8_t s_ws_fifo_mem[WS_FIFO_SLOTS][WS_FIFO_SLOT_SIZE] ALIGN_32 IN_PSRAM;
+static struct {
+    uint8_t *data;  /* static slot, or heap buffer for oversize frames */
+    uint32_t size;
+    uint8_t is_heap;
+} s_ws_fifo_meta[WS_FIFO_SLOTS];
+static uint32_t s_ws_fifo_head = 0, s_ws_fifo_tail = 0, s_ws_fifo_count = 0;
+static aicam_bool_t s_ws_fifo_skip_until_key = AICAM_FALSE;
+static uint32_t s_ws_fifo_drops = 0;
+
+/* Producer (encoder task, g_websocket_server.mutex already held). */
+static void ws_frame_fifo_push(const void *packet, size_t size)
+{
+    const websocket_frame_header_t *hdr = (const websocket_frame_header_t *) packet;
+
+    /* Drop decisions FIRST - anything allocated below must be guaranteed a
+     * slot in the fifo or we leak it. */
+    if (s_ws_fifo_skip_until_key) {
+        if (hdr->frame_type != WS_FRAME_TYPE_H264_KEY) {
+            s_ws_fifo_drops++;
+            return; /* wait for a clean restart point */
+        }
+        s_ws_fifo_skip_until_key = AICAM_FALSE;
+    }
+
+    if (s_ws_fifo_count == WS_FIFO_SLOTS) {
+        s_ws_fifo_drops++;
+        s_ws_fifo_skip_until_key = AICAM_TRUE;
+        LOG_SVC_WARN("WS fifo full, dropping until next keyframe (total drops %lu)",
+                     (unsigned long) s_ws_fifo_drops);
+        return;
+    }
+
+    /* Static slot covers normal frames; oversize ones (e.g. huge I-frames at
+     * high bitrate) fall back to a heap copy instead of being dropped:
+     * dropping recurring keyframes would permanently break the stream. */
+    uint8_t *copy_dst = s_ws_fifo_mem[s_ws_fifo_head];
+    uint8_t is_heap = 0;
+    if (size > WS_FIFO_SLOT_SIZE) {
+        copy_dst = hal_mem_alloc_large(size);
+        if (copy_dst == NULL) {
+            s_ws_fifo_drops++;
+            s_ws_fifo_skip_until_key = AICAM_TRUE;
+            LOG_SVC_WARN("WS fifo: frame %lu > slot %lu and alloc failed, dropped (total %lu)",
+                         (unsigned long) size, (unsigned long) WS_FIFO_SLOT_SIZE,
+                         (unsigned long) s_ws_fifo_drops);
+            return;
+        }
+        is_heap = 1;
+    }
+
+    memcpy(copy_dst, packet, size);
+    s_ws_fifo_meta[s_ws_fifo_head].data = copy_dst;
+    s_ws_fifo_meta[s_ws_fifo_head].size = (uint32_t) size;
+    s_ws_fifo_meta[s_ws_fifo_head].is_heap = is_heap;
+    s_ws_fifo_head = (s_ws_fifo_head + 1) % WS_FIFO_SLOTS;
+    s_ws_fifo_count++;
+}
+
+
+/* Consumer (web task, MG_EV_POLL): send queued frames to all live clients. */
+static void ws_frame_fifo_drain(void)
+{
+    for (;;) {
+        uint8_t *data;
+        uint32_t size;
+        uint8_t heap;
+
+        osMutexAcquire(g_websocket_server.mutex, osWaitForever);
+        if (s_ws_fifo_count == 0) {
+            osMutexRelease(g_websocket_server.mutex);
+            return;
+        }
+        data = s_ws_fifo_meta[s_ws_fifo_tail].data;
+        size = s_ws_fifo_meta[s_ws_fifo_tail].size;
+        heap = s_ws_fifo_meta[s_ws_fifo_tail].is_heap;
+        s_ws_fifo_tail = (s_ws_fifo_tail + 1) % WS_FIFO_SLOTS;
+        s_ws_fifo_count--;
+
+        for (uint32_t i = 0; i < g_websocket_server.config.max_clients; i++) {
+            if (g_websocket_server.clients[i].is_active &&
+                g_websocket_server.clients[i].conn &&
+                !g_websocket_server.clients[i].conn->is_closing &&
+                ws_stream_is_client_alive(&g_websocket_server.clients[i])) {
+                mg_ws_send(g_websocket_server.clients[i].conn, data, size, WEBSOCKET_OP_BINARY);
+            }
+        }
+        osMutexRelease(g_websocket_server.mutex);
+        if (heap) {
+            hal_mem_free(data);
+        }
+    }
+}
+
 static void ws_stream_event_handler(struct mg_connection *c, int ev, void *ev_data) {
 
     /* Connection lifecycle logs (same purpose as web server's [CONN]):
@@ -614,6 +721,12 @@ static void ws_stream_event_handler(struct mg_connection *c, int ev, void *ev_da
                     }
                 }
             }
+            break;
+        }
+        case MG_EV_POLL: {
+            /* Drain queued frame copies once per poll tick (~20ms). Fired for
+             * every connection; empty-queue calls are a cheap locked check. */
+            ws_frame_fifo_drain();
             break;
         }
         case MG_EV_WS_CTL: {
@@ -845,22 +958,11 @@ static aicam_bool_t ws_stream_is_client_alive(websocket_client_t *client) {
 static void ws_stream_broadcast_packet(const void *packet, size_t packet_size) {
     // Note: This function must be called with mutex already held
     if (g_websocket_server.client_count == 0) return;
-    
-    for (uint32_t i = 0; i < g_websocket_server.config.max_clients; i++) {
-        if (g_websocket_server.clients[i].is_active && 
-            g_websocket_server.clients[i].conn &&
-            !g_websocket_server.clients[i].conn->is_closing &&
-            ws_stream_is_client_alive(&g_websocket_server.clients[i])) {
-            // use mg_wakeup to send packet
-            struct MessageData message_data = {
-                .buf = (void *)packet,
-                .size = packet_size,
-                .ws_op = WEBSOCKET_OP_BINARY,
-                .target_id = g_websocket_server.clients[i].conn->id
-            };
-            mg_wakeup(&g_websocket_server.mgr, 1, &message_data, sizeof(message_data));
-        }
-    }
+
+    /* Copy into the private FIFO (see block above): the encoder reuses its
+     * output buffer 40ms later; handing raw pointers to the async web task
+     * is the torn-frame race. Web task drains on MG_EV_POLL. */
+    ws_frame_fifo_push(packet, packet_size);
 }
 
 static void ws_stream_send_ping_to_clients(void) {
