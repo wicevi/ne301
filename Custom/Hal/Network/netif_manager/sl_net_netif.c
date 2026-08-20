@@ -801,6 +801,10 @@ sl_status_t sl_net_wifi_client_init(sl_net_interface_t interface,
                                     sl_net_event_handler_t event_handler)
 {
     sl_status_t status;
+#if IS_ENABLE_NWP_DEBUG_PRINTS
+    sl_si91x_assertion_t debug_config = { 0 };
+#endif
+
     UNUSED_PARAMETER(interface);
     UNUSED_PARAMETER(event_handler);
     UNUSED_PARAMETER(context);
@@ -815,6 +819,19 @@ sl_status_t sl_net_wifi_client_init(sl_net_interface_t interface,
         && ((const sl_wifi_device_configuration_t *)configuration)->boot_config.oper_mode == SL_SI91X_CONCURRENT_MODE) {
         return SL_STATUS_OK;
     }
+#if IS_ENABLE_NWP_DEBUG_PRINTS
+    else if (status == SL_STATUS_OK) {
+        debug_config.assert_level = SL_SI91X_ASSERTION_LEVEL_MAX;
+        debug_config.assert_type = SL_SI91X_ASSERTION_TYPE_ALL; 
+
+        status = sl_si91x_debug_log(&debug_config);
+        if (status != SL_STATUS_OK) {
+            LOG_DRV_ERROR("Failed to enable debug prints: 0x%lX\r\n", status);
+            return status;
+        }
+        printf("Si91x debug prints enabled\r\n");
+    }
+#endif
     return status;
 }
 /// @brief Client deinitialization function implementation provided for SL SDK calls
