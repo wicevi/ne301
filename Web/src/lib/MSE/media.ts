@@ -1,3 +1,5 @@
+import { logStreamError } from '@/services/request';
+
 // Type definitions
 interface FrameData {
     data: ArrayBuffer;
@@ -31,8 +33,6 @@ class MsMediaSource {
 
     private mseGeneration: number = 0;
 
-    private mseRecoveryTimer: number | null = null;
-
     private videoElement: HTMLVideoElement | null = null;
 
     private sourceBuffer: SourceBuffer | null = null;
@@ -64,9 +64,22 @@ class MsMediaSource {
     // low-frequency seeks to the live edge and tolerates short rebuffer events.
     private readonly IOS_LIVE_TARGET_LATENCY = 0.4;
 
-    private readonly IOS_SEEK_COOLDOWN_MS = 1000;
+    private readonly IOS_SEEK_COOLDOWN_MS = 2500;
 
     private readonly IOS_STALL_REBUFFER_MS = 2000;
+
+    // Preview keeps a short buffered history (live latency is ~0.4s); bounding it
+    // stops the SourceBuffer from growing unbounded and exhausting iOS's small
+    // media quota (desktop Chrome's ~150MB quota hides the same leak much longer).
+    private readonly PREVIEW_BUFFER_WINDOW: number = 10;
+
+    // On QuotaExceededError, trim to a tiny window to reclaim space fast.
+    private readonly QUOTA_RECOVERY_WINDOW: number = 2;
+
+    // Cap one appendBuffer at ~200KB: iOS WebKit stalls on very large appends,
+    // and a stalled append backs frames up into an even larger next append.
+    // Splitting only ever happens at fragment boundaries.
+    private readonly MAX_APPEND_BYTES: number = 200 * 1024;
 
     private lastLiveSyncMs = 0;
 
@@ -351,33 +364,13 @@ class MsMediaSource {
                 return;
             }
 
-            // Mark as destroyed and notify external
+            // Signal fatal pipeline loss. In-place MSE rebuilds reliably re-error
+            // on WebKit (soak logs: every quick recovery fails, every full stream
+            // restart with a fresh WS connection succeeds) - H264Player restarts
+            // the whole stream instead.
+            logStreamError('VIDEO', 'video-error', String(target?.error?.code ?? ''), target?.error?.message || 'video element error');
             this.initFlag = MsMediaSource.statusDestroy;
             this.cb({ t: 'mseError' });
-
-            // Try to reinitialize MSE (preserve existing mimeCodec and videoElement)
-            const codec = this.mimeCodec;
-            const video = this.videoElement;
-            // First completely clean up to avoid residual state
-            this.uninitMse();
-            if (video) this.setVideoElement(video);
-            this.initFlag = MsMediaSource.statusIdel;
-            if (codec && this.videoElement) {
-                // Slight delay to avoid immediate rebuild in the same event loop as error trigger
-                const recoveryGeneration = this.mseGeneration;
-                this.mseRecoveryTimer = window.setTimeout(() => {
-                    this.mseRecoveryTimer = null;
-                    // Double check videoElement still exists before reinitializing
-                    if (recoveryGeneration !== this.mseGeneration || this.videoElement !== video) return;
-                    if (this.initMse(codec)) {
-                        this.initFlag = MsMediaSource.statusNormal;
-                        // If there are buffered frames, continue driving playback
-                        this.updateSourceBuffer();
-                    } else {
-                        this.initFlag = MsMediaSource.statusError;
-                    }
-                }, 300);
-            }
         } catch {
             // Ignore errors during cleanup
         }
@@ -440,27 +433,12 @@ class MsMediaSource {
                         this.syncLivePreview(liveEdge, liveEdge - currentTime);
                     }
 
-                    // Preview: do not remove buffered ranges (removal can create gaps and freeze playback)
-                    if (this.isPlayback && !this.sourceBuffer.updating) {
-                        const bufferEnd = buffered.end(buffered.length - 1);
-                        const bufferStart = buffered.start(0);
-                        const removeEnd = bufferEnd - this.BUFFER_WINDOW_SIZE;
-
-                        if (removeEnd > bufferStart && currentTime > bufferStart) {
-                            const safeRemoveEnd = Math.min(removeEnd, currentTime - 1);
-                            if (safeRemoveEnd > bufferStart) {
-                                this.sourceBuffer.remove(bufferStart, safeRemoveEnd);
-
-                                if (this.mediaSource && 'setLiveSeekableRange' in this.mediaSource) {
-                                    try {
-                                        (this.mediaSource as any).setLiveSeekableRange(safeRemoveEnd, bufferEnd);
-                                    } catch {
-                                        // Ignore if not supported
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // Bound the buffered window. Playback trims to a 15s history;
+                    // live preview keeps ~10s behind the playhead. Without this
+                    // the preview SourceBuffer grows unbounded and exhausts iOS's
+                    // small media quota (desktop Chrome's ~150MB quota just hides
+                    // it much longer).
+                    this.trimBuffered(this.isPlayback ? this.BUFFER_WINDOW_SIZE : this.PREVIEW_BUFFER_WINDOW);
                 }
             } catch (error) {
                 console.error(error);
@@ -512,26 +490,68 @@ class MsMediaSource {
         }
     }
 
+    /**
+     * Remove buffered data older than `windowSeconds` behind the playhead.
+     * Bounds the SourceBuffer so it never grows unbounded (iOS's media quota is
+     * small enough to exhaust in minutes of live preview). Never removes past
+     * (currentTime - 1s) since the decoder may still be reading there.
+     */
+    private trimBuffered(windowSeconds: number): void {
+        if (!this.sourceBuffer || this.sourceBuffer.updating || !this.videoElement) return;
+
+        let bufferStart: number;
+        let bufferEnd: number;
+        try {
+            const { buffered } = this.sourceBuffer;
+            if (buffered.length === 0) return;
+            bufferStart = buffered.start(0);
+            bufferEnd = buffered.end(buffered.length - 1);
+        } catch {
+            // SourceBuffer detached mid-flight; nothing to trim.
+            return;
+        }
+
+        const { currentTime } = this.videoElement;
+        const removeEnd = Math.min(bufferEnd - windowSeconds, currentTime - 1);
+        if (removeEnd <= bufferStart) return;
+
+        this.sourceBuffer.remove(bufferStart, removeEnd);
+
+        if (this.mediaSource && 'setLiveSeekableRange' in this.mediaSource) {
+            try {
+                (this.mediaSource as any).setLiveSeekableRange(removeEnd, bufferEnd);
+            } catch {
+                // Ignore if not supported
+            }
+        }
+    }
+
     updateSourceBuffer(): void {
         if (this.sourceBuffer === null || this.updateend !== 1 || this.sourceBuffer.updating) {
             return;
         }
-
-        const len = this.frameBuffer.length;
-        if (len === 0) {
+        if (this.initFlag === MsMediaSource.statusDestroy) {
+            // Pipeline is down pending a full stream restart; stop feeding it.
             return;
         }
 
-        // Drain all fragments that accumulated while SourceBuffer was busy.
-        // Appending one fragment per updateend adds enough MSE overhead for the
-        // WebSocket producer to outrun the consumer, which eventually forced the
-        // old queue policy to discard visible frames.
-        const batch = this.frameBuffer.splice(0, len);
-
-        let totalSize = 0;
-        for (let i = 0; i < batch.length; i += 1) {
-            totalSize += batch[i].data.byteLength;
+        if (this.frameBuffer.length === 0) {
+            return;
         }
+
+        // Take at least one fragment, and only up to MAX_APPEND_BYTES worth, so a
+        // single appendBuffer never grows huge enough to stall iOS WebKit and back
+        // frames up into an even larger next append. Splitting only happens at
+        // fragment boundaries (each entry is one complete fMP4 fragment).
+        let totalSize = 0;
+        let count = 0;
+        for (let i = 0; i < this.frameBuffer.length; i += 1) {
+            const size = this.frameBuffer[i].data.byteLength;
+            if (count > 0 && totalSize + size > this.MAX_APPEND_BYTES) break;
+            totalSize += size;
+            count += 1;
+        }
+        const batch = this.frameBuffer.splice(0, count);
 
         const segmentBuffer = new Uint8Array(totalSize);
         let offset = 0;
@@ -553,13 +573,22 @@ class MsMediaSource {
                 });
             }
         } catch (e) {
-            // Do not touch sourceBuffer here: if appendBuffer failed because
-            // the buffer was detached, reading its attributes throws again.
+            const errName = (e as Error)?.name || '';
+            if (errName === 'QuotaExceededError') {
+                // Reclaim space by trimming the buffered window and let the next
+                // updateend retry, instead of nuking the whole pipeline.
+                console.warn('MSE quota exceeded; trimming buffered window');
+                logStreamError('VIDEO', 'quota', errName, 'buffer full; trimmed');
+                this.trimBuffered(this.QUOTA_RECOVERY_WINDOW);
+                return;
+            }
+            // Any other append failure: signal fatal pipeline loss (the player
+            // restarts the whole stream; in-place rebuilds re-error on WebKit).
+            // Do not touch sourceBuffer here.
             console.error(`appending error: [updateend=${this.updateend}, length=${batch.length}]==>${e}`);
+            logStreamError('VIDEO', 'append-error', errName, String(e));
             this.initFlag = MsMediaSource.statusDestroy;
-            this.cb({
-                t: 'mseError',
-            });
+            this.cb({ t: 'mseError' });
         }
     }
 
@@ -667,10 +696,6 @@ class MsMediaSource {
 
     uninitMse(): void {
         this.mseGeneration++;
-        if (this.mseRecoveryTimer !== null) {
-            clearTimeout(this.mseRecoveryTimer);
-            this.mseRecoveryTimer = null;
-        }
         this.mediaSourceCleanup?.();
         this.mediaSourceCleanup = null;
 

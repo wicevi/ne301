@@ -31,19 +31,11 @@ export const NET_DIAG = false
 //   code: ERR_NETWORK = socket died instantly; ECONNABORTED = timed out
 //   elapsedMs: <1000 means the socket was rejected/already dead, not a timeout
 const NETLOG_KEY = 'netlog'
-const logNetError = (phase: string, error: any) => {
-  if (!NET_DIAG) return
-  const cfg = error?.config || error?.request?.config
-  const entry = {
-    time: new Date().toISOString(),
-    api: `${String(cfg?.method || 'get').toUpperCase()} ${cfg?.url || '?'}`,
-    phase, // 'no-response' | 'http' | 'request-setup'
-    code: error?.code || '',
-    message: error?.message || String(error),
-    status: error?.response?.status,
-    elapsedMs: cfg?.reqT0 != null ? Date.now() - cfg.reqT0 : undefined,
-    retries: cfg?.retriesDone || 0,
-  }
+
+// Low-level writer shared by the HTTP layer (logNetError) and the WS/video
+// pipeline (logStreamError) so the device-information page's failure viewer
+// shows both kinds of failure.
+const pushNetLog = (entry: Record<string, unknown>) => {
   console.error('[netlog]', entry)
   try {
     const list = JSON.parse(localStorage.getItem(NETLOG_KEY) || '[]')
@@ -52,6 +44,38 @@ const logNetError = (phase: string, error: any) => {
   } catch {
     /* storage full/unavailable - console.error above still fired */
   }
+}
+
+const logNetError = (phase: string, error: any) => {
+  if (!NET_DIAG) return
+  const cfg = error?.config || error?.request?.config
+  pushNetLog({
+    time: new Date().toISOString(),
+    api: `${String(cfg?.method || 'get').toUpperCase()} ${cfg?.url || '?'}`,
+    phase, // 'no-response' | 'http' | 'request-setup'
+    code: error?.code || '',
+    message: error?.message || String(error),
+    status: error?.response?.status,
+    elapsedMs: cfg?.reqT0 != null ? Date.now() - cfg.reqT0 : undefined,
+    retries: cfg?.retriesDone || 0,
+  })
+}
+
+// WebSocket / video-stream failures captured from the player pipeline and
+// written into the same netlog so the on-device viewer shows them too.
+// `api` is a short source tag ('WS' / 'VIDEO'); `phase` names the failure.
+export const logStreamError = (api: string, phase: string, code: string, message: string) => {
+  if (!NET_DIAG) return
+  pushNetLog({
+    time: new Date().toISOString(),
+    api,
+    phase,
+    code: code || '',
+    message: message || '',
+    status: undefined,
+    elapsedMs: undefined,
+    retries: 0,
+  })
 }
 if (NET_DIAG) {
   (window as any).dumpNetLog = () => {

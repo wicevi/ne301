@@ -7,6 +7,7 @@ import {
 import browser from './utils/myBrowser.js';
 import MsMediaSource from './media'
 import { sleep } from '@/utils/index.js';
+import { logStreamError } from '@/services/request';
 
 type SaveAsFn = (data: Blob | File | MediaSource | string, filename?: string, options?: any) => void;
 let saveAs: SaveAsFn | null = null;
@@ -72,7 +73,7 @@ interface ReturnResult {
 }
 
 interface WsWorkerMessage {
-    type: 'connecting' | 'open' | 'close' | 'error' | 'video-data';
+    type: 'connecting' | 'open' | 'close' | 'error' | 'reconnect' | 'video-data';
     error?: string;
     payload?: ArrayBuffer;
     code?: number;
@@ -148,7 +149,15 @@ export default class H264Player {
 
     private playbackStallStartedAt: number = 0;
 
+    private lastDecodedFrames: number = 0;
+
+    private decodedStallStartedAt: number = 0;
+
     private recoveryInFlight: boolean = false;
+
+    // Set on mseError; while true, incoming frames are dropped until the next
+    // IDR so a rebuilt MSE never starts mid-GOP (WebKit: MEDIA_ERR_DECODE).
+    private waitForKeyframe: boolean = false;
     // private hederBits: Uint8Array = new Uint8Array(0);
 
     public packetCount: number = 0;
@@ -260,20 +269,31 @@ export default class H264Player {
             switch (msg.type) {
                 case 'connecting':
                     // Notify external to show loading during the connection phase
+                    logStreamError('WS', 'connecting', '', this.wsUrl || '');
                     window.dispatchEvent(new CustomEvent('wv_work', { detail: false }));
                     break;
                 case 'open':
                     // Connected: hide loading
+                    logStreamError('WS', 'open', '', 'connected');
                     window.dispatchEvent(new CustomEvent('wv_work', { detail: true }));
                     window.dispatchEvent(new CustomEvent('wv_open'));
                     break;
                 case 'close':
-                    window.dispatchEvent(new CustomEvent('wv_close', { 
-                        detail: { code: msg.code, reason: msg.reason } 
+                    window.dispatchEvent(new CustomEvent('wv_close', {
+                        detail: { code: msg.code, reason: msg.reason }
                     }));
+                    if (msg.reason === 'Connection replaced') {
+                        logStreamError('WS', 'replaced', String(msg.code ?? ''), msg.reason || '');
+                    }
+                    break;
+                case 'reconnect':
+                    // Unexpected socket close while streaming (network drop /
+                    // radio hole); the worker is reconnecting on its own.
+                    logStreamError('WS', 'reconnect', String(msg.code ?? ''), msg.reason || 'unexpected close');
                     break;
                 case 'error':
                     window.dispatchEvent(new CustomEvent('wv_error', { detail: msg.error }));
+                    logStreamError('WS', 'socket-error', '', msg.error || 'ws error');
                     // Keep loading visible while retrying
                     window.dispatchEvent(new CustomEvent('wv_work', { detail: false }));
                     this.wsRetryCount -= 1;
@@ -298,6 +318,15 @@ export default class H264Player {
                         const frameData = this.dealVideoData(msg.payload);
                         if (frameData) {
                             this.lastValidFrameAt = Date.now();
+                            // After an MSE error the pipeline restarts mid-GOP; feeding
+                            // P-frames without a preceding IDR makes WebKit throw
+                            // MEDIA_ERR_DECODE again immediately (error storm).
+                            // Drop frames until the next keyframe (<=80ms at gop=2).
+                            if (this.waitForKeyframe) {
+                                if (!H264Player.isKeyframe(frameData.data)) break;
+                                this.waitForKeyframe = false;
+                                logStreamError('VIDEO', 'keyframe-resume', '', 'appending resumed at idr');
+                            }
                             this.packetCount++;
                             this.decoderWorker?.postMessage(frameData);
                         }
@@ -466,7 +495,7 @@ export default class H264Player {
             const referenceTime = this.lastValidFrameAt || this.connectionStartedAt;
             const timeoutMs = this.lastValidFrameAt > 0 ? 5000 : 8000;
             if (referenceTime > 0 && now - referenceTime >= timeoutMs) {
-                this.triggerRecovery();
+                this.triggerRecovery('no-valid-frame');
                 return;
             }
 
@@ -474,10 +503,33 @@ export default class H264Player {
             if (this.lastValidFrameAt > 0
                 && Math.abs(playbackTime - this.lastHealthPlaybackTime) < 0.01) {
                 if (this.playbackStallStartedAt === 0) this.playbackStallStartedAt = now;
-                if (now - this.playbackStallStartedAt >= 5000) this.triggerRecovery();
+                if (now - this.playbackStallStartedAt >= 5000) this.triggerRecovery('playback-stall');
             } else {
                 this.lastHealthPlaybackTime = playbackTime;
                 this.playbackStallStartedAt = 0;
+            }
+
+            // Black-layer watchdog: on iOS the video layer can die silently
+            // (memory pressure / lock-screen wake) - currentTime keeps moving,
+            // our own live-edge seeks read as "playback advancing", and data
+            // keeps flowing (FPS counter alive), so every time-based check
+            // stays green while the screen is black. Only a decoded-frame
+            // counter can see it; recovery = full MSE rebuild (same as refresh).
+            const videoAny = this.videoElement as any;
+            const decoded: number = videoAny?.getVideoPlaybackQuality?.().totalVideoFrames
+                ?? videoAny?.webkitDecodedFrameCount
+                ?? -1;
+            if (decoded >= 0 && this.lastValidFrameAt > 0 && this.videoElement && !this.videoElement.paused) {
+                if (decoded === this.lastDecodedFrames) {
+                    if (this.decodedStallStartedAt === 0) this.decodedStallStartedAt = now;
+                    if (now - this.decodedStallStartedAt >= 5000) this.triggerRecovery('decode-stall');
+                } else {
+                    this.lastDecodedFrames = decoded;
+                    this.decodedStallStartedAt = 0;
+                }
+            } else {
+                if (decoded >= 0) this.lastDecodedFrames = decoded;
+                this.decodedStallStartedAt = 0;
             }
         }, 1000);
     }
@@ -489,9 +541,10 @@ export default class H264Player {
         }
     }
 
-    private triggerRecovery(): void {
+    private triggerRecovery(reason: string): void {
         if (this.recoveryInFlight) return;
         this.recoveryInFlight = true;
+        logStreamError('VIDEO', 'stall-recover', '', `${reason}; restarting stream`);
         this.connectionStartedAt = Date.now();
         this.lastValidFrameAt = 0;
         this.playbackStallStartedAt = 0;
@@ -513,6 +566,7 @@ export default class H264Player {
         this.lastVideoTime = 0;
         this.lastSec = 0;
         this.videoFrameCnt = 0;
+        this.waitForKeyframe = false;
         this.estimatedPreviewFrameMs = previewFrameMs;
         this.frameRateWindowStartMs = 0;
         this.frameRateWindowFrames = 0;
@@ -552,6 +606,10 @@ export default class H264Player {
             this.videoPlayer.resetLivePreview(video);
         }
 
+        // destroy() may have run while we awaited the teardown sleeps above;
+        // do not resurrect the stream on an unmounted player.
+        if (!this.videoElement) return;
+
         this.isConnected = false;
         this.isStarted = false;
         await this.start(this.wsUrl);
@@ -571,6 +629,19 @@ export default class H264Player {
     }
 
     mediaSrcCallback(msg: CallbackEvent): void {
+        if (msg.t === 'mseError') {
+            // The MSE pipeline is unrecoverable in place on WebKit (soak logs:
+            // every quick rebuild re-errored; only a fresh WS connection heals).
+            // Drop frames until the restart and mute the old muxer.
+            this.waitForKeyframe = true;
+            try {
+                this.decoderWorker?.postMessage({ cmd: 'reset' });
+            } catch {
+                // worker may be gone during teardown
+            }
+            logStreamError('VIDEO', 'mse-error', '', 'media source lost; restarting stream');
+            this.triggerRecovery('mse-error');
+        }
         this.cb(msg);
     }
 
@@ -730,6 +801,20 @@ export default class H264Player {
         this.captureDurationMs = 0;
         this.captureParts = [];
         this.captureTotalBytes = 0;
+    }
+
+    /** True when the Annex-B access unit contains an IDR slice (NAL type 5). */
+    static isKeyframe(data: Uint8Array): boolean {
+        const len = data.byteLength;
+        for (let i = 0; i + 4 < len; i += 1) {
+            if (data[i] === 0 && data[i + 1] === 0) {
+                let hdr = -1;
+                if (data[i + 2] === 1) hdr = i + 3;
+                else if (data[i + 2] === 0 && data[i + 3] === 1) hdr = i + 4;
+                if (hdr >= 0 && (data[hdr] & 0x1F) === 5) return true;
+            }
+        }
+        return false;
     }
 
     static checkFrameData(h264Data: Uint8Array): boolean {

@@ -99,6 +99,7 @@ function attemptConnect(url: string): void {
                 ctx.postMessage({ type: 'close', code: event.code, reason: event.reason });
                 return;
             }
+            ctx.postMessage({ type: 'reconnect', code: event.code, reason: event.reason });
             scheduleReconnect();
         };
 
