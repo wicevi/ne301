@@ -547,6 +547,10 @@ static void ws_stream_server_task(void *argument) {
  * chains stay decodable (drops counted). */
 #define WS_FIFO_SLOTS      5
 #define WS_FIFO_SLOT_SIZE  (128u * 1024u)
+/* Cap a client's unsent outbound buffer: bounded worst-case for a dead
+ * connection, while allowing one full max-size frame to queue for a slow
+ * but live client. */
+#define WS_SEND_BUF_CAP    (512u * 1024u)
 static uint8_t s_ws_fifo_mem[WS_FIFO_SLOTS][WS_FIFO_SLOT_SIZE] ALIGN_32 IN_PSRAM;
 static struct {
     uint8_t *data;  /* static slot, or heap buffer for oversize frames */
@@ -627,11 +631,24 @@ static void ws_frame_fifo_drain(void)
         s_ws_fifo_count--;
 
         for (uint32_t i = 0; i < g_websocket_server.config.max_clients; i++) {
+            struct mg_connection *conn = g_websocket_server.clients[i].conn;
             if (g_websocket_server.clients[i].is_active &&
-                g_websocket_server.clients[i].conn &&
-                !g_websocket_server.clients[i].conn->is_closing &&
+                conn &&
+                !conn->is_closing &&
                 ws_stream_is_client_alive(&g_websocket_server.clients[i])) {
-                mg_ws_send(g_websocket_server.clients[i].conn, data, size, WEBSOCKET_OP_BINARY);
+                /* Backpressure cap: a client that stops reading (abrupt
+                 * disconnect before ping/pong detects it) would otherwise
+                 * accumulate mg_ws_send data in conn->send unboundedly - the
+                 * iobuf grew to 4MB and then failed every resize, flooding
+                 * MG_ERROR at frame rate. Drop frames for a stalled client
+                 * instead of buffering past one max frame. */
+                if (conn->send.len < WS_SEND_BUF_CAP) {
+                    mg_ws_send(conn, data, size, WEBSOCKET_OP_BINARY);
+                } else {
+                    LOG_SVC_WARN("WS send-buffer cap hit (%lu bytes), dropping frame for client %u",
+                                 (unsigned long) conn->send.len,
+                                 g_websocket_server.clients[i].client_id);
+                }
             }
         }
         osMutexRelease(g_websocket_server.mutex);
