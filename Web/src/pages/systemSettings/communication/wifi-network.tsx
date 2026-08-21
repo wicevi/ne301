@@ -236,12 +236,51 @@ export default function WifiNetworkPage() {
             setIsErrorWifiPassword(false);
         }
     }, [wifiPassword]);
-    const handleScanWifi = async () => {
-        const waitScanWifi = async () => {
-            await scanWifi();
-            await sleep(3000);
+    const isWifiScanInProgress = (data: any) => {
+        if (!data) return false;
+        if (typeof data.scan_in_progress === 'boolean') {
+            return data.scan_in_progress;
+        }
+        return data.scan_results?.scan_in_progress === true;
+    };
+
+    const pollWifiScanComplete = async (maxWaitMs = 30000, intervalMs = 500) => {
+        const deadline = Date.now() + maxWaitMs;
+        const pollOnce = async (): Promise<boolean> => {
+            if (Date.now() >= deadline) {
+                await getNetworkSTA();
+                return false;
+            }
+            const res = await getNetworkSTAReq();
+            setCurrentWifiData(res.data);
+            setKnownWifiDataList(res.data.scan_results?.known_networks ?? []);
+            setOtherWifiDataList(res.data.scan_results?.unknown_networks ?? []);
+            if (!isWifiScanInProgress(res.data)) {
+                return true;
+            }
+            await sleep(intervalMs);
+            return pollOnce();
         };
-        reloadMask(waitScanWifi, i18n._('sys.system_management.scanning_network'));
+        return pollOnce();
+    };
+
+    const handleScanWifi = async () => {
+        setLoadingText(i18n._('sys.system_management.scanning_network'));
+        setIsReloading(true);
+        setShowWifiReloadMask(true);
+        try {
+            await scanWifi();
+            // The scan runs in a background task; wait for it to actually
+            // finish (scan_in_progress flips false) before hiding the mask,
+            // otherwise the first STA response closes it with stale/empty
+            // results.
+            await pollWifiScanComplete();
+        } catch (error) {
+            console.error('handleScanWifi', error);
+        } finally {
+            setShowWifiReloadMask(false);
+            setIsReloading(false);
+        }
     }
     const handleDeleteWifi = async (wifiData: WifiData) => {
         try {

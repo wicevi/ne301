@@ -1828,7 +1828,12 @@ aicam_result_t communication_start_network_scan(wireless_scan_callback_t callbac
     return AICAM_OK;
 }
 
-aicam_result_t communication_get_scan_results(network_scan_result_t *results, 
+aicam_bool_t communication_is_scan_in_progress(void)
+{
+    return g_communication_service.scan_in_progress;
+}
+
+aicam_result_t communication_get_scan_results(network_scan_result_t *results,
                                              uint32_t max_count, 
                                              uint32_t *actual_count)
 {

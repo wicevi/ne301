@@ -491,6 +491,10 @@ aicam_result_t network_wifi_sta_handler(http_handler_context_t *ctx) {
         
         cJSON_AddItemToObject(response_json, "scan_results", scan_json);
     }
+
+    // Let the frontend poll for scan completion (async background scan).
+    cJSON_AddBoolToObject(response_json, "scan_in_progress",
+                          communication_is_scan_in_progress() ? 1 : 0);
     
     char* json_string = cJSON_Print(response_json);
     cJSON_Delete(response_json);
