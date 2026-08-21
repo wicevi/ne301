@@ -792,9 +792,16 @@ int wifi_get_flash_version(char *buf, size_t size)
 {
     if (!buf || size < 16) return -1;
 
+    // Both reads below dereference the XIP window at WIFI_FW_BASE (0x71A00000).
+    // While another task is inside a littlefs/NVS/OTA op, memory-mapped mode is
+    // temporarily disabled and an unlocked read in that window raises a precise
+    // BusFault. Hold the storage mutex for the whole function (same pattern as
+    // wifi_flash_boot).
+    storage_lock_ext();
     const uint8_t *flash_addr = (const uint8_t *)WIFI_FLASH_BASE_ADDR;
     const flash_header_t *hdr = (const flash_header_t *)flash_addr;
     if (hdr->valid_flags != WIFI_FLASH_VALID_FLAGS) {
+        storage_unlock_ext();
         snprintf(buf, size, "N/A");
         return -1;
     }
@@ -812,7 +819,6 @@ int wifi_get_flash_version(char *buf, size_t size)
     //                      major           [31:24]  major
     //   44               fw_version_ext_info:
     //                      patch_num        [7:0]   security ← SDK naming quirk
-    storage_lock_ext();
     const uint8_t *rps = flash_addr + WIFI_FLASH_HEADER_SIZE;
     uint32_t ver_info = *(const uint32_t *)(rps + 12);
     uint32_t ver_ext  = *(const uint32_t *)(rps + 44);
