@@ -178,6 +178,7 @@
         .halow_rc_mcs = -1,
         .halow_rc_bw_mhz = -1,
         .halow_rc_gi = -1,
+        .halow_ps_mode = 0,
 
          // PoE/Ethernet default configuration
          .poe = {

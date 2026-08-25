@@ -428,6 +428,8 @@
       "halow_rate_auto": "自动",
       "halow_rate_gi_short": "短",
       "halow_rate_gi_long": "长",
+      "halow_ps_mode": "省电模式",
+      "halow_ps_mode_hint": "开启后芯片空闲时休眠以降低功耗（默认关闭）",
       "halow_save_radio": "保存射频设置",
       "halow_refresh_radio": "刷新射频设置",
       "halow_network_config": "网络配置",

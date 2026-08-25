@@ -426,6 +426,8 @@
       "halow_rate_auto": "Auto",
       "halow_rate_gi_short": "Short",
       "halow_rate_gi_long": "Long",
+      "halow_ps_mode": "Power Save",
+      "halow_ps_mode_hint": "Chip sleeps when idle to reduce power (off by default)",
       "halow_save_radio": "Save Radio Settings",
       "halow_refresh_radio": "Refresh radio settings",
       "halow_network_config": "Network Settings",
