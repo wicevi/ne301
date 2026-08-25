@@ -155,8 +155,8 @@ void _Error_Handler_(void);
 
 #define MM_HALOW_RESET_Pin GPIO_PIN_0
 #define MM_HALOW_RESET_GPIO_Port GPIOB
-#define MM_HALOW_WAKE_Pin GPIO_PIN_2
-#define MM_HALOW_WAKE_GPIO_Port GPIOB
+#define MM_HALOW_WAKE_Pin GPIO_PIN_9
+#define MM_HALOW_WAKE_GPIO_Port GPIOD
 
 #define MM_HALOW_SPI_IRQn            (EXTI4_IRQn)
 #define MM_HALOW_SPI_IRQ_HANDLER     EXTI4_IRQHandler
