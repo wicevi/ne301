@@ -82,6 +82,7 @@ C_SOURCES += ../Custom/Core/System/ota_header.c
 C_SOURCES += ../Custom/Core/System/power_manager.c
 C_SOURCES += ../Custom/Core/System/scheduler_manager.c
 C_SOURCES += ../Custom/Core/System/upgrade_manager.c
+C_SOURCES += ../Custom/Core/System/ota_bundle.c
 C_SOURCES += ../Custom/Core/System/wake_scheduler.c
 
 # Custom - Core/Video
