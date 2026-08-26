@@ -773,9 +773,11 @@ static int halow_mmwlan_boot_locked(void)
     }
 
     (void)mmwlan_set_power_save_mode(halow_netif_cfg.halow_cfg.ps_mode ? MMWLAN_PS_ENABLED : MMWLAN_PS_DISABLED);
-    /* Pair the timeout with the mode at boot too, so the vif created later in
-     * the up path inherits it instead of the 1 h compile-time default. */
-    (void)mmwlan_set_dynamic_ps_timeout(halow_netif_cfg.halow_cfg.ps_mode ? 100 : 3600000U);
+    /* Always the short timeout: it only matters while PS is enabled (disabled
+     * mode holds the UMAC waker and keeps the bus awake anyway), and a long
+     * value pins the host bus-activity deadline hours out, which then delays
+     * any later runtime PS enable until that stale deadline expires. */
+    (void)mmwlan_set_dynamic_ps_timeout(100U);
     (void)halow_apply_halow_hw_config_locked();
     halow_apply_sta_mac_policy();
     halow_mmwlan_booted = 1;
@@ -1728,7 +1730,8 @@ int mm_halow_netif_up(void)
                  halow_netif_cfg.halow_cfg.tx_power_dbm);
 
     (void)mmwlan_set_power_save_mode(halow_netif_cfg.halow_cfg.ps_mode ? MMWLAN_PS_ENABLED : MMWLAN_PS_DISABLED);
-    (void)mmwlan_set_dynamic_ps_timeout(halow_netif_cfg.halow_cfg.ps_mode ? 100 : 3600000U);
+    /* See boot path: always the short timeout, never a long "disable" value. */
+    (void)mmwlan_set_dynamic_ps_timeout(100U);
     (void)halow_apply_halow_hw_config_locked();
 
     /*
@@ -2269,9 +2272,10 @@ int mm_halow_set_power_save(uint8_t enable)
     }
     halow_netif_cfg.halow_cfg.ps_mode = enable ? 1 : 0;
     status = mmwlan_set_power_save_mode(enable ? MMWLAN_PS_ENABLED : MMWLAN_PS_DISABLED);
-    /* Keep the dynamic PS timeout paired with the mode, like the up path does;
-     * a stale 1 h timeout from a PS-disabled boot would keep the chip awake. */
-    (void)mmwlan_set_dynamic_ps_timeout(enable ? 100U : 3600000U);
+    /* Always the short timeout regardless of the mode: a long value here pins
+     * the host bus-activity deadline hours out (it is max-only in the SDK) and
+     * the next PS enable would stay awake until that stale deadline expires. */
+    (void)mmwlan_set_dynamic_ps_timeout(100U);
     osMutexRelease(halow_mutex);
 
     return (status == MMWLAN_SUCCESS) ? 0 : -1;
