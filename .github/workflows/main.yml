@@ -346,7 +346,7 @@ jobs:
             **Standard (Halow WiFi via SPI6):**
             - **`*_FSBL_signed.bin`** — FSBL, not for OTA
             - **`*_pkg.bin`** (non-SensorExt) — OTA packages with Halow WiFi
-            - **`*_bundle.bin`** — Full OTA bundle (FSBL+APP+WEB+Model+WiFi in one file); upload via Web UI → 导入固件 → 高级选项 → 整合包升级
+            - **`*_bundle.bin`** — Full OTA bundle (FSBL+APP+WEB+Model+WiFi in one file); upload via Web UI → System Settings → Firmware Upgrade → Import Firmware → Advanced Options → Full Bundle One-Click Upgrade
             - **`*_WakeCore.bin`** — WakeCore (STM32U0)
             - **`*.hex`** (non-SensorExt) — Combined HEX for STM32CubeProgrammer one-click flash
 
