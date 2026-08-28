@@ -525,6 +525,23 @@ static int netif_manager_cmd(int argc, char* argv[])
         }
         if (argc > 3) wakeup_mode = (sl_net_wakeup_mode_t)atoi(argv[3]);
         ret = sl_net_netif_romote_wakeup_mode_ctrl(wakeup_mode);
+    } else if (strcmp(argv[2], "nwp_dump") == 0) {
+        // NWP RAM dump: content streams out of the NWP UART pin, not the console.
+        // Capture with Docklight (460800 8N1, HEX); defaults dump the full 672 KB.
+        if (strcmp(if_name, NETIF_NAME_WIFI_STA) && strcmp(if_name, NETIF_NAME_WIFI_AP)) {
+            LOG_SIMPLE("Only wl/ap support nwp_dump cmd\r\n");
+            return -1;
+        }
+        ret = sl_net_nwp_ram_dump((argc > 3) ? (uint32_t)strtoul(argv[3], NULL, 0) : 0,
+                                  (argc > 4) ? (uint32_t)strtoul(argv[4], NULL, 0) : 0);
+    } else if (strcmp(argv[2], "nwp_pc") == 0) {
+        // NWP thread PC (0~3) via RAM-log reads; regs=1 also dumps R0~R15 (R15=SP).
+        // Values stream on the NWP UART as 4-byte LE words; the console maps addresses.
+        if (strcmp(if_name, NETIF_NAME_WIFI_STA) && strcmp(if_name, NETIF_NAME_WIFI_AP)) {
+            LOG_SIMPLE("Only wl/ap support nwp_pc cmd\r\n");
+            return -1;
+        }
+        ret = sl_net_nwp_print_thread_pc((argc > 3) ? (uint8_t)atoi(argv[3]) : 0);
     } else if (strcmp(argv[2], "scan") == 0) {
         if (strcmp(if_name, NETIF_NAME_WIFI_STA) && strcmp(if_name, NETIF_NAME_WIFI_AP)
 #if NETIF_WIFI_HALOW_IS_ENABLE

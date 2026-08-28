@@ -80,6 +80,8 @@ static sl_wifi_device_configuration_t device_configuration = {
                    .ext_custom_feature_bit_map = (SL_SI91X_EXT_FEAT_XTAL_CLK | MEMORY_CONFIG
 #if IS_ENABLE_NWP_DEBUG_PRINTS
                     | SL_SI91X_EXT_FEAT_UART_SEL_FOR_DEBUG_PRINTS
+#else
+                    | SL_SI91X_EXT_FEAT_DISABLE_DEBUG_PRINTS
 #endif
 #if defined(SLI_SI917) || defined(SLI_SI915)
                                                   | SL_SI91X_EXT_FEAT_FRONT_END_SWITCH_PINS_ULP_GPIO_4_5_0
@@ -249,7 +251,13 @@ static sl_wifi_device_configuration_t remote_wake_up_wifi_cfg = {
                                               | SL_SI91X_TCP_IP_FEAT_SSL | SL_SI91X_TCP_IP_FEAT_DNS_CLIENT),
                    .custom_feature_bit_map = (SL_SI91X_CUSTOM_FEAT_EXTENTION_VALID),
                    .ext_custom_feature_bit_map = (SL_SI91X_EXT_FEAT_LOW_POWER_MODE | SL_SI91X_EXT_FEAT_XTAL_CLK
-                                                  | SL_SI91X_EXT_FEAT_DISABLE_DEBUG_PRINTS | MEMORY_CONFIG
+                                                  | MEMORY_CONFIG
+#if IS_ENABLE_NWP_DEBUG_PRINTS
+                                                  | SL_SI91X_EXT_FEAT_UART_SEL_FOR_DEBUG_PRINTS
+#else
+                                                  | SL_SI91X_EXT_FEAT_DISABLE_DEBUG_PRINTS
+
+#endif
 #if defined(SLI_SI917) || defined(SLI_SI915)
                                                   | SL_SI91X_EXT_FEAT_FRONT_END_SWITCH_PINS_ULP_GPIO_4_5_0
 #endif
@@ -2586,6 +2594,124 @@ int sl_net_wifi_get_region_code_by_index(uint32_t idx, char *buf, size_t len)
     buf[len - 1] = '\0';
     return SL_STATUS_OK;
 }
+
+/****************************************************************************************/
+/********************************** NWP Debug / RAM Dump ********************************/
+/****************************************************************************************/
+/* NCP-mode deep debug helpers. The dump content
+ * streams out of the Si91x NWP UART pin (NOT back over the SPI bus) — sl_si91x_get_ram_log()
+ * only triggers it. Capture with Docklight on the NWP UART at 460800 8N1, HEX format; a
+ * valid capture shows the repeating pattern 00 04 04 04 00 04 04 04. Requires the debug
+ * UART routed at init, i.e. IS_ENABLE_NWP_DEBUG_PRINTS == 1 (SL_SI91X_EXT_FEAT_UART_SEL_FOR_DEBUG_PRINTS).
+ * NCP memory config is BIT(20)|BIT(21) (sl_wifi_device.h) => 672 KB NWP RAM. */
+#define SL_NET_NWP_RAM_SIZE        (672u * 1024u)
+#define SL_NET_NWP_RAM_BASE        0x22000000u /* NWP RAM base in the SiWx917 global memory map */
+#define SL_NET_NWP_THREAD_NUM      4u
+#define SL_NET_NWP_THREAD_PC_BASE  0x22000420u /* PC address         = base + 0x80 * thread_no */
+#define SL_NET_NWP_THREAD_REG_BASE 0x22000440u /* register address   = base + 0x80 * thread_no + 4 * reg_no */
+#define SL_NET_NWP_THREAD_STRIDE   0x80u
+#define SL_NET_NWP_THREAD_REG_NUM  16u         /* R0~R15, R15 = SP */
+
+/* On-device finding (fw 2.16.5): the 0x92 RAM-dump command validates the address as an
+ * OFFSET from NWP RAM base, not a global-map absolute address — get_ram_log(0x22000420, 4)
+ * is NACKed with 0x1003E (invalid command length) while get_ram_log(0x420, 4) succeeds.
+ * Accept both forms: absolute [0x22000000, +672K) is converted, anything else passes raw. */
+static uint32_t sl_net_nwp_ram_offset(uint32_t address)
+{
+    if (address >= SL_NET_NWP_RAM_BASE && address < SL_NET_NWP_RAM_BASE + SL_NET_NWP_RAM_SIZE) {
+        return address - SL_NET_NWP_RAM_BASE;
+    }
+    return address;
+}
+
+#if IS_ENABLE_NWP_DEBUG_PRINTS
+/// @brief Trigger an NWP RAM dump. The content streams out of the NWP UART port
+///        (capture externally); nothing is returned to the host over the bus.
+/// @param address Start address — offset from NWP RAM base (0 = RAM start); absolute
+///        global-map addresses in [0x22000000, +672K) are accepted and converted
+/// @param length  Bytes to dump (0 = full NWP RAM, 672 KB)
+/// @return sl_status_t (SL_STATUS_NOT_INITIALIZED when the NWP is down or hung)
+int sl_net_nwp_ram_dump(uint32_t address, uint32_t length)
+{
+    sl_status_t status;
+
+    if (sl_net_thread_ID == NULL) return SL_STATUS_INVALID_STATE;
+    if (length == 0) length = SL_NET_NWP_RAM_SIZE;
+
+    osMutexAcquire(sl_net_mutex, osWaitForever);
+    status = sl_si91x_get_ram_log(sl_net_nwp_ram_offset(address), length);
+    osMutexRelease(sl_net_mutex);
+    if (status != SL_STATUS_OK) {
+        LOG_DRV_ERROR("NWP RAM dump (addr 0x%08lX, %lu bytes) failed: 0x%lX\r\n",
+                      (unsigned long)address, (unsigned long)length, status);
+        return status;
+    }
+    LOG_DRV_INFO("NWP RAM dump triggered: addr 0x%08lX, %lu bytes\r\n"
+                 "Capture on the NWP UART port (460800 8N1, HEX) with Docklight; a valid dump\r\n"
+                 "shows the repeating pattern 00 04 04 04 00 04 04 04\r\n",
+                 (unsigned long)address, (unsigned long)length);
+    return status;
+}
+
+/// @brief Read the PC of NWP firmware threads 0~3 (optionally R0~R15 too). Each
+///        4-byte little-endian value streams out of the NWP UART port in call
+///        order — the console log only maps which address every chunk belongs to.
+/// @param with_regs 0 = PC only, 1 = PC + all 16 registers (R15 = SP)
+/// @return sl_status_t of the first failed read, SL_STATUS_OK otherwise
+int sl_net_nwp_print_thread_pc(uint8_t with_regs)
+{
+    sl_status_t status = SL_STATUS_OK;
+    uint32_t thread = 0, reg = 0, last_addr = 0;
+
+    if (sl_net_thread_ID == NULL) return SL_STATUS_INVALID_STATE;
+
+    osMutexAcquire(sl_net_mutex, osWaitForever);
+    for (thread = 0; thread < SL_NET_NWP_THREAD_NUM; thread++) {
+        uint32_t pc_addr = SL_NET_NWP_THREAD_PC_BASE + SL_NET_NWP_THREAD_STRIDE * thread;
+        last_addr = pc_addr;
+        status = sl_si91x_get_ram_log(sl_net_nwp_ram_offset(pc_addr), 4);
+        if (status != SL_STATUS_OK) break;
+        LOG_DRV_INFO("NWP thread %lu PC <- [0x%08lX] (4-byte LE on NWP UART)\r\n",
+                     (unsigned long)thread, (unsigned long)pc_addr);
+        if (!with_regs) continue;
+        for (reg = 0; reg < SL_NET_NWP_THREAD_REG_NUM; reg++) {
+            uint32_t reg_addr = SL_NET_NWP_THREAD_REG_BASE + SL_NET_NWP_THREAD_STRIDE * thread + 4u * reg;
+            last_addr = reg_addr;
+            status = sl_si91x_get_ram_log(sl_net_nwp_ram_offset(reg_addr), 4);
+            if (status != SL_STATUS_OK) break;
+            LOG_DRV_INFO("NWP thread %lu R%lu%s <- [0x%08lX] (4-byte LE on NWP UART)\r\n",
+                         (unsigned long)thread, (unsigned long)reg,
+                         (reg == SL_NET_NWP_THREAD_REG_NUM - 1u) ? "(SP)" : "    ",
+                         (unsigned long)reg_addr);
+        }
+        if (status != SL_STATUS_OK) break;
+        osDelay(10); // let the NWP UART stream drain between threads
+    }
+    osMutexRelease(sl_net_mutex);
+    if (status != SL_STATUS_OK) {
+        /* Active NACK (e.g. 0x1003E invalid command length) = firmware alive but rejected
+         * the request; only a timeout would point at a hung NWP. */
+        LOG_DRV_ERROR("NWP RAM-log read failed: thread %lu, [0x%08lX], status 0x%lX\r\n",
+                      (unsigned long)thread, (unsigned long)last_addr, (unsigned long)status);
+    }
+    return status;
+}
+#else
+int sl_net_nwp_ram_dump(uint32_t address, uint32_t length)
+{
+    UNUSED_PARAMETER(address);
+    UNUSED_PARAMETER(length);
+    LOG_DRV_WARN("NWP debug prints disabled: rebuild with IS_ENABLE_NWP_DEBUG_PRINTS 1\r\n");
+    return SL_STATUS_NOT_SUPPORTED;
+}
+
+int sl_net_nwp_print_thread_pc(uint8_t with_regs)
+{
+    UNUSED_PARAMETER(with_regs);
+    LOG_DRV_WARN("NWP debug prints disabled: rebuild with IS_ENABLE_NWP_DEBUG_PRINTS 1\r\n");
+    return SL_STATUS_NOT_SUPPORTED;
+}
+#endif
 
 /// @brief Initialize WiFi network interface
 /// @param None
