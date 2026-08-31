@@ -134,6 +134,17 @@ void mmhal_wlan_hard_reset(void)
     mmosal_task_sleep(200);
 }
 
+/* New in mm-iot-sdk 2.13.1: drive only the reset line, no timing attached.
+ * mm-iot-sdk 2.10.4 headers do not declare it, so guard on the SDK version. */
+#include "mmversion.h"
+#if MM_VERSION >= MM_VERSION_NUMBER(2, 11, 0)
+void mmhal_wlan_assert_reset(bool assert_reset)
+{
+    HAL_GPIO_WritePin(MM_HALOW_RESET_GPIO_Port, MM_HALOW_RESET_Pin,
+                      assert_reset ? GPIO_PIN_RESET : GPIO_PIN_SET);
+}
+#endif
+
 #if defined(ENABLE_EXT_XTAL_INIT) && ENABLE_EXT_XTAL_INIT
 bool mmhal_wlan_ext_xtal_init_is_required(void)
 {

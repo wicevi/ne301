@@ -18,6 +18,7 @@
 #include "mmhal.h"
 #include "mmhal_wlan.h"
 #include "mmwlan.h"
+#include "mmversion.h"
 #include "mmipal.h"
 #include "mmregdb.h"
 #include "mbin.h"
@@ -34,16 +35,30 @@
 
 struct netif *mmipal_get_lwip_netif(void);
 
-/* Morse: set STA MAC after boot, before sta_enable (libmorse.a). */
+/* Quick-join (preconnect) cache rides on 2.10.4-local mmwlan additions
+ * (sta_args.preconnect_*, scan_result.s1g_operation_ie). Those are not ported
+ * to the 2.13.1 verification tree, so joins there use a plain scan. */
+#if MM_VERSION < MM_VERSION_NUMBER(2, 11, 0)
+#define HALOW_HAVE_PRECONNECT 1
+#else
+#define HALOW_HAVE_PRECONNECT 0
+#endif
+
+/* Morse 2.10.4-local: set STA MAC after boot, before sta_enable (libmorse.a).
+ * Removed in our 2.13.1 tree — the boot-time platform MAC is used instead. */
+#if MM_VERSION < MM_VERSION_NUMBER(2, 11, 0)
 enum mmwlan_status mmwlan_sta_set_mac_addr(const uint8_t *mac_addr);
+#endif
 
 #define HALOW_SCAN_RESULT_MAX           (64)
+#if HALOW_HAVE_PRECONNECT
 /** S1G Operation IE size (EID + len + 5 payload bytes). */
 #define HALOW_S1G_OPERATION_IE_LEN      (MMWLAN_PRECONNECT_S1G_OP_IE_LEN)
 /** Max age of scan-derived quick-join cache (ms). */
 #define HALOW_PRECONNECT_TTL_MS         (60000U)
 /** IEEE 802.11ah S1G Operation element ID. */
 #define HALOW_DOT11_IE_S1G_OPERATION    (232U)
+#endif
 /** Cat1/HaLow rail settle after sleep power-on (PWR_HALOW shares PWR_CAT1). */
 #define HALOW_PWR_SETTLE_MS             100U
 #define HALOW_INIT_RETRY_DELAY_MS       10U
@@ -102,6 +117,7 @@ static PowerHandle halow_pwr_handle = 0;
 
 static uint8_t halow_pwr_acquired = 0;
 
+#if HALOW_HAVE_PRECONNECT
 typedef struct {
     uint8_t  valid;
     uint8_t  bssid[6];
@@ -280,6 +296,7 @@ static int halow_preconnect_fill_sta_args(struct mmwlan_sta_args *sta_args)
     }
     return 1;
 }
+#endif /* HALOW_HAVE_PRECONNECT */
 
 static void halow_resolve_sta_mac(uint8_t mac[6])
 {
@@ -378,10 +395,13 @@ static void halow_try_set_sta_mac_runtime(const uint8_t mac[6])
     uint8_t cur[6];
     enum mmwlan_status status;
 
+#if MM_VERSION < MM_VERSION_NUMBER(2, 11, 0)
+    /* 2.10.4-local helper: copies the MAC into interface data before up. */
     status = mmwlan_sta_set_mac_addr(mac);
     if (status == MMWLAN_SUCCESS) {
         return;
     }
+#endif
     if (mmwlan_get_vif_mac_addr(MMWLAN_VIF_STA, cur) == MMWLAN_SUCCESS &&
         memcmp(cur, mac, 6) != 0) {
         LOG_DRV_WARN("HaLow STA MAC differs from cfg; down+up or deinit to apply");
@@ -764,6 +784,10 @@ static int halow_mmwlan_boot_locked(void)
 
     /* Ensure the HAL BCF callback uses a region-appropriate BCF at next boot. */
     mmhal_wlan_select_bcf_for_country(halow_netif_cfg.halow_cfg.country_code);
+
+    /* STA MAC must be in the shim before mmwlan_boot(): SDK >= 2.11 reads
+     * mmhal_read_mac_addr() during boot (interface add), not afterwards. */
+    halow_apply_sta_mac_policy();
 
     ret = mmwlan_boot(&boot_args);
     if (ret != MMWLAN_SUCCESS) {
@@ -1233,15 +1257,19 @@ static void halow_fill_sta_args(struct mmwlan_sta_args *sta_args)
     sta_args->bgscan_signal_threshold_dbm = hc->bgscan_signal_threshold_dbm;
     sta_args->bgscan_long_interval_s = hc->bgscan_long_interval_s;
 
+#if HALOW_HAVE_PRECONNECT
     /* Feed preconnect cache from wpas/connect-time scans as well as mmwlan_scan_request(). */
     sta_args->scan_rx_cb = halow_preconnect_scan_rx_cb;
     sta_args->scan_rx_cb_arg = NULL;
+#endif
 
     sta_args->sae_owe_ec_groups[0]=19;
     sta_args->sae_owe_ec_groups[1]=0;
     sta_args->sae_owe_ec_groups[2]=0;
 
+#if HALOW_HAVE_PRECONNECT
     (void)halow_preconnect_fill_sta_args(sta_args);
+#endif
 }
 
 static void halow_scan_result_to_info(const struct mmwlan_scan_result *src, wireless_scan_info_t *dst)
@@ -1402,7 +1430,9 @@ static void halow_scan_rx_handler(const struct mmwlan_scan_result *result, void 
 
     /* Convert once, then de-duplicate (see NETIF_WIFI_HALOW_SCAN_DEDUP_BY_FREQ_BW). */
     halow_scan_result_to_info(result, &tmp);
+#if HALOW_HAVE_PRECONNECT
     halow_preconnect_cache_store(result);
+#endif
 
     if (target->scan_info != NULL) {
         for (uint8_t i = 0; i < target->scan_count; i++) {
@@ -1494,7 +1524,9 @@ static int halow_run_scan_locked(wireless_scan_result_t *storage, wireless_scan_
         return -1;
     }
 
+#if HALOW_HAVE_PRECONNECT
     halow_preconnect_cache_clear();
+#endif
 
     if (halow_scan_sem == NULL) {
         halow_scan_sem = osSemaphoreNew(1, 0, NULL);
@@ -1717,7 +1749,9 @@ int mm_halow_netif_up(void)
         uint8_t mac[6];
         halow_apply_sta_mac_policy();
         halow_resolve_sta_mac(mac);
+#if MM_VERSION < MM_VERSION_NUMBER(2, 11, 0)
         (void)mmwlan_sta_set_mac_addr(mac);
+#endif
         LOG_DRV_INFO("HaLow STA MAC " NETIF_MAC_STR_FMT, NETIF_MAC_PARAMETER(mac));
     }
 
@@ -1739,9 +1773,11 @@ int mm_halow_netif_up(void)
      * mmdrv_set_channel during SAE auth often times out (rx page too short / -116).
      */
     (void)mmwlan_scan_abort();
+#if HALOW_HAVE_PRECONNECT
     if (sta_args.preconnect_bss_valid) {
         osDelay(100);
     }
+#endif
 
     status = mmwlan_sta_enable(&sta_args, mm_halow_sta_status_callback);
     if (status != MMWLAN_SUCCESS) {
@@ -2088,20 +2124,24 @@ int mm_halow_is_scan_in_progress(void)
 
 int mm_halow_set_preconnect_target(const uint8_t bssid[6])
 {
+#if HALOW_HAVE_PRECONNECT
     halow_preconnect_entry_t *entry;
     uint32_t now_ms;
+#endif
 
     if (halow_mutex == NULL || bssid == NULL || !NETIF_MAC_IS_UNICAST(bssid)) {
         return -1;
     }
 
     osMutexAcquire(halow_mutex, osWaitForever);
+#if HALOW_HAVE_PRECONNECT
     now_ms = HAL_GetTick();
     entry = halow_preconnect_find_entry(bssid, now_ms);
     if (entry == NULL) {
         osMutexRelease(halow_mutex);
         return -1;
     }
+#endif
 
     memcpy(halow_netif_cfg.wireless_cfg.bssid, bssid, 6);
     osMutexRelease(halow_mutex);
@@ -2458,20 +2498,11 @@ uint8_t mm_halow_dpp_is_active(void)
 
 #else /* MMWLAN_DPP_DISABLED */
 
-static int halow_dpp_apply_credentials(const struct mmwlan_dpp_cb_args *ev)
+static uint8_t halow_dpp_creds_stored;
+
+static int halow_dpp_store_credentials(const uint8_t *ssid, uint16_t ssid_len, const char *pass)
 {
-    const uint8_t *ssid;
-    uint16_t ssid_len;
-    const char *pass;
     size_t copy_len;
-
-    if (ev == NULL) {
-        return -1;
-    }
-
-    ssid = ev->args.pb_result.ssid;
-    ssid_len = ev->args.pb_result.ssid_len;
-    pass = ev->args.pb_result.passphrase;
 
     if (ssid == NULL || ssid_len == 0) {
         LOG_DRV_ERROR("HaLow DPP: no SSID in PB result");
@@ -2495,6 +2526,7 @@ static int halow_dpp_apply_credentials(const struct mmwlan_dpp_cb_args *ev)
         LOG_DRV_WARN("HaLow DPP: no passphrase in PB result, using open");
     }
 
+    halow_dpp_creds_stored = 1;
     return 0;
 }
 
@@ -2636,18 +2668,27 @@ static void mm_halow_dpp_event_cb(const struct mmwlan_dpp_cb_args *dpp_event, vo
 
     MM_UNUSED(arg);
 
-    if (dpp_event == NULL || dpp_event->event != MMWLAN_DPP_EVT_PB_RESULT) {
+    if (dpp_event == NULL || !halow_dpp_active) {
         return;
     }
 
-    if (!halow_dpp_active) {
+#if MM_VERSION >= MM_VERSION_NUMBER(2, 11, 0)
+    /* SDK >= 2.11: credentials arrive separately (CONF_RECEIVED), before the
+     * PB_RESULT summary. Stash them; success is judged at PB_RESULT. */
+    if (dpp_event->event == MMWLAN_DPP_EVT_CONF_RECEIVED) {
+        (void)halow_dpp_store_credentials(dpp_event->args.conf_received.ssid,
+                                          dpp_event->args.conf_received.ssid_len,
+                                          dpp_event->args.conf_received.passphrase);
+        return;
+    }
+    if (dpp_event->event != MMWLAN_DPP_EVT_PB_RESULT) {
         return;
     }
 
     result = dpp_event->args.pb_result.result;
 
     if (result == MMWLAN_DPP_PB_RESULT_SUCCESS) {
-        if (halow_dpp_apply_credentials(dpp_event) == 0) {
+        if (halow_dpp_creds_stored) {
             evt = MM_HALOW_DPP_EVT_SUCCESS;
             LOG_DRV_INFO("HaLow DPP success: ssid='%s' sec=%d",
                          halow_netif_cfg.wireless_cfg.ssid,
@@ -2664,6 +2705,34 @@ static void mm_halow_dpp_event_cb(const struct mmwlan_dpp_cb_args *dpp_event, vo
 
     halow_dpp_finish(evt);
 }
+#else
+    if (dpp_event->event != MMWLAN_DPP_EVT_PB_RESULT) {
+        return;
+    }
+
+    result = dpp_event->args.pb_result.result;
+
+    if (result == MMWLAN_DPP_PB_RESULT_SUCCESS) {
+        if (halow_dpp_store_credentials(dpp_event->args.pb_result.ssid,
+                                         dpp_event->args.pb_result.ssid_len,
+                                         dpp_event->args.pb_result.passphrase) == 0) {
+            evt = MM_HALOW_DPP_EVT_SUCCESS;
+            LOG_DRV_INFO("HaLow DPP success: ssid='%s' sec=%d",
+                         halow_netif_cfg.wireless_cfg.ssid,
+                         (int)halow_netif_cfg.wireless_cfg.security);
+        } else {
+            LOG_DRV_ERROR("HaLow DPP: PB success but credentials missing");
+        }
+    } else if (result == MMWLAN_DPP_PB_RESULT_SESSION_OVERLAP) {
+        evt = MM_HALOW_DPP_EVT_SESSION_OVERLAP;
+        LOG_DRV_WARN("HaLow DPP session overlap (multiple configurators?)");
+    } else {
+        LOG_DRV_ERROR("HaLow DPP failed (mmwlan result=%d)", (int)result);
+    }
+
+    halow_dpp_finish(evt);
+}
+#endif /* MM_VERSION */
 
 uint8_t mm_halow_dpp_is_active(void)
 {
@@ -2764,6 +2833,7 @@ int mm_halow_dpp_start(uint32_t timeout_ms, mm_halow_dpp_callback_t cb, void *us
     }
 
     halow_dpp_active = 1;
+    halow_dpp_creds_stored = 0;
     LOG_SIMPLE("HaLow DPP: listening - press AP/configurator button (%lu s)\r\n",
                (unsigned long)(timeout_ms / 1000U));
     return 0;
