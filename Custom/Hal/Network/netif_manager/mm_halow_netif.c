@@ -6,6 +6,7 @@
 #include "mm_halow_netif.h"
 #include "chip_id_mac.h"
 #include "halow_platform_mac.h"
+#include "json_config_mgr.h"
 
 #if NETIF_WIFI_HALOW_IS_ENABLE
 
@@ -89,6 +90,7 @@ static netif_config_t halow_netif_cfg = {
         .rc_mcs = -1,
         .rc_bw_mhz = -1,
         .rc_gi = -1,
+        .join_channel = 0,
     },
 #endif
     .ip_mode = NETIF_WIFI_HALOW_DEFAULT_IP_MODE,
@@ -564,6 +566,129 @@ static int halow_wait_for_link_locked(void)
         return -1;
     }
     return halow_link_is_up_locked() ? 0 : -1;
+}
+
+/**
+ * Map the associated BSS's operating channel to a <=2 MHz channel that the
+ * association scan can be restricted to. Wide AP channels (e.g. 8 MHz) cannot
+ * be used directly — mmwlan_set_scan_config() only accepts channels whose
+ * regulatory entry is <=2 MHz — but 802.11ah beacons/probe responses are sent
+ * in 1 MHz format on the BSS primary channel, so scanning the primary finds
+ * the AP. Arithmetic mirrors the SDK's umac_interface_calc_pri_channel().
+ *
+ * @return channel number for selective scan, or 0 if no mapping exists.
+ */
+static uint8_t halow_join_scan_chan_from_info_locked(const struct mmwlan_vif_channel_info *info)
+{
+    const struct mmwlan_regulatory_db *db = get_regulatory_db();
+    const struct mmwlan_s1g_channel_list *list;
+    const struct mmwlan_s1g_channel *op = NULL;
+    const struct mmwlan_s1g_channel *scan = NULL;
+    uint32_t off_hz;
+    int32_t margin_hz;
+    int32_t pri_hz;
+    unsigned i;
+
+    if (db == NULL || halow_active_country_code[0] == '\0' ||
+        (info->pri_bw_mhz != 1U && info->pri_bw_mhz != 2U) ||
+        info->pri_1mhz_chan_idx >= 64U) {
+        return 0;
+    }
+    list = mmwlan_lookup_regulatory_domain(db, halow_active_country_code);
+    if (list == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < list->num_channels; i++) {
+        const struct mmwlan_s1g_channel *e = &list->channels[i];
+        if (e->s1g_chan_num != info->s1g_chan_num) {
+            continue;
+        }
+        if (e->s1g_operating_class == (int16_t)info->op_class ||
+            e->global_operating_class == (int16_t)info->op_class) {
+            op = e;
+            break;
+        }
+        if (op == NULL) {
+            op = e;   /* fallback: first entry with this channel number */
+        }
+    }
+    if (op == NULL) {
+        return 0;
+    }
+
+    if (op->bw_mhz <= 2U) {
+        return op->s1g_chan_num;   /* narrow AP: restrict directly */
+    }
+    if (info->pri_1mhz_chan_idx >= op->bw_mhz) {
+        return 0;
+    }
+
+    /* Primary-channel centre, in the SDK's own terms. */
+    off_hz = (info->pri_bw_mhz == 2U) ? ((uint32_t)(info->pri_1mhz_chan_idx % 2U) * 1000000U) : 0U;
+    margin_hz = (int32_t)(op->bw_mhz - info->pri_bw_mhz) * 500000;
+    pri_hz = (int32_t)op->centre_freq_hz +
+             (int32_t)info->pri_1mhz_chan_idx * 1000000 - (int32_t)off_hz - margin_hz;
+
+    /* Prefer the regulatory entry at exactly the primary width/centre, else a
+     * 2 MHz entry containing it. Both satisfy the <=2 MHz scan validation. */
+    for (i = 0; i < list->num_channels; i++) {
+        const struct mmwlan_s1g_channel *e = &list->channels[i];
+        if (e->bw_mhz == info->pri_bw_mhz && (int32_t)e->centre_freq_hz == pri_hz) {
+            return e->s1g_chan_num;
+        }
+    }
+    for (i = 0; i < list->num_channels; i++) {
+        const struct mmwlan_s1g_channel *e = &list->channels[i];
+        if (e->bw_mhz == 2U) {
+            int32_t d = (int32_t)e->centre_freq_hz - pri_hz;
+            if (d > -1000000 && d < 1000000) {
+                scan = e;
+                break;
+            }
+        }
+    }
+    return (scan != NULL) ? scan->s1g_chan_num : 0;
+}
+
+/**
+ * Auto-learn the channel the association landed on and persist it, so the
+ * next join's association scans are restricted to a single channel (see
+ * halow_push_scan_config_locked). For wide AP channels the stored value is
+ * the BSS primary (<=2 MHz), the channel the beacon actually lives on.
+ * NVS is only touched when the value changed, so the per-cycle cold boot
+ * does not wear flash.
+ */
+static void halow_learn_join_channel_locked(void)
+{
+    struct mmwlan_vif_channel_info chan_info;
+    enum mmwlan_status status;
+    uint8_t scan_chan;
+
+    status = mmwlan_get_vif_channel_info(MMWLAN_VIF_STA, &chan_info);
+    if (status != MMWLAN_SUCCESS) {
+        LOG_DRV_DEBUG("HaLow join channel query failed: %d", (int)status);
+        return;
+    }
+    if (chan_info.s1g_chan_num == 0U || chan_info.s1g_chan_num > 0xFFU) {
+        return;
+    }
+
+    scan_chan = halow_join_scan_chan_from_info_locked(&chan_info);
+    if (scan_chan == 0U) {
+        LOG_DRV_DEBUG("HaLow join chan %u: no <=2MHz scan mapping, selective scan off",
+                      (unsigned)chan_info.s1g_chan_num);
+        return;
+    }
+    if (halow_netif_cfg.halow_cfg.join_channel == scan_chan) {
+        return;
+    }
+
+    halow_netif_cfg.halow_cfg.join_channel = scan_chan;
+    LOG_DRV_INFO("HaLow learned join scan channel %u (op chan %u pri %u/%u)",
+                 (unsigned)scan_chan, (unsigned)chan_info.s1g_chan_num,
+                 (unsigned)chan_info.pri_bw_mhz, (unsigned)chan_info.pri_1mhz_chan_idx);
+    (void)json_config_save_halow_join_channel(scan_chan);
 }
 
 static enum mmwlan_security_type halow_map_security(wireless_security_t security)
@@ -1130,6 +1255,39 @@ static int halow_apply_rate_override_locked(void)
     return 0;
 }
 
+/** Restrict this many association-scan attempts to the learned join channel
+ *  before the SDK falls back to the full channel list. */
+#define HALOW_JOIN_SELECTIVE_SCAN_ATTEMPTS (3U)
+
+/**
+ * Push the scan config, restricting the association scans to the auto-learned
+ * join channel when one is known (a full S1G sweep dominates the ~4.8 s join
+ * window; a single-channel scan cuts it to a fraction). The learned channel
+ * can go stale (AP moved, regdomain switched): if the SDK rejects the
+ * selection, retry once without it so dwell/NDP settings still apply and the
+ * join falls back to the full channel sweep on its own.
+ */
+static void halow_push_scan_config_locked(const struct mmwlan_scan_config *base,
+                                          uint8_t join_channel)
+{
+    struct mmwlan_scan_config cfg = *base;
+
+    if (join_channel != 0U) {
+        cfg.selected_channels = &join_channel;   /* SDK copies the list */
+        cfg.selected_channels_len = 1;
+        cfg.selective_scan_attempts = HALOW_JOIN_SELECTIVE_SCAN_ATTEMPTS;
+        if (mmwlan_set_scan_config(&cfg) == MMWLAN_SUCCESS) {
+            return;
+        }
+        LOG_DRV_WARN("HaLow join channel %u not applicable, falling back to full scan",
+                     (unsigned)join_channel);
+        cfg.selected_channels = NULL;
+        cfg.selected_channels_len = 0;
+        cfg.selective_scan_attempts = 0;
+    }
+    (void)mmwlan_set_scan_config(&cfg);
+}
+
 static int halow_apply_halow_hw_config_locked(void)
 {
     struct mmwlan_scan_config scan_cfg = MMWLAN_SCAN_CONFIG_INIT;
@@ -1147,7 +1305,7 @@ static int halow_apply_halow_hw_config_locked(void)
     scan_cfg.dwell_time_ms = halow_netif_cfg.halow_cfg.scan_dwell_ms;
     scan_cfg.ndp_probe_enabled = (halow_netif_cfg.halow_cfg.ndp_probe_enabled != 0);
     scan_cfg.home_channel_dwell_time_ms = MMWLAN_SCAN_DEFAULT_DWELL_ON_HOME_MS;
-    (void)mmwlan_set_scan_config(&scan_cfg);
+    halow_push_scan_config_locked(&scan_cfg, halow_netif_cfg.halow_cfg.join_channel);
 
     (void)halow_apply_rate_override_locked();
 
@@ -1812,6 +1970,8 @@ int mm_halow_netif_up(void)
         return -1;
     }
 
+    halow_learn_join_channel_locked();
+
     halow_state = NETIF_STATE_UP;
     osMutexRelease(halow_mutex);
     return 0;
@@ -2324,7 +2484,6 @@ int mm_halow_set_power_save(uint8_t enable)
 int mm_halow_set_scan_config(uint32_t dwell_ms, uint8_t ndp_probe_enabled)
 {
     struct mmwlan_scan_config scan_cfg = MMWLAN_SCAN_CONFIG_INIT;
-    enum mmwlan_status status;
 
     if (halow_mutex == NULL) {
         return -1;
@@ -2340,10 +2499,10 @@ int mm_halow_set_scan_config(uint32_t dwell_ms, uint8_t ndp_probe_enabled)
     scan_cfg.dwell_time_ms = dwell_ms;
     scan_cfg.ndp_probe_enabled = (ndp_probe_enabled != 0);
     scan_cfg.home_channel_dwell_time_ms = MMWLAN_SCAN_DEFAULT_DWELL_ON_HOME_MS;
-    status = mmwlan_set_scan_config(&scan_cfg);
+    halow_push_scan_config_locked(&scan_cfg, halow_netif_cfg.halow_cfg.join_channel);
     osMutexRelease(halow_mutex);
 
-    return (status == MMWLAN_SUCCESS) ? 0 : -1;
+    return 0;
 }
 
 unsigned mm_halow_regdomain_count(void)

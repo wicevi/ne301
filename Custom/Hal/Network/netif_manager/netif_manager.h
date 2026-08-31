@@ -222,6 +222,7 @@ typedef struct {
     int8_t rc_mcs;                          ///< TX MCS 0..9, or -1 (rate control default)
     int8_t rc_bw_mhz;                       ///< TX BW 1/2/4/8 MHz, or -1 (default)
     int8_t rc_gi;                           ///< GI: 0 short, 1 long, or -1 (default)
+    uint8_t join_channel;                   ///< Auto-learned S1G channel for join selective scan (0: off)
 } halow_wireless_config_t;
 #endif
 

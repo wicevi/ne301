@@ -179,6 +179,7 @@
         .halow_rc_bw_mhz = -1,
         .halow_rc_gi = -1,
         .halow_ps_mode = 0,
+        .halow_join_channel = 0,
 
          // PoE/Ethernet default configuration
          .poe = {
@@ -1575,11 +1576,22 @@ aicam_result_t json_config_save_poe_last_dhcp_ip(const uint8_t *ip_addr)
     }
 
     memcpy(g_json_config_ctx.current_config.network_service.poe.last_dhcp_ip, ip_addr, 4);
-    
+
     // Only save the last IP to NVS for quick recovery
     uint32_t ip_val = ((uint32_t)ip_addr[0] << 24) | ((uint32_t)ip_addr[1] << 16) |
                       ((uint32_t)ip_addr[2] << 8) | ip_addr[3];
     return json_config_nvs_write_uint32(NVS_KEY_POE_LAST_DHCP_IP, ip_val);
+}
+
+aicam_result_t json_config_save_halow_join_channel(uint8_t channel)
+{
+    if (!g_json_config_ctx.initialized)
+    {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    g_json_config_ctx.current_config.network_service.halow_join_channel = channel;
+    return json_config_nvs_write_uint32(NVS_KEY_HALOW_JOIN_CHANNEL, (uint32_t)channel);
 }
 
 const char* poe_status_code_to_string(poe_status_code_t status)

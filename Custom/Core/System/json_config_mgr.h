@@ -261,6 +261,8 @@ typedef struct {
     int32_t halow_rc_gi;
     /** HaLow chip power save: 0 disabled, 1 enabled. */
     uint8_t halow_ps_mode;
+    /** Auto-learned HaLow S1G join channel for selective scan (0: off). Not user-facing. */
+    uint8_t halow_join_channel;
 } network_service_config_t;
  
  // Power mode configuration structure
@@ -1087,6 +1089,13 @@ aicam_result_t json_config_set_poe_ip_mode(poe_ip_mode_t mode);
  * @return aicam_result_t Operation result
  */
 aicam_result_t json_config_save_poe_last_dhcp_ip(const uint8_t *ip_addr);
+
+/**
+ * @brief Save the auto-learned HaLow join channel (selective scan hint)
+ * @param channel S1G channel number (0 disables selective scan)
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_save_halow_join_channel(uint8_t channel);
 
 /**
  * @brief Get PoE status code string
