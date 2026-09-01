@@ -78,7 +78,12 @@
 #define FLUSH_MAX_BUDGET_MS    30000u  /* hard cap on one flush pass           */
 #define FLUSH_ACK_TIMEOUT_MS   3000u   /* per-ack wait in the sliding window   */
 #define FLUSH_WINDOW_MAX       16u     /* cap on in-flight parallel publishes  */
-#define CLEANUP_MAX_MS         10000u   /* bound cleanup_for_space (full-FS removes are slow) */
+/* Bound cleanup_for_space / cleanup_for_count. Full-FS littlefs removes are
+ * slow (each may trigger compaction for seconds), so this deadline decides
+ * how many records one pass can delete. 15 s max: the deadline only binds on
+ * a wedged/critically-full FS (healthy cleanups hit `enough` and return much
+ * earlier), and the wake path must not stretch beyond this. */
+#define CLEANUP_MAX_MS         15000u
 
 #define CAPTURES_ROOT           "/captures"
 #define CAPTURES_DIR_DATA       CAPTURES_ROOT "/data"
@@ -110,6 +115,17 @@ _Static_assert(IDX_ENTRY_SIZE == 36, "cap_idx_entry_t must be 36 bytes");
 
 /* Cleanup watermark (bytes) - keep this much head-room when wrapping. */
 #define CLEANUP_HEADROOM_BYTES  (2 * 1024u * 1024u)
+
+/* Orphan sweep (flush-worker janitor, see orphan_sweep_maybe): reclaim data
+ * files no live manifest entry points at. Bounded by design for the low-power
+ * wake path - ONE data/<date>/<hour> directory per pass, hard per-dir
+ * deadline, and rate-limited; a healthy pass costs one small readdir plus one
+ * day-manifest load (tens of ms). Faster cadence while storage_full so an
+ * incident's debris is reclaimed quickly. */
+#define ORPHAN_SWEEP_MAX_MS           2000u                    /* hard per-dir bound */
+#define ORPHAN_SWEEP_MIN_AGE_SEC      300u   /* skip ids a persist may still be writing */
+#define ORPHAN_SWEEP_INTERVAL_MS      (10u * 60u * 1000u)       /* healthy cadence */
+#define ORPHAN_SWEEP_INTERVAL_FULL_MS (60u * 1000u)             /* while storage_full */
 
 /* Persisted "storage full" flag (NVS_USER). Set when a capture write failed
  * for lack of space; cleared once a write succeeds. Persists across wakes so
@@ -720,6 +736,22 @@ static aicam_result_t write_meta_json(FS_Type_t fs, const char *path, cJSON *jso
     return r;
 }
 
+/* Best-effort removal of the files persist_record may have created so far.
+ * A half-persisted record never gets a manifest create entry, and count/list/
+ * cleanup are all manifest-driven - so without this, its files leak space
+ * forever as invisible orphans (2026-08-31 overnight wedge: ~40 partial
+ * cap_*_p.jpg files, each up to 160 KB). Missing files are fine - remove of
+ * a non-existent path just fails and is void-cast. */
+static void remove_partial_record_files(FS_Type_t fs, const char *pri_path,
+                                        const char *inf_path, const char *ai_path,
+                                        const char *meta_path)
+{
+    (void)disk_file_remove(fs, pri_path);
+    (void)disk_file_remove(fs, inf_path);
+    (void)disk_file_remove(fs, ai_path);
+    (void)disk_file_remove(fs, meta_path);
+}
+
 /* ==================== Persist a record ==================== */
 
 static aicam_result_t persist_record(FS_Type_t fs, const char *id,
@@ -752,18 +784,24 @@ static aicam_result_t persist_record(FS_Type_t fs, const char *id,
     aicam_result_t r = write_file(fs, pri_path, jpeg, jpeg_size);
     if (r != AICAM_OK) {
         LOG_SVC_ERROR("upload: write primary image failed: %s", pri_path);
+        /* Drop the partial file now: it has no manifest entry yet (appended
+         * only on full success below), so no later cleanup can see it to
+         * reclaim its space. */
+        (void)disk_file_remove(fs, pri_path);
         return r;
     }
 
     if (inf && inf_size > 0) {
         if (write_file(fs, inf_path, inf, inf_size) != AICAM_OK) {
             LOG_SVC_WARN("upload: write inference image failed: %s", inf_path);
+            (void)disk_file_remove(fs, inf_path);
             inf = NULL;
         }
     }
     if (ai_json && ai_json[0]) {
         if (write_file(fs, ai_path, (const uint8_t *)ai_json, (uint32_t)strlen(ai_json)) != AICAM_OK) {
             LOG_SVC_WARN("upload: write ai_result failed: %s", ai_path);
+            (void)disk_file_remove(fs, ai_path);
             ai_json = NULL;
         }
     }
@@ -780,12 +818,27 @@ static aicam_result_t persist_record(FS_Type_t fs, const char *id,
     if (!j) return AICAM_ERROR_NO_MEMORY;
     aicam_result_t rr = write_meta_json(fs, meta_path, j);
     cJSON_Delete(j);
-    if (rr != AICAM_OK) return rr;
+    if (rr != AICAM_OK) {
+        /* The meta .json is the record's root - without it the already-written
+         * data files are orphans nothing will ever reclaim. */
+        remove_partial_record_files(fs, pri_path, inf_path, ai_path, meta_path);
+        return rr;
+    }
 
     /* Append the create entry to the day's manifest so count/list can find
      * this record without opendir-ing thousands of files. */
     uint32_t ts = (uint32_t)(meta->timestamp ? meta->timestamp : now_unix());
-    (void)manifest_append(fs, id, (uint8_t)state, ts, jpeg_size);
+    if (manifest_append(fs, id, (uint8_t)state, ts, jpeg_size) != AICAM_OK) {
+        /* Files exist but the index entry does not: the record is invisible
+         * to count/list/flush forever AND the flash record cap stays below
+         * FLASH_MAX_RECORDS, disarming count-based wrap cleanup while the
+         * bytes stay consumed - this is exactly how the 2026-08-31 overnight
+         * wedge started. Remove the files and fail so the caller's reactive
+         * cleanup_for_space + retry path runs. */
+        LOG_SVC_ERROR("upload: manifest append failed id=%s - dropping partial record", id);
+        remove_partial_record_files(fs, pri_path, inf_path, ai_path, meta_path);
+        return AICAM_ERROR;
+    }
     g_count_cache_dirty = true;
     return AICAM_OK;
 }
@@ -1598,6 +1651,160 @@ static aicam_result_t purge_old_sent(FS_Type_t fs)
     return AICAM_OK;
 }
 
+/* ==================== Orphan sweep (manifest-less files) ==================== */
+
+/* Cursor for the incremental orphan sweep: walks data/<date>/<hour> dirs
+ * newest-date-first, hour 23→0, wrapping back to the newest date. RAM-only
+ * (a wake is a cold boot, so it restarts from the newest date each wake -
+ * fine: incident debris is always recent). */
+typedef struct {
+    char         date[12];
+    int          hour;
+    aicam_bool_t valid;
+} orphan_cursor_t;
+static orphan_cursor_t g_orphan_cursor;
+static uint64_t        g_orphan_sweep_last_ms;
+
+/* Parse "cap_<ts>_<seq>" out of a data file name and validate the suffix is
+ * one of _p.jpg / _i.jpg / _a.json. Returns the id length and fills id[]
+ * (NUL-terminated), or 0 if the name is not a record data file. */
+static size_t orphan_parse_file_name(const char *name, char *id, size_t id_cap)
+{
+    const char *us = strrchr(name, '_');
+    if (!us || us == name) return 0;
+    char sfx = us[1];
+    if (sfx == 'a') { if (strcmp(us + 2, ".json") != 0) return 0; }
+    else if (sfx == 'p' || sfx == 'i') {
+        if (strcmp(us + 2, ".jpg") != 0) return 0;
+    } else return 0;
+
+    size_t idlen = (size_t)(us - name);
+    /* "cap_" + ≥1 digit + '_' + ≥1 digit */
+    if (idlen < 7 || idlen + 1 > id_cap) return 0;
+    if (strncmp(name, "cap_", 4) != 0) return 0;
+    int underscores = 0;
+    for (size_t i = 4; i < idlen; i++) {
+        if (name[i] == '_') { underscores++; continue; }
+        if (name[i] < '0' || name[i] > '9') return 0;
+    }
+    if (underscores != 1) return 0;
+    memcpy(id, name, idlen);
+    id[idlen] = 0;
+    return idlen;
+}
+
+/* Sweep ONE data/<date>/<hour> dir, removing files whose id has no live entry
+ * in that date's manifest. Returns content bytes reclaimed. Refuses to touch
+ * a date whose manifest can't be loaded (missing/corrupt) - without a valid
+ * manifest, orphanhood can't be proven and a live record could be destroyed.
+ * Races: records land on disk before their manifest entry (persist_record
+ * appends last), so ids younger than ORPHAN_SWEEP_MIN_AGE_SEC are skipped -
+ * that also covers an in-flight persist in another thread. */
+static uint64_t orphan_sweep_pass(FS_Type_t fs)
+{
+    uint64_t freed = 0;
+    char (*dates)[12] = (char (*)[12])buffer_calloc(MAX_DATE_FILES, 12);
+    if (!dates) return 0;
+    int ndates = enumerate_date_files(fs, dates, MAX_DATE_FILES,
+                                      NULL, NULL, AICAM_TRUE);
+    if (ndates <= 0) { buffer_free(dates); return 0; }
+
+    if (!g_orphan_cursor.valid) {
+        snprintf(g_orphan_cursor.date, sizeof(g_orphan_cursor.date), "%s", dates[0]);
+        g_orphan_cursor.hour = 23;
+        g_orphan_cursor.valid = AICAM_TRUE;
+    }
+    int at = -1;
+    for (int i = 0; i < ndates; i++) {
+        if (strcmp(dates[i], g_orphan_cursor.date) == 0) { at = i; break; }
+    }
+    if (at < 0) {   /* date's .idx vanished (corrupt-drop) - re-anchor newest */
+        snprintf(g_orphan_cursor.date, sizeof(g_orphan_cursor.date), "%s", dates[0]);
+        g_orphan_cursor.hour = 23;
+        at = 0;
+    }
+
+    int nent = 0;
+    cap_idx_entry_t *ent = manifest_load_day(fs, g_orphan_cursor.date, &nent);
+    if (ent) {
+        char dir[96];
+        snprintf(dir, sizeof(dir), "%s/%s/%02d", CAPTURES_DIR_DATA,
+                 g_orphan_cursor.date, g_orphan_cursor.hour);
+        void *dd = disk_file_opendir(fs, dir);
+        if (dd) {
+            uint64_t deadline = rtc_get_uptime_ms() + ORPHAN_SWEEP_MAX_MS;
+            uint64_t now = now_unix();
+            int removed = 0;
+            dir_entry_t e;
+            while (disk_file_readdir(fs, dd, (char *)&e) > 0) {
+                if (rtc_get_uptime_ms() >= deadline) break;
+                const char *name = e.name;
+                if (name[0] == '.') continue;
+                /* Record data names are ≤ 27 chars ("cap_<10>_<5>_a.json");
+                 * the explicit bound also lets gcc prove the snprintf below
+                 * cannot truncate (dir_entry names can be up to 255). */
+                size_t nlen = strlen(name);
+                if (nlen > 32) continue;
+                char id[24];
+                if (orphan_parse_file_name(name, id, sizeof(id)) == 0) continue;
+
+                /* Age guard: a concurrent persist_record writes files before
+                 * appending the manifest entry - never reap fresh ids. */
+                unsigned long ts = 0;
+                if (sscanf(name, "cap_%lu_", &ts) == 1 && ts != 0 &&
+                    now < (uint64_t)ts + ORPHAN_SWEEP_MIN_AGE_SEC) continue;
+
+                int live = 0;
+                for (int k = 0; k < nent; k++) {
+                    if (strncmp(ent[k].id, id, sizeof(ent[k].id)) == 0) {
+                        live = 1; break;
+                    }
+                }
+                if (live) continue;
+
+                char path[352];
+                snprintf(path, sizeof(path), "%s/%s", dir, name);
+                struct stat st = {0};
+                if (disk_file_stat(fs, path, &st) != 0) continue;
+                if (disk_file_remove(fs, path) != 0) continue;
+                freed += (uint64_t)st.st_size;
+                removed++;
+            }
+            disk_file_closedir(fs, dd);
+            if (removed > 0) {
+                LOG_SVC_INFO("upload: orphan sweep %s/%02d removed %d files (%lu bytes)",
+                             g_orphan_cursor.date, g_orphan_cursor.hour,
+                             removed, (unsigned long)freed);
+            }
+        }
+        buffer_free(ent);
+    }
+
+    /* Advance regardless of outcome: hour 23→0, then the next older date,
+     * wrapping to the newest so the walk is continuous. */
+    if (--g_orphan_cursor.hour < 0) {
+        int next = (at + 1) % ndates;
+        snprintf(g_orphan_cursor.date, sizeof(g_orphan_cursor.date), "%s", dates[next]);
+        g_orphan_cursor.hour = 23;
+    }
+    buffer_free(dates);
+    return freed;
+}
+
+/* Rate-limited entry point, called from the flush worker only (never the
+ * capture hot path). One bounded dir per call; 60 s cadence while
+ * storage_full so incident debris is reclaimed fast, 10 min otherwise. */
+static void orphan_sweep_maybe(FS_Type_t fs)
+{
+    uint32_t interval = g_up.storage_full ? ORPHAN_SWEEP_INTERVAL_FULL_MS
+                                          : ORPHAN_SWEEP_INTERVAL_MS;
+    uint64_t now = rtc_get_uptime_ms();
+    if (g_orphan_sweep_last_ms != 0 &&
+        now - g_orphan_sweep_last_ms < interval) return;
+    g_orphan_sweep_last_ms = now;
+    (void)orphan_sweep_pass(fs);
+}
+
 /* ==================== Upload one record ==================== */
 
 /* Shared loader: parse metadata + load JPEG + reconstruct mqtt_image_metadata_t.
@@ -2206,6 +2413,12 @@ static bool record_self_heal_if_missing(FS_Type_t fs, const char *id)
 static void do_flush_pass(void)
 {
     if (g_up.active_fs == FS_MAX) return;
+
+    /* Offline janitor first (before the channel check - the uplink being down
+     * is exactly when records pile up and orphans matter). Bounded to one
+     * small dir per pass; see orphan_sweep_maybe. */
+    orphan_sweep_maybe(g_up.active_fs);
+
     if (!upload_channel_ready()) {
         UPLOAD_LOG("flush skipped, channel not ready\r\n");
         return;
