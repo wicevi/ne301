@@ -113,6 +113,7 @@ C_SOURCES += ../Custom/Services/Video/video_stream_hub.c
 
 # Custom - Hal
 C_SOURCES += ../Custom/Hal/ai_draw.c
+C_SOURCES += ../Custom/Hal/board_hw.c
 C_SOURCES += ../Custom/Hal/camera.c
 C_SOURCES += ../Custom/Hal/cat1.c
 C_SOURCES += ../Custom/Hal/codec.c

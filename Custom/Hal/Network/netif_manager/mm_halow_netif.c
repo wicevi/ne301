@@ -4,6 +4,7 @@
 #include <ctype.h>
 
 #include "mm_halow_netif.h"
+#include "board_hw.h"
 #include "chip_id_mac.h"
 #include "halow_platform_mac.h"
 #include "json_config_mgr.h"
@@ -447,6 +448,8 @@ static void halow_power_release(void)
 static void mm_halow_gpios_init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_TypeDef *wake_port = board_hw_halow_wake_port();
+    uint16_t wake_pin = board_hw_halow_wake_pin();
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
@@ -459,13 +462,13 @@ static void mm_halow_gpios_init(void)
     HAL_GPIO_Init(MM_HALOW_RESET_GPIO_Port, &GPIO_InitStruct);
     HAL_GPIO_WritePin(MM_HALOW_RESET_GPIO_Port, MM_HALOW_RESET_Pin, GPIO_PIN_RESET);
 
-    GPIO_InitStruct.Pin = MM_HALOW_WAKE_Pin;
-    HAL_GPIO_Init(MM_HALOW_WAKE_GPIO_Port, &GPIO_InitStruct);
+    GPIO_InitStruct.Pin = wake_pin;
+    HAL_GPIO_Init(wake_port, &GPIO_InitStruct);
     /*
      * Keep WAKE deasserted initially. The driver will assert it when required and
      * some HW/firmware combinations expect a low->high transition.
      */
-    HAL_GPIO_WritePin(MM_HALOW_WAKE_GPIO_Port, MM_HALOW_WAKE_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(wake_port, wake_pin, GPIO_PIN_SET);
 
     GPIO_InitStruct.Pin = MM_HALOW_SPI_IRQ_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
@@ -487,7 +490,7 @@ static void mm_halow_gpios_init(void)
 static void mm_halow_gpios_deinit(void)
 {
     HAL_GPIO_DeInit(MM_HALOW_RESET_GPIO_Port, MM_HALOW_RESET_Pin);
-    HAL_GPIO_DeInit(MM_HALOW_WAKE_GPIO_Port, MM_HALOW_WAKE_Pin);
+    HAL_GPIO_DeInit(board_hw_halow_wake_port(), board_hw_halow_wake_pin());
     HAL_GPIO_DeInit(MM_HALOW_SPI_IRQ_GPIO_Port, MM_HALOW_SPI_IRQ_Pin);
     HAL_GPIO_DeInit(MM_HALOW_BUSY_GPIO_Port, MM_HALOW_BUSY_Pin);
 

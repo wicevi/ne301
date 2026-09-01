@@ -6,6 +6,7 @@
  */
 
 #include "json_config_internal.h"
+#include "board_hw.h"
 #include "version.h"
 #include "buffer_mgr.h"
 #include "storage.h"
@@ -1728,8 +1729,14 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
         json_config_nvs_write_string(NVS_KEY_DEVICE_INFO_SERIAL, config->device_info.serial_number);
 
     result = json_config_nvs_read_string(NVS_KEY_DEVICE_INFO_HW_VER, config->device_info.hardware_version, sizeof(config->device_info.hardware_version));
-    if (result != AICAM_OK)
-        json_config_nvs_write_string(NVS_KEY_DEVICE_INFO_HW_VER, config->device_info.hardware_version);
+    if (result != AICAM_OK || config->device_info.hardware_version[0] == '\0') {
+        /* No factory-written hardware version: report the PE9 board strap band
+         * instead of materializing a default into NVS (a factory write later
+         * still takes precedence). */
+        strncpy(config->device_info.hardware_version, board_hw_version_str(),
+                sizeof(config->device_info.hardware_version) - 1);
+        config->device_info.hardware_version[sizeof(config->device_info.hardware_version) - 1] = '\0';
+    }
 
     // Software version is ALWAYS from compiled FW_VERSION_STRING, not from NVS
     // This ensures version is updated after OTA upgrade

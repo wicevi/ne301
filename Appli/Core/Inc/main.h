@@ -155,8 +155,17 @@ void _Error_Handler_(void);
 
 #define MM_HALOW_RESET_Pin GPIO_PIN_0
 #define MM_HALOW_RESET_GPIO_Port GPIOB
-#define MM_HALOW_WAKE_Pin GPIO_PIN_9
-#define MM_HALOW_WAKE_GPIO_Port GPIOD
+/* HaLow WAKE moved between board revisions: boards <= v1.2 wire it to PB2,
+ * boards >= v1.3 to PD9. Selected at runtime from the PE9 revision strap
+ * (Custom/Hal/board_hw.c), which can only tell the two bands apart. */
+#define MM_HALOW_WAKE_V12_Pin GPIO_PIN_2
+#define MM_HALOW_WAKE_V12_GPIO_Port GPIOB
+#define MM_HALOW_WAKE_V13_Pin GPIO_PIN_9
+#define MM_HALOW_WAKE_V13_GPIO_Port GPIOD
+
+/* Board revision strap: pull-down input, debounced high = v1.3 */
+#define MM_BOARD_REV_Pin GPIO_PIN_9
+#define MM_BOARD_REV_GPIO_Port GPIOE
 
 #define MM_HALOW_SPI_IRQn            (EXTI4_IRQn)
 #define MM_HALOW_SPI_IRQ_HANDLER     EXTI4_IRQHandler

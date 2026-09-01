@@ -7,6 +7,7 @@
  */
 
  #include "json_config_internal.h" // Includes all necessary headers
+#include "board_hw.h"
  #include "netif_manager.h"
  #include "buffer_mgr.h"
  #include "version.h"              // Centralized version info
@@ -640,6 +641,12 @@
      if (strlen(preserved_info.hardware_version) > 0)
      {
          strncpy(config->device_info.hardware_version, preserved_info.hardware_version,
+                 sizeof(config->device_info.hardware_version) - 1);
+     }
+     else
+     {
+         /* No factory-written hardware version: use the PE9 board strap band */
+         strncpy(config->device_info.hardware_version, board_hw_version_str(),
                  sizeof(config->device_info.hardware_version) - 1);
      }
 
