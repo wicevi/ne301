@@ -508,16 +508,36 @@ int morse_skbq_check_for_stale_tx(struct morse_skbq *mq)
 }
 
 
+static bool skbq_mmpkt_list_contains(struct mmpkt_list *list, struct mmpkt *mmpkt)
+{
+    struct mmpkt *pfirst, *pnext;
+
+    MMPKT_LIST_WALK(list, pfirst, pnext)
+    {
+        if (pfirst == mmpkt)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static int __skbq_cmd_finish(struct morse_skbq *mq, struct mmpkt *mmpkt)
 {
-    if (mq->pending.len > 0)
+    /*
+     * NE301 port patch: a command packet whose YAPS write failed was already
+     * released by morse_yaps_tx() (mmpkt_list_clear of skbq_failed). Only
+     * remove+release when the packet is really still queued, otherwise the
+     * stale pointer corrupts the pool (double release -> heap/list poisoning
+     * -> driver task spins -> watchdog reset).
+     */
+    if ((mq->pending.len > 0) && skbq_mmpkt_list_contains(&mq->pending, mmpkt))
     {
         mmpkt_list_remove(&mq->pending, mmpkt);
         mmpkt_release(mmpkt);
     }
-    else if (mq->skbq.len > 0)
+    else if ((mq->skbq.len > 0) && skbq_mmpkt_list_contains(&mq->skbq, mmpkt))
     {
-
         MMLOG_INF("Command pending queue empty. Removing from SKBQ.\n");
         mmpkt_list_remove(&mq->skbq, mmpkt);
         mmpkt_release(mmpkt);
