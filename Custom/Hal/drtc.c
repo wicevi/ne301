@@ -42,6 +42,10 @@ extern RTC_HandleTypeDef hrtc;
 
 static rtc_t g_rtc = {0};
 static uint64_t g_rtc_wakeup_timestamp = 0ULL;
+
+/* RTC rewrites with |delta| below this are skipped (same timezone): stepping
+ * the calendar for tiny drift can jump over the armed alarm second. */
+#define RTC_STEP_GUARD_SEC 2
 static uint8_t rtc_tread_stack[1024 * 32] ALIGN_32 IN_PSRAM;
 const osThreadAttr_t rtcTask_attributes = {
     .name = "rtcTask",
@@ -290,8 +294,12 @@ uint16_t rtc_get_timeMs(void)
         return 0;
 
     RTC_TimeTypeDef stimestructureget;
+    RTC_DateTypeDef sdatestructureget;
 
     HAL_RTC_GetTime(&hrtc, &stimestructureget, RTC_FORMAT_BCD);
+    /* ST HAL contract: GetDate must follow GetTime to unlock the calendar
+     * shadow register update — skipping it freezes the shadow values. */
+    HAL_RTC_GetDate(&hrtc, &sdatestructureget, RTC_FORMAT_BCD);
 
     // SubSeconds is a decrementing counter (255->0), convert to milliseconds (0-999)
     // Use same formula as rtc_get_time() for consistency
@@ -456,13 +464,34 @@ static void rtcProcess(void *argument)
 {
     rtc_t *rtc = (rtc_t *)argument;
     LOG_DRV_DEBUG("rtcProcess start\r\n");
+    uint32_t idle_loops = 0;
     for(;;){
         if(rtc->is_init){
+            uint8_t fired = 0;
             if (osSemaphoreAcquire(rtc->sem_sched1, 10) == osOK) {
                 scheduler_handle_event(&scheds[0], &g_rtc.sched_manager);
+                fired = 1;
             }
 
             if (osSemaphoreAcquire(rtc->sem_sched2, 10) == osOK) {
+                scheduler_handle_event(&scheds[1], &g_rtc.sched_manager);
+                fired = 1;
+            }
+
+            /* Fallback: with no alarm for ~30s (250 loops x ~120ms), run the
+             * scheduler anyway. The RTC alarm is an exact date+time match
+             * (RTC_ALARMMASK_NONE), so a clock step that jumps over the armed
+             * alarm second (e.g. SNTP correction) leaves it dead for up to a
+             * month — and this task is otherwise purely alarm-driven.
+             * scheduler_handle_event() is idempotent: with nothing due it only
+             * re-arms the alarm from the current time, so an expired job is
+             * caught up with at most ~30s lateness. Each idle iteration costs
+             * ~120ms (two 10ms semaphore timeouts + the 100ms delay below). */
+            if (fired) {
+                idle_loops = 0;
+            } else if (++idle_loops >= 250) {
+                idle_loops = 0;
+                scheduler_handle_event(&scheds[0], &g_rtc.sched_manager);
                 scheduler_handle_event(&scheds[1], &g_rtc.sched_manager);
             }
         }
@@ -637,7 +666,7 @@ void rtc_setup(int year, int month, int day, int hour, int minute, int second, i
 #endif
 }
 
-void rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours) 
+bool rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours)
 {
     char tmp[16] = {0};
     RTC_TIME_S rtc_time;
@@ -647,8 +676,20 @@ void rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours)
         g_rtc.sched_manager.timezone = g_rtc.timezone;
         snprintf(tmp, sizeof(tmp), "%d", g_rtc.timezone);
         storage_nvs_write(NVS_USER, TIMEZONE_NVS_KEY, tmp, strlen(tmp) + 1);
+    } else {
+        /* Same timezone: skip sub-2s rewrites. Stepping the RTC for drift
+         * risks jumping over the armed RTC-alarm second (exact date+time
+         * match), which kills the alarm — the capture scheduler is otherwise
+         * purely alarm-driven. Frequent sources (SNTP poll, every web page
+         * load auto-syncing browser time) make the step-over inevitable. */
+        int64_t delta = (int64_t)timestamp - (int64_t)rtc_get_timeStamp();
+        if (delta > -RTC_STEP_GUARD_SEC && delta < RTC_STEP_GUARD_SEC) {
+            LOG_DRV_DEBUG("rtc_setup_by_timestamp: skipped %lld s step\r\n", (long long)delta);
+            return false;
+        }
+        LOG_DRV_INFO("rtc_setup_by_timestamp: stepping RTC by %lld s\r\n", (long long)delta);
     }
-    timeStamp_to_time(timestamp, &rtc_time); 
+    timeStamp_to_time(timestamp, &rtc_time);
 
     int year, month, day, hour,minute, second, weekday;
 
@@ -661,11 +702,17 @@ void rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours)
     weekday = DEC_TO_BCD(rtc_time.dayOfWeek);
 
     rtc_setup(year, month, day, hour, minute, second, weekday);
+
+    /* RTC was stepped — the armed alarm targeted the old clock. Force the
+     * scheduler to recompute and re-arm it against the new time. */
+    rtc_trigger_scheduler_check(1);
+    rtc_trigger_scheduler_check(2);
+    return true;
 }
 
-void rtc_set_timeStamp(uint64_t timestamp) 
+bool rtc_set_timeStamp(uint64_t timestamp)
 {
-    rtc_setup_by_timestamp(timestamp, g_rtc.timezone);
+    return rtc_setup_by_timestamp(timestamp, g_rtc.timezone);
 }
 
 void rtc_set_timezone(int timezone_offset_hours) 

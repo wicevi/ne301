@@ -78,12 +78,24 @@ int wake_scheduler_due_events(uint64_t from_unix_sec,
  * @brief Persist that a duty was handled at the given absolute time.
  *        Subsequent due_events lookups will treat any event with
  *        due_unix_sec <= at_unix_sec as already-handled.
+ * @note The NVS write is deferred — callers must follow the final mark of a
+ *       processing cycle with wake_scheduler_flush_state() (before any long
+ *       drain/sleep) so the state survives a power cut.
  */
 void wake_scheduler_mark_handled(wake_duty_t duty, uint64_t at_unix_sec);
 
 /**
- * @brief Clear persisted last_handled_at state. Call this after RTC stepping
- *        (NTP / manual time change).
+ * @brief Write the deferred mark_handled state to NVS, if dirty.
+ *        Coalesces one wake cycle's capture + flush marks into a single
+ *        NVS append.
+ */
+void wake_scheduler_flush_state(void);
+
+/**
+ * @brief Clear last_handled_at state after the RTC was stepped to a new
+ *        clock scale. Always clears the in-RAM state; persists to NVS only
+ *        when the old markers sit AHEAD of the new clock (backward step) —
+ *        forward steps leave them harmlessly in the past, so no flash write.
  */
 void wake_scheduler_reset_state(void);
 

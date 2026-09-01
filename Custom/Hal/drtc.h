@@ -67,8 +67,10 @@ uint64_t rtc_get_timestamp_ms(void);
 uint64_t rtc_get_uptime_ms(void);
 void timeStamp_to_time(uint64_t timestamp, RTC_TIME_S *rtc_time);
 void rtc_setup(int year, int month, int day, int hour, int minute, int second, int weekday);
-void rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours);
-void rtc_set_timeStamp(uint64_t timestamp);
+/* Returns true if the RTC was actually stepped (|delta| >= RTC_STEP_GUARD_SEC
+ * or timezone changed); false if the sub-2s rewrite was skipped. */
+bool rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours);
+bool rtc_set_timeStamp(uint64_t timestamp);
 void rtc_set_timezone(int timezone_offset_hours);
 int rtc_get_timezone(void);
 int8_t usr_set_rtc_alarm(uint64_t wake_time);

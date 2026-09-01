@@ -1507,6 +1507,9 @@ aicam_result_t system_controller_register_io_trigger(system_controller_t *contro
              if (evs[i].duty == WAKE_DUTY_UPLOAD_FLUSH) need_flush   = AICAM_TRUE;
              wake_scheduler_mark_handled(evs[i].duty, evs[i].due_unix_sec);
          }
+         /* Single NVS write for the whole cycle, before the (potentially
+          * 30s+) drain below so the marks survive a power cut mid-drain. */
+         wake_scheduler_flush_state();
 
          if (need_flush) {
              (void)upload_coordinator_kick();
@@ -3208,6 +3211,7 @@ aicam_result_t system_service_poll_scheduled_flush(void)
             LOG_SVC_INFO("[WAKE] scheduled flush due (awake poll) at=%lu",
                          (unsigned long)evs[i].due_unix_sec);
             wake_scheduler_mark_handled(WAKE_DUTY_UPLOAD_FLUSH, evs[i].due_unix_sec);
+            wake_scheduler_flush_state();  /* before the drain below */
             {
                 uint32_t fb = upload_coordinator_get_flush_budget_ms();
                 (void)upload_coordinator_drain(fb > 30000 ? fb + 2000 : 30000);

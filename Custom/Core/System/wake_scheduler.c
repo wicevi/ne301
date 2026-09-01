@@ -26,6 +26,7 @@ typedef struct {
 } wake_state_nvs_t;
 
 static aicam_bool_t  s_state_loaded = AICAM_FALSE;
+static aicam_bool_t  s_state_dirty  = AICAM_FALSE;
 static wake_state_nvs_t s_state = { .magic = WAKE_STATE_MAGIC };
 
 static void load_state_if_needed(void)
@@ -374,24 +375,59 @@ void wake_scheduler_mark_handled(wake_duty_t duty, uint64_t at_unix_sec)
     load_state_if_needed();
     switch (duty) {
     case WAKE_DUTY_CAPTURE:
-        if (at_unix_sec > s_state.capture_handled_at) s_state.capture_handled_at = at_unix_sec;
+        if (at_unix_sec > s_state.capture_handled_at) {
+            s_state.capture_handled_at = at_unix_sec;
+            s_state_dirty = AICAM_TRUE;
+        }
         break;
     case WAKE_DUTY_UPLOAD_FLUSH:
-        if (at_unix_sec > s_state.flush_handled_at)   s_state.flush_handled_at   = at_unix_sec;
+        if (at_unix_sec > s_state.flush_handled_at) {
+            s_state.flush_handled_at = at_unix_sec;
+            s_state_dirty = AICAM_TRUE;
+        }
         break;
     default: return;
     }
+    /* NVS write is deferred to wake_scheduler_flush_state(): one wake cycle
+     * handles capture + flush, and each persist_state() is an NVS append
+     * (30-byte ate + data, eventually a 4K sector erase) — coalesce the two
+     * marks into a single write. Callers must flush soon after processing,
+     * before any long drain/sleep. */
+}
+
+void wake_scheduler_flush_state(void)
+{
+    if (!s_state_dirty) return;
+    s_state.magic = WAKE_STATE_MAGIC;
     persist_state();
+    s_state_dirty = AICAM_FALSE;
 }
 
 void wake_scheduler_reset_state(void)
 {
+    load_state_if_needed();
+
+    /* Old-scale markers only hurt when they sit AHEAD of the (new) clock -
+     * i.e. the clock stepped backwards: due_events would then suppress every
+     * event until wall time passes the marker (mark_handled never moves
+     * backwards to self-heal), and without persisting the clear, every reboot
+     * reloads the poison marker from NVS. Only that case is worth a flash
+     * write. After a FORWARD step the stale markers are in the past -
+     * harmless - so a persist would just burn one NVS write per cold-boot
+     * first time-sync. */
+    uint64_t now = rtc_get_timeStamp();
+    aicam_bool_t stale_ahead =
+        (s_state.capture_handled_at > now || s_state.flush_handled_at > now);
+
     s_state.magic = WAKE_STATE_MAGIC;
     s_state.capture_handled_at = 0;
     s_state.flush_handled_at = 0;
-    s_state_loaded = AICAM_TRUE;
-    persist_state();
-    LOG_CORE_INFO("wake_scheduler: state reset");
+    s_state_dirty = AICAM_FALSE;   /* drop any pending marks from the old scale */
+
+    if (stale_ahead) {
+        persist_state();
+        LOG_CORE_INFO("wake_scheduler: state reset (stale markers ahead of clock)");
+    }
 }
 
 void wake_scheduler_invalidate(void)

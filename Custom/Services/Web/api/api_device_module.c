@@ -1248,11 +1248,15 @@ aicam_result_t system_time_handler(http_handler_context_t *ctx) {
     cJSON_Delete(request_json);
     
     // Set system time using RTC
-    rtc_setup_by_timestamp(timestamp, timezone_offset_hours);
-
-    /* RTC stepped - invalidate wake_scheduler's last-handled-at state so
-     * we don't accidentally suppress freshly-due events on the new clock. */
-    wake_scheduler_reset_state();
+    /* rtc_setup_by_timestamp() skips sub-2s steps (the web frontend auto-syncs
+     * browser time on every page load) and re-arms the RTC alarm internally
+     * when the clock actually moves. Only a real step should invalidate
+     * wake_scheduler state — reset_state() writes NVS. */
+    if (rtc_setup_by_timestamp(timestamp, timezone_offset_hours)) {
+        /* RTC stepped - invalidate wake_scheduler's last-handled-at state so
+         * we don't accidentally suppress freshly-due events on the new clock. */
+        wake_scheduler_reset_state();
+    }
 
     // Get the actual set time for response
     uint64_t current_timestamp = rtc_get_timeStamp();
