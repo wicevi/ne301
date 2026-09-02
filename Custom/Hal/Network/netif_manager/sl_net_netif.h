@@ -117,6 +117,14 @@ int sl_net_nwp_ram_dump(uint32_t address, uint32_t length);
 int sl_net_nwp_print_thread_pc(uint8_t with_regs);
 
 void sli_firmware_error_callback(int error_code);
+
+/// @brief Real bus-write result for LWIP/transceiver RAW data packets, called by
+///        the SDK DATA-packet TX status handler (hal thread) with the outcome of
+///        sli_hal_si91x_send_packet_to_bus(). Feeds the consecutive bus-write
+///        failure detector in sl_net_netif.c (reset by any real write success,
+///        no time window — must not starve on idle traffic); non-OK means the
+///        chip never received the frame (wakeup failed / BUS_WRITE_ERROR).
+void sl_net_notify_bus_tx_failure(sl_status_t status);
 /***************************************************************************************************/
 
 #ifdef __cplusplus

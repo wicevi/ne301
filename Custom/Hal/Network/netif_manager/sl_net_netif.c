@@ -648,27 +648,101 @@ static void sl_net_low_level_input(struct netif *netif, uint8_t *b, uint16_t len
 /// @param netif Network interface
 /// @param p Data buffer
 /// @return Error code
-// A wedged host<->NWP pipe fails every raw TX with SL_STATUS_ALLOCATION_FAILED
+// A wedged host<->NWP pipe fails raw TX with SL_STATUS_ALLOCATION_FAILED
 // (0x19): the CE_DATA_POOL never frees, each send waits 1s for a buffer. Unlike
 // a dead NWP this never reaches the C1/C2 handshake timeout, so
 // sli_firmware_error_callback (the only recovery trigger) never fires and the
-// wedge persists until reboot (field log: 14h outage). Escalate to the existing
-// firmware-error recovery after N consecutive 0x19 failures.
-// Single-writer safe: lwIP calls linkoutput only from tcpip_thread.
-#define SL_NET_TX_WEDGE_THRESHOLD 30
-static uint32_t sl_net_tx_wedge_count = 0;
-static void sl_net_tx_failure_escalate(sl_status_t status)
+// wedge persists until reboot (field log: 14h outage).
+// ponytail: the first detector here counted CONSECUTIVE 0x19s and reset on any
+// OK — but a half-wedged pool leaks blocks back one at a time (the HAL thread
+// frees each TX block right after its bus-write attempt, even when the write
+// fails), so interleaved OKs kept the streak under the threshold forever
+// (field log 2026_09_01: 128 x 0x19 over ~5 min, zero recovery). The two
+// detectors below deliberately use different criteria:
+//   - 0x19: DENSITY over a 60s window (OKs ignored — alloc-OK is fake under a
+//     wedge). Covers a backed-up pool whatever the cause: write failures, slow
+//     writes that still succeed, firmware flow control.
+//   - bus-write failures: CONSECUTIVE count with no window, reset by a REAL bus
+//     write success. Covers "chip stopped accepting frames" at any traffic
+//     rate — a density window would starve on idle traffic (ARP/keepalive only,
+//     a few packets per minute). Earliest hard-death signal; fires before the
+//     pool has fully backed up.
+// Single-writer safe: lwIP calls linkoutput only from tcpip_thread; the bus
+// feed arrives only on the SDK hal thread.
+#define SL_NET_TX_WEDGE_WINDOW_MS 60000u ///< 0x19 failure-density window
+#define SL_NET_TX_WEDGE_THRESHOLD 10     ///< 0x19 (pool alloc) failures per window
+static uint32_t sl_net_tx_wedge_count        = 0;
+static uint32_t sl_net_tx_wedge_window_start = 0;
+
+/// Density window in ticks (osKernelGetTickCount domain).
+static uint32_t sl_net_wedge_window_ticks(void)
 {
-    if (status != SL_STATUS_ALLOCATION_FAILED) {
-        sl_net_tx_wedge_count = 0; // any success / other error resets the streak
+    return (uint32_t)((SL_NET_TX_WEDGE_WINDOW_MS * osKernelGetTickFreq()) / 1000u);
+}
+
+/// Restart the density window when it has expired.
+static bool sl_net_wedge_window_expired(uint32_t now, uint32_t window_start)
+{
+    return (uint32_t)(now - window_start) > sl_net_wedge_window_ticks();
+}
+
+/// Fire the firmware-recovery event once a detector has tripped.
+/// window_ms == 0 means a consecutive-failure detector (no time window).
+static void sl_net_tx_wedge_trigger(const char *source, uint32_t fail_count, uint32_t window_ms)
+{
+    if (sl_net_events == NULL) return;
+    if (remote_wakeup_mode != WAKEUP_MODE_NORMAL) {
+        // same guard as sli_firmware_error_callback; log it — a silently
+        // swallowed trigger is an investigation dead end.
+        LOG_DRV_ERROR("%s: %u TX failures%s, recovery suppressed (wakeup mode %d)\r\n",
+                      source, fail_count, window_ms ? " in window" : " in a row",
+                      remote_wakeup_mode);
         return;
     }
-    if (++sl_net_tx_wedge_count < SL_NET_TX_WEDGE_THRESHOLD) return;
-    sl_net_tx_wedge_count = 0;
-    if (remote_wakeup_mode != WAKEUP_MODE_NORMAL) return; // same guard as sli_firmware_error_callback
-    LOG_DRV_ERROR("raw TX pool exhausted %u times in a row, triggering firmware recovery\r\n",
-                  SL_NET_TX_WEDGE_THRESHOLD);
+    LOG_DRV_ERROR("%s: %u TX failures%s, triggering firmware recovery\r\n",
+                  source, fail_count, window_ms ? " in window" : " in a row");
     osEventFlagsSet(sl_net_events, SL_NET_EVENT_FIRMWARE_ERROR);
+}
+
+static void sl_net_tx_failure_escalate(sl_status_t status)
+{
+    uint32_t now = osKernelGetTickCount();
+    if (status != SL_STATUS_ALLOCATION_FAILED) {
+        return; // density signal: successes no longer reset the count
+    }
+    if (sl_net_wedge_window_expired(now, sl_net_tx_wedge_window_start)) {
+        sl_net_tx_wedge_count        = 0;
+        sl_net_tx_wedge_window_start = now;
+    }
+    if (++sl_net_tx_wedge_count < SL_NET_TX_WEDGE_THRESHOLD) return;
+    sl_net_tx_wedge_trigger("raw TX pool", sl_net_tx_wedge_count, SL_NET_TX_WEDGE_WINDOW_MS);
+    sl_net_tx_wedge_count        = 0;
+    sl_net_tx_wedge_window_start = now;
+}
+
+/// @brief Real bus-write result for LWIP/transceiver RAW data packets, fed from
+///        the SDK DATA-packet TX status handler on the HAL thread
+///        (sli_si91x_wifi_command_engine_config.c). A failure here means the
+///        chip never received the frame (wakeup failed / BUS_WRITE_ERROR).
+// ponytail: CONSECUTIVE count, no density window. A window starves on idle
+// traffic — an idle box doing only ARP/keepalive emits a few packets per minute
+// and can never reach N-failures/60s even with a dead chip (the field 0x19 log
+// only reached density because an MQTT reconnect storm fed it samples). Unlike
+// the 0x19 detector, the OK here is REAL (the bus write genuinely succeeded),
+// so a success may legitimately prove the pipe alive and reset the streak.
+// 5 consecutive write failures = the chip stopped accepting frames, at any
+// traffic rate.
+#define SL_NET_BUSFAIL_THRESHOLD 5
+static uint32_t sl_net_busfail_streak = 0;
+void sl_net_notify_bus_tx_failure(sl_status_t status)
+{
+    if (status == SL_STATUS_OK) {
+        sl_net_busfail_streak = 0; // real bus write succeeded — pipe alive
+        return;
+    }
+    if (++sl_net_busfail_streak < SL_NET_BUSFAIL_THRESHOLD) return;
+    sl_net_tx_wedge_trigger("bus write", sl_net_busfail_streak, 0);
+    sl_net_busfail_streak = 0;
 }
 static err_t sl_net_low_level_output(struct netif *netif, struct pbuf *p)
 {
