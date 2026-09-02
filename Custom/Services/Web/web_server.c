@@ -28,6 +28,7 @@
 #include "api_ota_module.h"
 #include "api_file_module.h"
 #include "web_recovery.h"
+#include "netif_manager.h"
 
 #define WEB_SERVER_STACK_SIZE (1024 * 32)
 #define WEB_SERVER_AP_SLEEP_TIMER_STACK_SIZE (1024 * 8)
@@ -57,6 +58,7 @@
  static aicam_result_t web_server_validate_request(http_handler_context_t* ctx);
  static aicam_result_t web_server_log_request(http_handler_context_t* ctx);
  static char *my_strdup(const char *s);
+ static void web_server_ap_client_event_cb(netif_ap_client_event_t event, const uint8_t mac_addr[6]);
 
  /* ==================== FreeRTOS Task Attributes ==================== */
  static osThreadAttr_t web_server_task_attributes = {
@@ -270,7 +272,19 @@ static void web_conn_forget(struct mg_connection *c)
     if (!g_web_server.ap_sleep_timer_thread) {
         return AICAM_ERROR_SERVICE_INIT;
     }
- 
+
+    /* Subscribe once per boot: AP client association refreshes the sleep
+     * countdown (see web_server_ap_client_event_cb). http_server_start may
+     * run again after a stop cycle; keep the registration, only log retries. */
+    static uint8_t ap_client_evt_subscribed = 0;
+    if (!ap_client_evt_subscribed) {
+        if (nm_subscribe_ap_client_event(web_server_ap_client_event_cb) == AICAM_OK) {
+            ap_client_evt_subscribed = 1;
+        } else {
+            LOG_SVC_ERROR("[WEB_SERVER] AP client event subscribe failed");
+        }
+    }
+
      return AICAM_OK;
  }
  
@@ -1069,6 +1083,23 @@ static char *my_strdup(const char *s) {
 
    memcpy(copy, s, len); 
    return copy;
+}
+
+/* ==================== AP Client Event Handling ==================== */
+
+/* Runs in the WiFi driver's event context (see netif_manager.h) — short and
+ * non-blocking only. A station associating with the AP restarts the sleep
+ * countdown so the device cannot fall asleep between the client joining and
+ * its first HTTP request (user connected but has not opened the web UI yet). */
+static void web_server_ap_client_event_cb(netif_ap_client_event_t event,
+                                          const uint8_t mac_addr[6])
+{
+    if (event == NETIF_AP_CLIENT_CONNECTED) {
+        LOG_SVC_INFO("[WEB_SERVER] AP client %02X:%02X:%02X:%02X:%02X:%02X connected, resetting AP sleep timer",
+                     mac_addr[0], mac_addr[1], mac_addr[2],
+                     mac_addr[3], mac_addr[4], mac_addr[5]);
+        web_server_ap_sleep_timer_reset();
+    }
 }
 
 /* ==================== AP Sleep Timer Management Functions ==================== */

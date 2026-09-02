@@ -283,6 +283,20 @@ typedef struct {
 /// @brief Wireless scan callback
 typedef void (*wireless_scan_callback_t)(int recode, wireless_scan_result_t *scan_result);
 
+/// @brief AP client (station) association event, reported by AP-capable netifs
+typedef enum {
+    NETIF_AP_CLIENT_CONNECTED    = 0,    ///< A station associated with our AP
+    NETIF_AP_CLIENT_DISCONNECTED = 1,    ///< A station left our AP
+} netif_ap_client_event_t;
+
+/// @brief AP client event callback. Invoked in the netif driver's event
+///        context — keep it short and non-blocking (store a timestamp / set
+///        a flag; no netif calls, no waits).
+/// @param event Association event kind
+/// @param mac_addr Station MAC, 6 bytes, only valid during the call
+typedef void (*netif_ap_client_event_cb_t)(netif_ap_client_event_t event,
+                                           const uint8_t mac_addr[6]);
+
 /// @brief Network interface status
 typedef struct {
     const char *if_name;                    // Network interface name
@@ -455,6 +469,25 @@ int nm_wireless_update_scan_result_ex(const char *if_name, uint32_t timeout);
 /// @param if_name Interface name (NULL for legacy Wi-Fi channel print)
 /// @param scan_result Scan result
 void nm_print_wireless_scan_result(const char *if_name, wireless_scan_result_t *scan_result);
+
+/// @brief Subscribe to AP client connect/disconnect events. Every registered
+///        callback is invoked for each event; the same callback may not be
+///        registered twice.
+/// @param cb Callback (non-NULL)
+/// @return AICAM_OK on success, negative aicam_result_t otherwise
+int nm_subscribe_ap_client_event(netif_ap_client_event_cb_t cb);
+
+/// @brief Remove an AP client event subscription
+/// @param cb Previously registered callback
+/// @return AICAM_OK on success, negative aicam_result_t otherwise
+int nm_unsubscribe_ap_client_event(netif_ap_client_event_cb_t cb);
+
+/// @brief Internal: fan an AP client event out to all subscribers. Called by
+///        the AP-capable netif implementation (sl_net_netif) from its SDK
+///        event handler — not part of the application API.
+/// @param event Association event kind
+/// @param mac_addr Station MAC, 6 bytes
+void nm_report_ap_client_event(netif_ap_client_event_t event, const uint8_t mac_addr[6]);
 
 #ifdef __cplusplus
 }

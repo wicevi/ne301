@@ -113,6 +113,75 @@ static void wireless_scan_callback_func(int recode, wireless_scan_result_t *scan
     }
 }
 
+/* ==================== AP Client Event Subscription ==================== */
+
+#define NM_AP_CLIENT_EVT_SUBSCRIBER_MAX  4
+
+static netif_ap_client_event_cb_t ap_client_event_cbs[NM_AP_CLIENT_EVT_SUBSCRIBER_MAX];
+
+int nm_subscribe_ap_client_event(netif_ap_client_event_cb_t cb)
+{
+    if (cb == NULL) return AICAM_ERROR_INVALID_PARAM;
+    if (netif_manager_mutex == NULL) return AICAM_ERROR_NOT_INITIALIZED;
+
+    osMutexAcquire(netif_manager_mutex, osWaitForever);
+    for (int i = 0; i < NM_AP_CLIENT_EVT_SUBSCRIBER_MAX; i++) {
+        if (ap_client_event_cbs[i] == cb) {
+            osMutexRelease(netif_manager_mutex);
+            return AICAM_OK;  /* already subscribed */
+        }
+    }
+    for (int i = 0; i < NM_AP_CLIENT_EVT_SUBSCRIBER_MAX; i++) {
+        if (ap_client_event_cbs[i] == NULL) {
+            ap_client_event_cbs[i] = cb;
+            osMutexRelease(netif_manager_mutex);
+            return AICAM_OK;
+        }
+    }
+    osMutexRelease(netif_manager_mutex);
+    LOG_DRV_WARN("AP client event subscriber table full (%d)", NM_AP_CLIENT_EVT_SUBSCRIBER_MAX);
+    return AICAM_ERROR_FULL;
+}
+
+int nm_unsubscribe_ap_client_event(netif_ap_client_event_cb_t cb)
+{
+    if (cb == NULL) return AICAM_ERROR_INVALID_PARAM;
+    if (netif_manager_mutex == NULL) return AICAM_ERROR_NOT_INITIALIZED;
+
+    osMutexAcquire(netif_manager_mutex, osWaitForever);
+    for (int i = 0; i < NM_AP_CLIENT_EVT_SUBSCRIBER_MAX; i++) {
+        if (ap_client_event_cbs[i] == cb) {
+            ap_client_event_cbs[i] = NULL;
+            osMutexRelease(netif_manager_mutex);
+            return AICAM_OK;
+        }
+    }
+    osMutexRelease(netif_manager_mutex);
+    return AICAM_ERROR_INVALID_PARAM;  /* not subscribed */
+}
+
+void nm_report_ap_client_event(netif_ap_client_event_t event, const uint8_t mac_addr[6])
+{
+    /* Snapshot under the lock, invoke outside it: subscribers stay free to
+     * call subscribe/unsubscribe from their own context, and a slow callback
+     * never blocks the registry. A callback may fire once more after its
+     * unsubscribe returns — subscribers must tolerate that. */
+    netif_ap_client_event_cb_t snapshot[NM_AP_CLIENT_EVT_SUBSCRIBER_MAX];
+
+    if (mac_addr == NULL) return;
+    if (netif_manager_mutex == NULL) return;
+
+    osMutexAcquire(netif_manager_mutex, osWaitForever);
+    memcpy(snapshot, ap_client_event_cbs, sizeof(snapshot));
+    osMutexRelease(netif_manager_mutex);
+
+    for (int i = 0; i < NM_AP_CLIENT_EVT_SUBSCRIBER_MAX; i++) {
+        if (snapshot[i] != NULL) {
+            snapshot[i](event, mac_addr);
+        }
+    }
+}
+
 #if NETIF_WIFI_HALOW_IS_ENABLE
 static void netif_cli_halow_dpp_cb(const mm_halow_dpp_evt_info_t *info, void *user_arg)
 {

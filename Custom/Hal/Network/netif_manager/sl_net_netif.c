@@ -2112,6 +2112,7 @@ static sl_status_t ap_connected_event_handler(sl_wifi_event_t event, void *data,
         dhcps_add_client_by_mac(mac_address->octet);
     }
 #endif
+    nm_report_ap_client_event(NETIF_AP_CLIENT_CONNECTED, mac_address->octet);
 
     return SL_STATUS_OK;
 }
@@ -2137,6 +2138,7 @@ static sl_status_t ap_disconnected_event_handler(sl_wifi_event_t event, void *da
         dhcps_del_client_by_mac(mac_address->octet);
     }
 #endif
+    nm_report_ap_client_event(NETIF_AP_CLIENT_DISCONNECTED, mac_address->octet);
 
     return SL_STATUS_OK;
 }
