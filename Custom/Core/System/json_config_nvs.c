@@ -695,6 +695,10 @@ aicam_result_t json_config_save_device_service_light_config_to_nvs(const light_c
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save light threshold to NVS");
 
+    result = json_config_nvs_write_bool(NVS_KEY_LIGHT_FILL_STREAMING, config->fill_light_while_streaming);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save light fill-while-streaming to NVS");
+
     LOG_CORE_INFO("Device service light configuration saved to NVS successfully");
     return result;
 }
@@ -1950,6 +1954,12 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
         config->device_service.light_config.light_threshold = temp_uint32;
     else
         json_config_nvs_write_uint32(NVS_KEY_LIGHT_THRESHOLD, config->device_service.light_config.light_threshold);
+
+    result = json_config_nvs_read_bool(NVS_KEY_LIGHT_FILL_STREAMING, &temp_bool);
+    if (result == AICAM_OK)
+        config->device_service.light_config.fill_light_while_streaming = temp_bool;
+    else
+        json_config_nvs_write_bool(NVS_KEY_LIGHT_FILL_STREAMING, config->device_service.light_config.fill_light_while_streaming);
 
     // Load ISP configuration
     result = json_config_nvs_read_bool(NVS_KEY_ISP_VALID, &temp_bool);

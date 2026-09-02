@@ -151,7 +151,8 @@
              .end_minute = 0,
              .brightness_level = 50,
              .auto_trigger_enabled = AICAM_TRUE,
-             .light_threshold = 30
+             .light_threshold = 30,
+             .fill_light_while_streaming = AICAM_FALSE
          }
      },
      
@@ -1149,8 +1150,8 @@
          return result;
      }
 
-     LOG_CORE_INFO("Device service light configuration updated: connected=%u, mode=%u, start_hour=%u, start_minute=%u, end_hour=%u, end_minute=%u, brightness_level=%u, auto_trigger_enabled=%u, light_threshold=%u",
-                   light_config->connected, light_config->mode, light_config->start_hour, light_config->start_minute, light_config->end_hour, light_config->end_minute, light_config->brightness_level, light_config->auto_trigger_enabled, light_config->light_threshold);
+     LOG_CORE_INFO("Device service light configuration updated: connected=%u, mode=%u, start_hour=%u, start_minute=%u, end_hour=%u, end_minute=%u, brightness_level=%u, auto_trigger_enabled=%u, light_threshold=%u, fill_light_while_streaming=%u",
+                   light_config->connected, light_config->mode, light_config->start_hour, light_config->start_minute, light_config->end_hour, light_config->end_minute, light_config->brightness_level, light_config->auto_trigger_enabled, light_config->light_threshold, light_config->fill_light_while_streaming);
      return AICAM_OK;
  }
 

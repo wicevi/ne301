@@ -115,6 +115,7 @@
  #define NVS_KEY_LIGHT_BRIGHTNESS        "light_brt"
  #define NVS_KEY_LIGHT_AUTO_TRIGGER      "light_auto"
  #define NVS_KEY_LIGHT_THRESHOLD         "light_thr"
+ #define NVS_KEY_LIGHT_FILL_STREAMING    "light_fill"
 
 // ISP configuration key names
 #define NVS_KEY_ISP_VALID               "isp_valid"

@@ -475,6 +475,24 @@ aicam_result_t api_response_error(http_handler_context_t* ctx,
     // - When fn_data is the server instance (&g_web_server)
     if (c->fn_data != NULL && c->pfn == NULL &&
         !c->is_listening && c->fn_data != &g_web_server) {
+        /* Streaming mode detached c->pfn, so MG_EV_HTTP_MSG never fires again
+         * and the idle-reaper's last_ms stays at ACCEPT time: a stream that
+         * outlives WEB_CONN_IDLE_TIMEOUT_MS (a ~3.8MB app package at
+         * ~125KB/s) is reaped on its FIRST post-completion poll - before the
+         * queued response can flush, since mg_iotest only asks for POLLOUT
+         * once send.len > 0 - and close_conn() discards the unsent response.
+         * Browser sees a failed XHR (0 B, ~30s) while the burn succeeded.
+         * Refresh on socket-progress events only: MG_EV_POLL fires every
+         * tick for open conns and would neuter the vanished-peer reap. */
+        if (ev == MG_EV_READ || ev == MG_EV_WRITE) {
+            web_conn_touch(c, osKernelGetTickCount());
+        }
+        /* Streaming CLOSE returns below before the lifecycle block's
+         * web_conn_forget() - without this the ACCEPT-time entry leaks one
+         * of the 16 table slots per transfer until reaping stops working. */
+        if (ev == MG_EV_CLOSE) {
+            web_conn_forget(c);
+        }
         // use POLL or READ event to drive data write
         // most Mongoose versions will trigger callbacks after POLL or each IO
         if (ota_is_upload_in_progress()) {

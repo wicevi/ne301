@@ -720,6 +720,7 @@ aicam_result_t device_light_config_handler(http_handler_context_t *ctx) {
         cJSON_AddBoolToObject(response_json, "connected", light_config.connected);
         cJSON_AddStringToObject(response_json, "mode", get_light_mode_string(light_config.mode));
         cJSON_AddNumberToObject(response_json, "brightness_level", light_config.brightness_level);
+        cJSON_AddBoolToObject(response_json, "fill_light_while_streaming", light_config.fill_light_while_streaming);
         //cJSON_AddBoolToObject(response_json, "auto_trigger_enabled", light_config.auto_trigger_enabled);
         //cJSON_AddNumberToObject(response_json, "light_threshold", light_config.light_threshold);
         
@@ -782,7 +783,13 @@ aicam_result_t device_light_config_handler(http_handler_context_t *ctx) {
                 return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Brightness level must be between 0 and 100");
             }
         }
-        
+
+        // Update fill-light-while-streaming mode if provided
+        cJSON* fill_item = cJSON_GetObjectItem(request_json, "fill_light_while_streaming");
+        if (fill_item && cJSON_IsBool(fill_item)) {
+            light_config.fill_light_while_streaming = cJSON_IsTrue(fill_item) ? AICAM_TRUE : AICAM_FALSE;
+        }
+
         // Update auto trigger if provided
         // cJSON* auto_trigger_item = cJSON_GetObjectItem(request_json, "auto_trigger_enabled");
         // if (auto_trigger_item && cJSON_IsBool(auto_trigger_item)) {
@@ -854,6 +861,7 @@ aicam_result_t device_light_config_handler(http_handler_context_t *ctx) {
         cJSON_AddStringToObject(response_json, "message", "Light configuration updated successfully");
         cJSON_AddStringToObject(response_json, "mode", get_light_mode_string(light_config.mode));
         cJSON_AddNumberToObject(response_json, "brightness_level", light_config.brightness_level);
+        cJSON_AddBoolToObject(response_json, "fill_light_while_streaming", light_config.fill_light_while_streaming);
         //cJSON_AddBoolToObject(response_json, "auto_trigger_enabled", light_config.auto_trigger_enabled);
         //cJSON_AddNumberToObject(response_json, "light_threshold", light_config.light_threshold);
         
@@ -875,74 +883,6 @@ aicam_result_t device_light_config_handler(http_handler_context_t *ctx) {
     } else {
         return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Only GET and POST methods are allowed");
     }
-}
-
-/**
- * @brief POST /api/v1/device/light/control - Manual light control
- */
-aicam_result_t device_light_control_handler(http_handler_context_t *ctx) {
-    if (!ctx) return AICAM_ERROR_INVALID_PARAM;
-    
-    // Only allow POST method
-    if (!web_api_verify_method(ctx, "POST")) {
-        return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Only POST method is allowed");
-    }
-    
-    // Check if device service is running
-    if (!is_device_service_running()) {
-        return api_response_error(ctx, API_ERROR_SERVICE_UNAVAILABLE, "Device service is not running");
-    }
-    
-    // Check if light is connected
-    if (!device_service_light_is_connected()) {
-        return api_response_error(ctx, API_ERROR_NOT_FOUND, "Light device is not connected");
-    }
-    
-    // Parse JSON request body
-    cJSON* request_json = web_api_parse_body(ctx);
-    if (!request_json) {
-        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Invalid JSON request body");
-    }
-    
-    // Extract enable flag
-    cJSON* enable_item = cJSON_GetObjectItem(request_json, "enable");
-    if (!enable_item || !cJSON_IsBool(enable_item)) {
-        cJSON_Delete(request_json);
-        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Missing or invalid 'enable' field");
-    }
-    
-    aicam_bool_t enable = cJSON_IsTrue(enable_item) ? AICAM_TRUE : AICAM_FALSE;
-    cJSON_Delete(request_json);
-    
-    // Control the light
-    aicam_result_t result = device_service_light_control(enable);
-    if (result != AICAM_OK) {
-        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to control light");
-    }
-    
-    // Create success response
-    cJSON* response_json = cJSON_CreateObject();
-    if (!response_json) {
-        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to create response");
-    }
-    
-    cJSON_AddStringToObject(response_json, "message", enable ? "Light turned on" : "Light turned off");
-    cJSON_AddBoolToObject(response_json, "enabled", enable);
-    
-    // Send response
-    char* json_string = cJSON_Print(response_json);
-    if (!json_string) {
-        cJSON_Delete(response_json);
-        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to serialize response");
-    }
-    
-    aicam_result_t api_result = api_response_success(ctx, json_string, "Light control executed successfully");
-    
-    // Cleanup
-    cJSON_Delete(response_json);
-    //hal_mem_free(json_string);
-    
-    return api_result;
 }
 
 /**
@@ -2316,13 +2256,6 @@ static const api_route_t device_module_routes[] = {
         .method = "POST",
         .path = API_PATH_PREFIX "/device/light/config",
         .handler = device_light_config_handler,
-        .require_auth = AICAM_TRUE,
-        .user_data = NULL
-    },
-    {
-        .method = "POST",
-        .path = API_PATH_PREFIX "/device/light/control",
-        .handler = device_light_control_handler,
         .require_auth = AICAM_TRUE,
         .user_data = NULL
     },

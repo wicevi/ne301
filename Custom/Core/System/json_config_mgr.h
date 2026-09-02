@@ -547,6 +547,9 @@ typedef struct {
     uint32_t brightness_level;               // brightness level (0-100)
     aicam_bool_t auto_trigger_enabled;       // auto trigger enabled
     uint32_t light_threshold;                // light threshold
+    aicam_bool_t fill_light_while_streaming; // keep the light in sync with this config while the
+                                             // device runs (regardless of stream viewers); runtime
+                                             // captures no longer flash it; wakeup path unaffected
 } light_config_t;
 
 typedef struct {
