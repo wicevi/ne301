@@ -605,7 +605,17 @@ int morse_yaps_hw_update_status(struct morse_yaps *yaps)
     {
         if (ret != -ENODEV)
         {
-            MMLOG_ERR("Error reading yaps status registers: %d\n", ret);
+            /* NE301 port patch: rate-limit to one line per second — this
+             * fires on every driver-task pass while the transport is down
+             * and used to flood the console at ~120 lines/s. */
+            static uint32_t last_err_print_ms = 0;
+            uint32_t now_ms = mmosal_get_time_ms();
+
+            if (last_err_print_ms == 0 || (uint32_t)(now_ms - last_err_print_ms) >= 1000)
+            {
+                last_err_print_ms = now_ms;
+                MMLOG_ERR("Error reading yaps status registers: %d\n", ret);
+            }
         }
         mmdrv_host_health_check_required();
         goto exit_unlock;

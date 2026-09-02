@@ -42,6 +42,12 @@ static mmtrace_channel yaps_channel_handle;
 
 #define CHIP_FULL_RECOVERY_TIMEOUT_MS 30
 
+/* NE301 port patch (class C wake recovery, from the 2.10.4 tree): sustained
+ * -ENOMEM on TX while the status registers read back all-zero is the
+ * signature of a chip that went back to sleep under a bus the host still
+ * considers awake. Escalate to a WAKE kick after this long. */
+#define MORSE_YAPS_ENOMEM_ESCALATE_MS (3000)
+
 
 #ifndef MAX_PKTS_PER_TX_TXN
 #define MAX_PKTS_PER_TX_TXN 16
@@ -272,13 +278,37 @@ static int morse_yaps_tx(struct morse_yaps *yaps, struct morse_skbq *mq)
             MMLOG_ERR("Insufficient memory for skb TX (TC_Q: %d)\n", tc_queue);
             mmpkt_list_append_list(&skbq_failed, &skbq_to_send);
 
-            MMOSAL_DEV_ASSERT(false);
+            /* NE301 port patch (class C wake recovery, from the 2.10.4 tree):
+             * upstream asserts here, which on this port resets the whole MCU.
+             * -ENOMEM is excluded from the consec-failure counter, so without
+             * this nothing else escalates: update_status "succeeds" against a
+             * sleeping chip (registers read back zero, pool count 0). Give the
+             * WAKE kick a 3 s window to revive the chip; one that will not
+             * wake gets a hw restart instead of a device reset. */
+            uint32_t now_ms = mmosal_get_time_ms();
+            if (yaps->enomem_since_ms == 0)
+            {
+                yaps->enomem_since_ms = now_ms;
+            }
+            else if (mmosal_time_has_passed(yaps->enomem_since_ms + MORSE_YAPS_ENOMEM_ESCALATE_MS))
+            {
+                MMLOG_ERR("queue %d un-writable for >%u ms - kicking WAKE\n",
+                          tc_queue,
+                          (unsigned)MORSE_YAPS_ENOMEM_ESCALATE_MS);
+                yaps->enomem_since_ms = now_ms;
+                if (!morse_ps_kick_wake(yaps->driverd))
+                {
+                    MMLOG_ERR("WAKE kick did not revive chip - requesting hw restart\n");
+                    mmdrv_host_hw_restart_required();
+                }
+            }
             break;
         }
 
         mmpkt_list_remove(&skbq_to_send, pfirst);
         if (ret == 0)
         {
+            yaps->enomem_since_ms = 0;
             mmpkt_list_append(&skbq_sent, pfirst);
         }
         else
@@ -454,6 +484,19 @@ void morse_yaps_work(struct driver_data *driverd)
         if (update_stat_rc)
         {
             MMLOG_WRN("YAPS HW update status failed with code %d\n", update_stat_rc);
+            /* NE301 port patch: the TX events above are polled with
+             * is_pending() and only their handlers clear them, and this goto
+             * skips those handlers — with a dead transport the driver task's
+             * inner event loop spanned at full speed (one status-read
+             * attempt every ~8 ms, forever), starving the evtloop recovery
+             * ladder and the watchdog feeder (field logs: ~3 s flood then a
+             * watchdog reset). Drop the stuck TX events instead: a chip in
+             * this state only recovers via hw_restart, which flushes these
+             * queues anyway, and fresh enqueues re-notify on their own. */
+            driver_task_notification_check_and_clear(driverd, DRV_EVT_TX_COMMAND_PEND);
+            driver_task_notification_check_and_clear(driverd, DRV_EVT_TX_BEACON_PEND);
+            driver_task_notification_check_and_clear(driverd, DRV_EVT_TX_MGMT_PEND);
+            driver_task_notification_check_and_clear(driverd, DRV_EVT_TX_DATA_PEND);
             goto exit_no_eval;
         }
     }
@@ -600,6 +643,7 @@ int morse_yaps_init(struct driver_data *driverd, struct morse_yaps *yaps, uint8_
 
     yaps->driverd = driverd;
     yaps->flags = flags;
+    yaps->enomem_since_ms = 0;
     driverd->chip_if->active_chip_if = MORSE_CHIP_IF_YAPS;
 
     if (yaps->flags & MORSE_CHIP_IF_FLAGS_DATA)

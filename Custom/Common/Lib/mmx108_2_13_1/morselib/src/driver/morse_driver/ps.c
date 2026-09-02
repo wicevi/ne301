@@ -40,6 +40,12 @@ static mmtrace_channel ps_evt_channel_handle;
 
 #define DEFAULT_BUS_TIMEOUT_MS (5)
 
+/* NE301 port patch (class C wake recovery, from the 2.10.4 tree): WAKE is a
+ * level veto line, so re-asserting an already-asserted pin gives the chip no
+ * new edge and it stays asleep. A kick must hold the line low for at least
+ * this long to guarantee a fresh low->high transition. */
+#define MORSE_PS_KICK_WAKE_LOW_MS (5)
+
 
 static struct driver_data *volatile ps_mors;
 
@@ -63,7 +69,19 @@ static void morse_ps_wait_after_wake_pin_raise(struct driver_data *driverd)
 
     if (!ok && hw_signals_wake)
     {
-        MMLOG_WRN("HW did not signal wake\n");
+        /* NE301 port patch (class C wake recovery, from the 2.10.4 tree): the
+         * semb wait covers the normal wakeup delay only. Poll the BUSY pin
+         * for a further full window before declaring the wake lost - this is
+         * the entry point of the "bus marked awake but chip unresponsive"
+         * wedge, and the moment the host first learns about it. */
+        uint32_t poll_until_ms = mmosal_get_time_ms() + max_boot_delay_ms;
+        while (!mmhal_wlan_busy_is_asserted() && !mmosal_time_has_passed(poll_until_ms))
+        {
+            mmosal_task_sleep(5);
+        }
+        ok = mmhal_wlan_busy_is_asserted();
+        /* ERR not WRN: the lib is built with MMLOG_LEVEL_ERR, WRN is stripped. */
+        MMLOG_ERR("WAKE asserted but HW did not signal wake (busy=%d)\n", ok);
     }
 }
 
@@ -200,6 +218,30 @@ void morse_ps_network_activity(struct driver_data *driverd)
     MMOSAL_MUTEX_GET_INF(driverd->ps.lock);
     morse_ps_update_timeout(driverd, driverd->ps.dynamic_ps_timout_ms);
     MMOSAL_MUTEX_RELEASE(driverd->ps.lock);
+}
+
+bool morse_ps_kick_wake(struct driver_data *driverd)
+{
+    bool revived = false;
+
+    MMOSAL_MUTEX_GET_INF(driverd->ps.lock);
+    if (!driverd->ps.suspended && !mmhal_wlan_busy_is_asserted())
+    {
+        MMLOG_ERR("Bus marked awake but chip unresponsive; re-asserting WAKE\n");
+        atomic_store(&driverd->ps.pending_wake, true);
+        mmhal_wlan_wake_deassert();
+        mmosal_task_sleep(MORSE_PS_KICK_WAKE_LOW_MS);
+        mmhal_wlan_wake_assert();
+        morse_ps_wait_after_wake_pin_raise(driverd);
+        morse_trns_set_irq_enabled(driverd, true);
+        driverd->ps.suspended = false;
+        atomic_store(&driverd->ps.pending_wake, false);
+        morse_ps_update_timeout(driverd, DEFAULT_BUS_TIMEOUT_MS);
+        revived = mmhal_wlan_busy_is_asserted();
+    }
+    MMOSAL_MUTEX_RELEASE(driverd->ps.lock);
+
+    return revived;
 }
 
 int morse_ps_set_dynamic_ps_timeout(struct driver_data *driverd, uint32_t timeout_ms)

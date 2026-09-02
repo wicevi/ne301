@@ -8,6 +8,7 @@
 
 #include "morse.h"
 #include "hw.h"
+#include "ps.h"
 #include "driver/driver.h"
 #include "driver/morse_driver/mm6108/pager_if.h"
 #include "driver/beacon/beacon.h"
@@ -186,7 +187,28 @@ void morse_hw_pager_update_consec_failure_cnt(struct driver_data *driverd, int r
         if (driverd->pageset_consec_failure_cnt > MAX_CONSEC_FAILURES)
         {
             driverd->pageset_consec_failure_cnt = 0;
-            mmdrv_host_health_check_required();
+            /* NE301 port patch: with the transport hard-dead (6 consecutive
+             * bus failures) the polite health-check ladder can never win —
+             * its command retries cost seconds while the host watchdog
+             * window is ~3 s, so the whole MCU reset instead (field logs:
+             * wedge -> ~3 s error flood -> FSBL, repeated all night).
+             * First try to revive the chip with a WAKE kick — a missed WAKE
+             * edge letting the chip doze back off under a marked-awake bus
+             * is the common wedge, and a successful kick avoids the ~2 s
+             * re-init entirely. Only a chip that will not wake escalates to
+             * a restart. The counter still resets on any single success, so
+             * transient blips never get here. */
+            if (morse_ps_kick_wake(driverd))
+            {
+                MMLOG_ERR("WAKE kick revived chip after %d consecutive transport failures\n",
+                          MAX_CONSEC_FAILURES + 1);
+            }
+            else
+            {
+                MMLOG_ERR("%d consecutive transport failures - requesting hw restart\n",
+                          MAX_CONSEC_FAILURES + 1);
+                mmdrv_host_hw_restart_required();
+            }
         }
     }
 }
