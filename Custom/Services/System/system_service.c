@@ -1004,6 +1004,13 @@ static void scheduled_interval_timer_callback(void *user_data)
   * @param timer_config Timer trigger configuration
   * @return AICAM_OK on success
   */
+/* Step-generation snapshot taken when the timer jobs were last (re)registered
+ * — consumed by check_rtc_step_reanchor_timer(). Boot-time U0 sync bumps the
+ * counter BEFORE registration, so a poll-side zero baseline would fire one
+ * spurious re-anchor every boot; anchoring here makes "changed since the jobs
+ * were registered" the exact condition. */
+static uint32_t s_timer_reg_step_gen = 0;
+
  static aicam_result_t apply_timer_trigger_config(system_controller_t *controller,
                                                  const timer_trigger_config_t *timer_config)
  {
@@ -1094,6 +1101,10 @@ static void scheduled_interval_timer_callback(void *user_data)
      if (result == AICAM_OK) {
          controller->timer_trigger_active = AICAM_TRUE;
          controller->timer_task_count = 0;
+         /* Jobs now live on the current clock scale — re-baseline the step
+          * detector. A step landing inside this same call is swallowed, but
+          * its own rtc_trigger_scheduler_check already re-armed the alarms. */
+         s_timer_reg_step_gen = rtc_step_generation();
      }
      
      return result;
@@ -3190,6 +3201,35 @@ aicam_result_t system_service_request_sleep(uint32_t duration_sec)
 }
 
 /**
+ * @brief Re-anchor the RTC capture timer when the clock scale changed since
+ *        the jobs were last registered (NTP correction, U0 sync, manual set,
+ *        timezone change). The scheduler walks interval jobs back after a
+ *        backward step, but the SCHEDULED capture mode registers a
+ *        REPEAT_ONCE absolute point that keeps the old clock scale until
+ *        wall time reaches it — only re-registering from config re-derives
+ *        the lattice on the new clock. Runs from the awake poll (~15s),
+ *        which executes during both power modes' awake periods; low-power
+ *        sleep is covered by cold-boot re-registration instead.
+ */
+static void check_rtc_step_reanchor_timer(void)
+{
+    system_controller_t *controller = g_system_service_ctx.controller;
+    /* controller->timer_trigger_active tracks apply success precisely (the
+     * ctx-level flag goes stale across set_work_config reconfiguration). */
+    if (!controller || !controller->is_initialized ||
+        !controller->timer_trigger_active) {
+        return;  /* nothing registered - nothing to re-anchor */
+    }
+
+    if (rtc_step_generation() == s_timer_reg_step_gen) {
+        return;
+    }
+
+    LOG_SVC_INFO("RTC clock stepped - re-anchoring timer trigger from config");
+    (void)system_service_apply_timer_trigger_config();
+}
+
+/**
  * @brief Poll for a scheduled upload-flush node that's due now, while awake.
  *        Covers FULL_SPEED mode and LOW_POWER awake periods that span a
  *        scheduled node without a dedicated wake (the wake path only fires on
@@ -3199,6 +3239,10 @@ aicam_result_t system_service_request_sleep(uint32_t duration_sec)
 aicam_result_t system_service_poll_scheduled_flush(void)
 {
     if (!g_system_service_ctx.is_initialized) return AICAM_ERROR_NOT_INITIALIZED;
+
+    /* Re-anchor capture jobs first so both duties run on the clock the
+     * flush-node window below is about to evaluate against. */
+    check_rtc_step_reanchor_timer();
 
     uint64_t now = rtc_get_timeStamp();
     wake_event_t evs[WAKE_DUTY_MAX];

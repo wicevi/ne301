@@ -636,7 +636,18 @@ static void rtc_cmd_register(void)
     debug_cmdline_register(rtc_cmd_table, sizeof(rtc_cmd_table) / sizeof(rtc_cmd_table[0]));
 }
 
-void rtc_setup(int year, int month, int day, int hour, int minute, int second, int weekday)
+/* Bumped on every calendar write — rtc_setup is the single writer, so real
+ * steps (both directions), timezone re-anchors (calendar rewritten under the
+ * new offset) and CLI setdate all land here. RAM-only, starts at 0 each boot:
+ * consumers compare against their boot-time baseline to detect a scale change. */
+static volatile uint32_t s_rtc_step_gen = 0;
+
+uint32_t rtc_step_generation(void)
+{
+    return s_rtc_step_gen;
+}
+
+static void rtc_setup_ex(int year, int month, int day, int hour, int minute, int second, int weekday, bool push_u0)
 {
     RTC_TimeTypeDef sTime = {0};
     RTC_DateTypeDef sDate = {0};
@@ -662,11 +673,23 @@ void rtc_setup(int year, int month, int day, int hour, int minute, int second, i
         Error_Handler();
     }
 #if ENABLE_U0_MODULE
-    u0_module_update_rtc_time();
+    /* Pushing the new time to U0 costs one bridging transaction. Skip it
+     * when the value itself came FROM U0 (boot sync): the round trip adds
+     * boot-window traffic (U0 comm there is already congested and flaky)
+     * and would set U0's clock back by the transaction latency. */
+    if (push_u0) {
+        u0_module_update_rtc_time();
+    }
 #endif
+    s_rtc_step_gen++;
 }
 
-bool rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours)
+void rtc_setup(int year, int month, int day, int hour, int minute, int second, int weekday)
+{
+    rtc_setup_ex(year, month, day, hour, minute, second, weekday, true);
+}
+
+static bool rtc_setup_by_timestamp_ex(uint64_t timestamp, int timezone_offset_hours, bool push_u0)
 {
     char tmp[16] = {0};
     RTC_TIME_S rtc_time;
@@ -684,10 +707,10 @@ bool rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours)
          * load auto-syncing browser time) make the step-over inevitable. */
         int64_t delta = (int64_t)timestamp - (int64_t)rtc_get_timeStamp();
         if (delta > -RTC_STEP_GUARD_SEC && delta < RTC_STEP_GUARD_SEC) {
-            LOG_DRV_DEBUG("rtc_setup_by_timestamp: skipped %lld s step\r\n", (long long)delta);
+            LOG_DRV_DEBUG("rtc_setup_by_timestamp: skipped %d s step\r\n", (int)delta);
             return false;
         }
-        LOG_DRV_INFO("rtc_setup_by_timestamp: stepping RTC by %lld s\r\n", (long long)delta);
+        LOG_DRV_INFO("rtc_setup_by_timestamp: stepping RTC by %d s\r\n", (int)delta);
     }
     timeStamp_to_time(timestamp, &rtc_time);
 
@@ -701,7 +724,7 @@ bool rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours)
     second = DEC_TO_BCD(rtc_time.second);
     weekday = DEC_TO_BCD(rtc_time.dayOfWeek);
 
-    rtc_setup(year, month, day, hour, minute, second, weekday);
+    rtc_setup_ex(year, month, day, hour, minute, second, weekday, push_u0);
 
     /* RTC was stepped — the armed alarm targeted the old clock. Force the
      * scheduler to recompute and re-arm it against the new time. */
@@ -710,9 +733,22 @@ bool rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours)
     return true;
 }
 
+bool rtc_setup_by_timestamp(uint64_t timestamp, int timezone_offset_hours)
+{
+    return rtc_setup_by_timestamp_ex(timestamp, timezone_offset_hours, true);
+}
+
 bool rtc_set_timeStamp(uint64_t timestamp)
 {
-    return rtc_setup_by_timestamp(timestamp, g_rtc.timezone);
+    return rtc_setup_by_timestamp_ex(timestamp, g_rtc.timezone, true);
+}
+
+/* U0-sync entry: same gate (step guard, scheduler re-check, step generation)
+ * but does NOT push the result back to U0 — the value came from there, and
+ * bridging traffic in the boot window must stay minimal. */
+bool rtc_set_timeStamp_from_u0(uint64_t timestamp)
+{
+    return rtc_setup_by_timestamp_ex(timestamp, g_rtc.timezone, false);
 }
 
 void rtc_set_timezone(int timezone_offset_hours) 

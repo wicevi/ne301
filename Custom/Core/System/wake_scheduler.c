@@ -335,37 +335,48 @@ int wake_scheduler_due_events(uint64_t from_unix_sec, uint64_t to_unix_sec,
     uint64_t cap_handled = get_handled_at(WAKE_DUTY_CAPTURE);
     uint64_t flu_handled = get_handled_at(WAKE_DUTY_UPLOAD_FLUSH);
 
-    int n = 0;
+    /* One event PER DUTY (the header contract): every consumer only needs to
+     * know whether a duty falls in the window plus one timestamp to mark
+     * handled. Emitting every lattice point starves the second duty once the
+     * first fills the caller's small buffer — e.g. a 1-minute capture
+     * interval keeps >=2 capture events inside the ±60s poll window, the
+     * WAKE_DUTY_MAX-sized buffer filled with capture events alone, and the
+     * flush event was silently dropped: scheduled upload never fired in
+     * full-speed mode. Use the LATEST unfiltered event per duty — the
+     * handled markers are monotonic maxima, so marking the latest suppresses
+     * every earlier one as well. */
+    uint64_t cap_due = 0, flu_due = 0;
 
-    /* Capture events */
     uint64_t cap_times[8];
     int n_cap = collect_capture_in_range(from_unix_sec, to_unix_sec, cap_times, 8);
-    for (int i = 0; i < n_cap && n < max_events; i++) {
+    for (int i = 0; i < n_cap; i++) {
         if (cap_times[i] <= cap_handled) continue;
-        out_events[n].duty = WAKE_DUTY_CAPTURE;
-        out_events[n].due_unix_sec = cap_times[i];
-        n++;
+        if (cap_times[i] > cap_due) cap_due = cap_times[i];
     }
 
-    /* Upload-flush events */
     uint64_t flu_times[8];
     int n_flu = collect_upload_in_range(from_unix_sec, to_unix_sec, flu_times, 8);
-    for (int i = 0; i < n_flu && n < max_events; i++) {
+    for (int i = 0; i < n_flu; i++) {
         if (flu_times[i] <= flu_handled) continue;
-        out_events[n].duty = WAKE_DUTY_UPLOAD_FLUSH;
-        out_events[n].due_unix_sec = flu_times[i];
-        n++;
+        if (flu_times[i] > flu_due) flu_due = flu_times[i];
     }
 
-    /* simple insertion sort by due time (n is small) */
-    for (int i = 1; i < n; i++) {
-        wake_event_t tmp = out_events[i];
-        int j = i - 1;
-        while (j >= 0 && out_events[j].due_unix_sec > tmp.due_unix_sec) {
-            out_events[j + 1] = out_events[j];
-            j--;
-        }
-        out_events[j + 1] = tmp;
+    int n = 0;
+    if (cap_due != 0 && n < max_events) {
+        out_events[n].duty = WAKE_DUTY_CAPTURE;
+        out_events[n].due_unix_sec = cap_due;
+        n++;
+    }
+    if (flu_due != 0 && n < max_events) {
+        out_events[n].duty = WAKE_DUTY_UPLOAD_FLUSH;
+        out_events[n].due_unix_sec = flu_due;
+        n++;
+    }
+    /* keep output sorted by due time (n <= 2) */
+    if (n == 2 && out_events[0].due_unix_sec > out_events[1].due_unix_sec) {
+        wake_event_t tmp = out_events[0];
+        out_events[0] = out_events[1];
+        out_events[1] = tmp;
     }
     return n;
 }

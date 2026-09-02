@@ -61,7 +61,12 @@ uint64_t wake_scheduler_next_event(uint64_t now_unix_sec,
 uint64_t wake_scheduler_next_flush(uint64_t now_unix_sec);
 
 /**
- * @brief Collect all distinct (by duty) events in [from, to].
+ * @brief Collect the distinct (by duty) events in [from, to] — at most ONE
+ *        event per duty, the latest one not yet marked handled. Consumers
+ *        only need "is this duty due" plus a timestamp to mark; returning
+ *        every lattice point would starve the second duty in small caller
+ *        buffers (1-min capture intervals filled the buffer with capture
+ *        events alone and the flush event was dropped).
  *        Skips events whose due_unix_sec <= last_handled_at[duty].
  * @param from_unix_sec  inclusive start
  * @param to_unix_sec    inclusive end
