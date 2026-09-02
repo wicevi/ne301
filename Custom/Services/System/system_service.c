@@ -1999,16 +1999,13 @@ static aicam_result_t configure_pir_sensor(system_controller_t *controller)
     ms_bridging_pir_cfg_t pir_cfg = {0};
     pir_cfg.sensitivity_level = controller->work_config.pir_trigger.sensitivity_level;
     if (pir_cfg.sensitivity_level == 0) {
-        pir_cfg.sensitivity_level = 30;  // Default if not configured
+        pir_cfg.sensitivity_level = 30;  // Default if not configured (web enforces 10-255, 0 only from degenerate configs)
     }
+    // ignore_time_s == 0 (0.5s) and pulse_count == 0 (1 pulse, web stores value-1)
+    // are legal register values selectable from the web UI - no override here.
+    // Defaults are guaranteed by the NVS base (json_config_mgr.c default_config).
     pir_cfg.ignore_time_s = controller->work_config.pir_trigger.ignore_time_s;
-    if (pir_cfg.ignore_time_s == 0 && controller->work_config.pir_trigger.enable) {
-        pir_cfg.ignore_time_s = 7;  // Default if not configured
-    }
     pir_cfg.pulse_count = controller->work_config.pir_trigger.pulse_count;
-    if (pir_cfg.pulse_count == 0) {
-        pir_cfg.pulse_count = 1;  // Default if not configured
-    }
     pir_cfg.window_time_s = controller->work_config.pir_trigger.window_time_s;
     pir_cfg.motion_enable = 1;         // Enable motion detection
     pir_cfg.interrupt_src = 0;          // Interrupt source: 0 = motion detection
