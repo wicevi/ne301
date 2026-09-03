@@ -434,7 +434,7 @@ ISP_AppliHelpersTypeDef appliHelpers = {
 void buffer_reset(pipe_buffer_t *bufs, int nb, camera_dq_t *dq)
 {
     for (int i = 0; i < nb; ++i) {
-        for (int j = 0; j < CAMERA_BUF_MAX_OWNERS; ++j) bufs[i].owner_list[i] = NULL;
+        for (int j = 0; j < CAMERA_BUF_MAX_OWNERS; ++j) bufs[i].owner_list[j] = NULL;
         bufs[i].owner_count = 0;
         bufs[i].return_count = 0;
         bufs[i].is_locked = 0;
@@ -525,6 +525,11 @@ pipe_buffer_t* buffer_get_latest_ready(pipe_buffer_t *bufs, int nb, camera_dq_t 
                     break;
                 }
             }
+            /* Record the new owner or the duplicate check above can only
+               ever see owner_list[0], letting one thread double-acquire and
+               comparing against stale/uninitialized entries. */
+            if (latest != NULL)
+                latest->owner_list[latest->owner_count] = requester;
         } else {
             latest = NULL;
         }
@@ -1918,6 +1923,11 @@ static int pipe_buffer_acquire(pipe_buffer_t *pipe_buffer, pipe_params_t *pipe_p
     // dq->ready_queue = osMessageQueueNew(pipe_param->buffer_nb, sizeof(uint32_t), NULL);
     // dq->idle_sem = osSemaphoreNew(pipe_param->buffer_nb, pipe_param->buffer_nb, NULL);
 
+    /* The array comes from hal_mem_alloc_fast (uninitialized heap): clear the
+       owner fields too, or buffer_get_latest_ready's duplicate scan reads
+       garbage until the first buffer_release_isr happens to clear them. */
+    buffer_reset(pipe_buffer, pipe_param->buffer_nb, dq);
+
     return 0;
 }
 
@@ -2004,8 +2014,6 @@ static int camera_deinit(void *priv)
     }
     CMW_CAMERA_DeInit();
     camera->is_init = false;
-    pwr_manager_release(camera->pwr_handle);
-    osSemaphoreRelease(camera->sem_isp);
     osDelay(CAMERA_DEINIT_DELAY_MS);
     if (camera->camera_processId != NULL) {
         osThreadTerminate(camera->camera_processId);
