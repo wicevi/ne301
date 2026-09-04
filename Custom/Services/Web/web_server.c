@@ -486,6 +486,11 @@ aicam_result_t api_response_error(http_handler_context_t* ctx,
          * tick for open conns and would neuter the vanished-peer reap. */
         if (ev == MG_EV_READ || ev == MG_EV_WRITE) {
             web_conn_touch(c, osKernelGetTickCount());
+            /* Socket progress also keeps the AP sleep timer alive: this
+             * stream never fires MG_EV_HTTP_MSG, so without this a body
+             * transfer longer than the low-power 90 s window is killed by
+             * a mid-flight sleep. */
+            web_server_ap_sleep_timer_reset();
         }
         /* Streaming CLOSE returns below before the lifecycle block's
          * web_conn_forget() - without this the ACCEPT-time entry leaks one
@@ -1141,35 +1146,43 @@ aicam_result_t web_server_ap_sleep_timer_reset(void)
     if (!g_web_server.initialized) {
         return AICAM_ERROR_NOT_INITIALIZED;
     }
-    
-    if (g_web_server.ap_sleep_enabled) {
-        g_web_server.last_request_time = get_relative_timestamp();
-    }
-    
+
+    /* Unconditional: last_request_time is THE web-activity timestamp. It
+     * feeds both the AP sleep countdown and the low-power 90 s web-idle
+     * sleep check, so it must keep refreshing even when the AP sleep
+     * feature is disabled — system sleep is a separate config. */
+    g_web_server.last_request_time = get_relative_timestamp();
+
     return AICAM_OK;
 }
 
 aicam_result_t web_server_ap_sleep_timer_check(void)
 {
-    if (!g_web_server.initialized || !g_web_server.ap_sleep_enabled ) {
-        return AICAM_OK; // Not enabled, no action needed
+    if (!g_web_server.initialized) {
+        return AICAM_OK; // Not initialized, no action needed
     }
-    
+
     uint64_t current_time = get_relative_timestamp();
     uint64_t time_since_last_request = current_time - g_web_server.last_request_time;
 
     //get current power mode
     power_mode_t current_power_mode = system_service_get_current_power_mode();
-    
+
 
     if(time_since_last_request >= 90 && current_power_mode == POWER_MODE_LOW_POWER) {
-        //enter sleep mode
+        //enter sleep mode — system sleep is a SEPARATE config from AP sleep:
+        // it must keep triggering even when the AP sleep feature is disabled
         LOG_SVC_INFO("[WEB_SERVER] AP sleep timeout reached (90s) in low power mode, entering sleep");
         system_service_task_completed();
-        
+
         return AICAM_OK;
     }
-    else if(g_web_server.ap_sleep_timeout == 0) {
+
+    if (!g_web_server.ap_sleep_enabled ) {
+        return AICAM_OK; // AP sleep feature disabled — everything below is AP-sleep behavior only
+    }
+
+    if(g_web_server.ap_sleep_timeout == 0) {
         // no sleep timeout, keep AP running
         return AICAM_OK;
     }
