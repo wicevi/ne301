@@ -1479,6 +1479,13 @@ aicam_result_t json_config_set_video_stream_mode(const video_stream_mode_config_
     if (result != AICAM_OK) LOG_CORE_ERROR("Failed to save RTSP password");
 
     LOG_CORE_INFO("Video stream mode configuration saved");
+
+    /* Sync the RAM copy: other save paths (work-mode config full write,
+     * e.g. the pre-sleep save) rewrite these NVS keys from current_config;
+     * without this they would clobber the values just saved above. */
+    if (g_json_config_ctx.initialized) {
+        g_json_config_ctx.current_config.work_mode_config.video_stream_mode = *config;
+    }
     return AICAM_OK;
 }
 

@@ -675,7 +675,12 @@ static aicam_result_t unregister_pir_runtime_callback(void);
      if (!controller || !controller->is_initialized) {
          return AICAM_ERROR_INVALID_PARAM;
      }
-     
+
+     /* RTMP/RTSP APIs save video_stream_mode straight to NVS without
+      * touching this RAM copy; refresh it from NVS so this full write
+      * doesn't clobber those values with boot-time stale ones. */
+     (void)json_config_get_video_stream_mode(&controller->work_config.video_stream_mode);
+
      // Save configuration to json_config_mgr (includes NVS persistence)
      aicam_result_t config_result = json_config_set_work_mode_config(&controller->work_config);
      if (config_result != AICAM_OK) {
