@@ -676,7 +676,7 @@ aicam_result_t service_start(void)
                 (int)essential_only,
                 skip_network_services ? "YES" : "NO");
     if (skip_network_services) {
-        printf("[BOOT] Skipping network services (capture mode doesn't need upload this wake)\r\n");
+        LOG_SVC_INFO("[BOOT] Skipping network services (capture mode doesn't need upload this wake)\r\n");
     }
 
     /* Wake-capture netif restriction: on the low-power wake-capture path (not

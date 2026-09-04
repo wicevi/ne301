@@ -368,8 +368,7 @@ static aicam_result_t ensure_dir_exists(FS_Type_t fs, const char *path)
 }
 
 /* Ensure the meta/ and data/ <date>/<hour> subdirs exist for a record (derived
- * from id). Replaces the old per-state ensure_date_dir - state no longer
- * affects the path. */
+ * from id). */
 static aicam_result_t ensure_record_dirs(FS_Type_t fs, const char *id)
 {
     char date[16], hour[8];
@@ -764,6 +763,10 @@ static aicam_result_t persist_record(FS_Type_t fs, const char *id,
                                       record_state_t state)
 {
     if (fs == FS_MAX) return AICAM_ERROR_INVALID_PARAM;
+#if UPLOAD_DEBUG
+    uint64_t t_p0 = rtc_get_uptime_ms();
+    uint64_t t_pe = t_p0;
+#endif
     if (ensure_dirs(fs) != AICAM_OK) return AICAM_ERROR;
 
     /* Ensure the per-date/per-hour subdirectories exist for this record's
@@ -774,6 +777,14 @@ static aicam_result_t persist_record(FS_Type_t fs, const char *id,
     if (ensure_record_dirs(fs, id) != AICAM_OK) {
         return AICAM_ERROR;
     }
+#if UPLOAD_DEBUG
+    {
+        uint64_t now = rtc_get_uptime_ms();
+        UPLOAD_LOG("persist[%s] dirs=%lu ms (ensure_dirs+record_dirs)\r\n",
+                   id, (unsigned long)(now - t_pe));
+        t_pe = now;
+    }
+#endif
 
     char pri_path[128], inf_path[128], ai_path[128], meta_path[128];
     path_for_data(pri_path, sizeof(pri_path), id, 'p');
@@ -782,6 +793,14 @@ static aicam_result_t persist_record(FS_Type_t fs, const char *id,
     path_for_meta(meta_path, sizeof(meta_path), id);
 
     aicam_result_t r = write_file(fs, pri_path, jpeg, jpeg_size);
+#if UPLOAD_DEBUG
+    {
+        uint64_t now = rtc_get_uptime_ms();
+        UPLOAD_LOG("persist[%s] write pri %luB=%lu ms\r\n",
+                   id, (unsigned long)jpeg_size, (unsigned long)(now - t_pe));
+        t_pe = now;
+    }
+#endif
     if (r != AICAM_OK) {
         LOG_SVC_ERROR("upload: write primary image failed: %s", pri_path);
         /* Drop the partial file now: it has no manifest entry yet (appended
@@ -797,6 +816,14 @@ static aicam_result_t persist_record(FS_Type_t fs, const char *id,
             (void)disk_file_remove(fs, inf_path);
             inf = NULL;
         }
+#if UPLOAD_DEBUG
+        {
+            uint64_t now = rtc_get_uptime_ms();
+            UPLOAD_LOG("persist[%s] write inf %luB=%lu ms (skip if absent)\r\n",
+                       id, (unsigned long)inf_size, (unsigned long)(now - t_pe));
+            t_pe = now;
+        }
+#endif
     }
     if (ai_json && ai_json[0]) {
         if (write_file(fs, ai_path, (const uint8_t *)ai_json, (uint32_t)strlen(ai_json)) != AICAM_OK) {
@@ -816,6 +843,13 @@ static aicam_result_t persist_record(FS_Type_t fs, const char *id,
                                        ai_json ? ai_name : "",
                                        g_up.cfg.upload_protocol, state);
     if (!j) return AICAM_ERROR_NO_MEMORY;
+#if UPLOAD_DEBUG
+    {
+        uint64_t now = rtc_get_uptime_ms();
+        UPLOAD_LOG("persist[%s] write ai json=%lu ms\r\n", id, (unsigned long)(now - t_pe));
+        t_pe = now;
+    }
+#endif
     aicam_result_t rr = write_meta_json(fs, meta_path, j);
     cJSON_Delete(j);
     if (rr != AICAM_OK) {
@@ -840,14 +874,22 @@ static aicam_result_t persist_record(FS_Type_t fs, const char *id,
         return AICAM_ERROR;
     }
     g_count_cache_dirty = true;
+#if UPLOAD_DEBUG
+    {
+        uint64_t now = rtc_get_uptime_ms();
+        UPLOAD_LOG("persist[%s] manifest=%lu ms total=%lu ms\r\n",
+                   id,
+                   (unsigned long)(now - t_pe),
+                   (unsigned long)(now - t_p0));
+    }
+#endif
     return AICAM_OK;
 }
 
 static aicam_result_t move_record(FS_Type_t fs, const char *id,
                                    record_state_t from, record_state_t to)
 {
-    /* State change is now in-place: the metadata .json never moves between
-     * directories. We rewrite its `state` field and append a manifest entry
+    /* Rewrite the .json's `state` field in place and append a manifest entry
      * with the new state. `from` is unused (kept for call-site stability). */
     (void)from;
     char meta_path[128];
@@ -2698,6 +2740,42 @@ aicam_result_t upload_coordinator_init(void *config)
            g_up.cfg.mode, g_up.cfg.storage, g_up.active_fs,
            (unsigned long)(t1-t0), (unsigned long)(t2-t1), (unsigned long)(t3-t2),
            (unsigned long)(t4-t3), (unsigned long)(t4-t0));
+#if UPLOAD_DEBUG
+    /* One-shot diagnosis: is the littlefs tree genuinely fat (used bytes high)
+     * or is the first-alloc traverse amplifying reads over a small tree?
+     * lfs_fs_size is itself a full traverse (~seconds) - debug builds only.
+     * Listing runs first as a mount barrier: disk_file ops block on the
+     * async-mount semaphore, while storage_get_disk_info returns zeroed info
+     * (without error) if the mounted flag is not up yet. */
+    if (g_up.active_fs == FS_FLASH) {
+        void *dd = disk_file_opendir(FS_FLASH, "/");
+        if (dd) {
+            dir_entry_t e;
+            while (disk_file_readdir(FS_FLASH, dd, (char *)&e) > 0) {
+                if (e.name[0] == '.') continue;
+                char p[264];
+                snprintf(p, sizeof(p), "/%s", e.name);
+                struct stat st = {0};
+                if (disk_file_stat(FS_FLASH, p, &st) == 0) {
+                    if (S_ISDIR(st.st_mode)) {
+                        UPLOAD_LOG("root: %s (dir)\r\n", e.name);
+                    } else {
+                        UPLOAD_LOG("root: %s %lu B\r\n", e.name, (unsigned long)st.st_size);
+                    }
+                } else {
+                    UPLOAD_LOG("root: %s ?\r\n", e.name);
+                }
+            }
+            disk_file_closedir(FS_FLASH, dd);
+        }
+        storage_disk_info_t di;
+        int dret = storage_get_disk_info(&di);
+        UPLOAD_LOG("volume: ret=%d mounted=%d total=%lu KB free=%lu KB used=%lu KB\r\n",
+                   dret, (int)storage_is_lfs_mounted(),
+                   (unsigned long)di.total_KBytes, (unsigned long)di.free_KBytes,
+                   (unsigned long)(di.total_KBytes - di.free_KBytes));
+    }
+#endif
     return AICAM_OK;
 }
 
@@ -2848,9 +2926,10 @@ aicam_bool_t upload_coordinator_needs_network(void)
         break;
     }
 
-    UPLOAD_LOG("needs_network=%d (mode=%d pending=%u failed=%u batch=%u) count_time=%lu ms\r\n",
+    UPLOAD_LOG("needs_network=%d (mode=%d pending=%u failed=%u batch=%u sent=%lu) count_time=%lu ms\r\n",
            (int)decision, (int)g_up.cfg.mode,
            (unsigned)pending, (unsigned)failed, (unsigned)g_up.cfg.batch_count,
+           (unsigned long)count_state(g_up.active_fs, RECORD_STATE_SENT),
            (unsigned long)(tn1 - tn0));
     return decision;
 }
@@ -3143,7 +3222,14 @@ aicam_result_t upload_coordinator_enqueue_capture(
      * makes index rebuild and counting impractically slow. SD storage has no
      * such limitation (FAT/exFAT handles large directories efficiently). */
     if (fs == FS_FLASH) {
+#if UPLOAD_DEBUG
+        uint64_t tc0 = rtc_get_uptime_ms();
+#endif
         uint32_t total = count_all_records(fs);
+#if UPLOAD_DEBUG
+        UPLOAD_LOG("count_all=%lu time=%lu ms\r\n",
+                   (unsigned long)total, (unsigned long)(rtc_get_uptime_ms() - tc0));
+#endif
         if (total >= FLASH_MAX_RECORDS) {
             LOG_SVC_WARN("upload: flash record cap reached (%lu/%u)",
                          (unsigned long)total, FLASH_MAX_RECORDS);
@@ -3407,8 +3493,8 @@ aicam_result_t upload_coordinator_delete_record(const char *id)
 {
     if (!id) return AICAM_ERROR_INVALID_PARAM;
     if (g_up.active_fs == FS_MAX) return AICAM_ERROR_INVALID_PARAM;
-    /* Paths are state-independent now (state lives in the manifest), so a single
-     * call covers the record regardless of its current state. Returns error if a
-     * remove failed (FS likely corrupt) so the web UI can surface it. */
+    /* State lives in the manifest, so a single call covers the record
+     * regardless of its current state. Returns error if a remove failed
+     * (FS likely corrupt) so the web UI can surface it. */
     return delete_record_files(g_up.active_fs, id, RECORD_STATE_PENDING, "web_delete", NULL);
 }

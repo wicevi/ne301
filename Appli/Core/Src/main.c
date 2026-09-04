@@ -417,15 +417,18 @@ void StartMainTask(void *argument)
        PINRST combined with SFTRST/PORRST, not on its own. */
     {
         uint32_t rsr = READ_REG(RCC->RSR);
-        printf("[MAIN] RSR=0x%08lx%s%s%s%s%s%s%s%s\r\n", (unsigned long)rsr,
-               (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST)  ? " SFTRST(software)"  : ""),
-               (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST)  ? " PINRST(NRST-pin)"  : ""),
-               (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST)  ? " BORRST(brownout)"  : ""),
-               (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST)  ? " PORRST(power-on)"  : ""),
-               (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) ? " IWDGRST"           : ""),
-               (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST) ? " WWDGRST"           : ""),
-               (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST) ? " LPWRRST(low-power)": ""),
-               (__HAL_RCC_GET_FLAG(RCC_FLAG_LCKRST)  ? " LCKRST(cpu-lockup)": ""));
+        // Normally, the reset cause register is 0x00e00000 on a clean power-on reset. If it's not, print the flags that are set.
+        if (rsr != 0x00e00000) {
+            LOG_WARN("[MAIN] RSR=0x%08lx%s%s%s%s%s%s%s%s\r\n", (unsigned long)rsr,
+                (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST)  ? " SFTRST(software)"  : ""),
+                (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST)  ? " PINRST(NRST-pin)"  : ""),
+                (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST)  ? " BORRST(brownout)"  : ""),
+                (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST)  ? " PORRST(power-on)"  : ""),
+                (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) ? " IWDGRST"           : ""),
+                (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST) ? " WWDGRST"           : ""),
+                (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST) ? " LPWRRST(low-power)": ""),
+                (__HAL_RCC_GET_FLAG(RCC_FLAG_LCKRST)  ? " LCKRST(cpu-lockup)": ""));
+        }
     }
 
     if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST)) __HAL_RCC_CLEAR_RESET_FLAGS();
