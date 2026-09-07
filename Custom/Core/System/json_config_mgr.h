@@ -634,6 +634,14 @@ typedef struct {
                                                * full / count cap); default = max */
     uint32_t          max_pending_records;    /* hard cap on queue length; default 200 */
 
+    /* Internal-flash (littlefs) record cap - the TOTAL across all states
+     * (pending + sent + failed + local). Range CAPUP_FLASH_RECORDS_MIN..
+     * _MAX, default = CAPUP_FLASH_RECORDS_DEFAULT. A large live tree slows
+     * the per-boot full-tree alloc scan and the count sweeps (longer wake
+     * captures, higher average power); SD storage has no such limitation.
+     * Web-configurable. */
+    uint32_t          flash_max_records;
+
     /* Wake-capture network: which netif to bring up on the wake path.
      * Values = communication_type_t (communication_service.h).
      * COMM_TYPE_NONE (0) = default (use system comm-pref logic, init all). */
@@ -649,6 +657,13 @@ typedef struct {
  * (uint64_t)keep_sent_hours * 3600 in purge_old_sent - 72000h * 3600 =
  * 259,200,000s, fits uint32 (let alone the uint64 it's computed in). */
 #define CAPUP_KEEP_SENT_MAX_HOURS  (72000u)   /* ~= 8.2 years; sentinel = keep forever */
+
+/* Internal-flash total record cap: range and default. The cap counts ALL
+ * record states combined; units without the NVS key yet (and 0/out-of-range
+ * writes) get the default. */
+#define CAPUP_FLASH_RECORDS_MIN     (16u)
+#define CAPUP_FLASH_RECORDS_MAX     (256u)
+#define CAPUP_FLASH_RECORDS_DEFAULT (32u)
 
 // RTMP config is now part of video_stream_mode_config_t
 // These macros are kept for compatibility

@@ -456,6 +456,9 @@ aicam_result_t json_config_save_capture_upload_to_nvs(const capture_upload_confi
     r = json_config_nvs_write_uint32(NVS_KEY_CAPUP_MAX_PENDING, config->max_pending_records);
     if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save capup max_pending"); result = r; }
 
+    r = json_config_nvs_write_uint32(NVS_KEY_CAPUP_FLASH_MAX, config->flash_max_records);
+    if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save capup flash_max"); result = r; }
+
     r = json_config_nvs_write_uint8(NVS_KEY_CAPUP_COMM_TYPE, (uint8_t)config->upload_comm_type);
     if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save capup upload_comm_type"); result = r; }
 
@@ -494,6 +497,13 @@ aicam_result_t json_config_load_capture_upload_from_nvs(capture_upload_config_t 
     }
     if (json_config_nvs_read_uint32(NVS_KEY_CAPUP_KEEP_HOURS, &u32) == AICAM_OK) config->keep_sent_hours = u32;
     if (json_config_nvs_read_uint32(NVS_KEY_CAPUP_MAX_PENDING, &u32) == AICAM_OK) config->max_pending_records = u32;
+    if (json_config_nvs_read_uint32(NVS_KEY_CAPUP_FLASH_MAX, &u32) == AICAM_OK) {
+        /* Same normalization as json_config_set_capture_upload_config:
+         * 0 or out-of-range = default, floor at min. */
+        if (u32 == 0 || u32 > CAPUP_FLASH_RECORDS_MAX) u32 = CAPUP_FLASH_RECORDS_DEFAULT;
+        if (u32 < CAPUP_FLASH_RECORDS_MIN) u32 = CAPUP_FLASH_RECORDS_MIN;
+        config->flash_max_records = u32;
+    }
     if (json_config_nvs_read_uint8 (NVS_KEY_CAPUP_COMM_TYPE, &u8) == AICAM_OK) {
         config->upload_comm_type = (u8 >= (uint8_t)4 /*COMM_TYPE_MAX*/) ? 0 /*COMM_TYPE_NONE*/ : (uint32_t)u8;
     }

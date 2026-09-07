@@ -1657,6 +1657,7 @@ void json_config_capture_upload_defaults(capture_upload_config_t *config)
     config->schedule_node_count  = 0;
     config->keep_sent_hours      = CAPUP_KEEP_SENT_MAX_HOURS;  /* keep forever; delete only on full/count cap */
     config->max_pending_records  = 200;
+    config->flash_max_records    = CAPUP_FLASH_RECORDS_DEFAULT; /* total cap across all states */
     config->upload_comm_type     = 0;  /* COMM_TYPE_NONE = default logic */
 }
 
@@ -1691,6 +1692,14 @@ aicam_result_t json_config_set_capture_upload_config(const capture_upload_config
         norm.keep_sent_hours = CAPUP_KEEP_SENT_MAX_HOURS;
     if (norm.max_pending_records == 0)  norm.max_pending_records = 200;
     if (norm.max_pending_records > 1000) norm.max_pending_records = 1000;
+    /* flash_max_records: 0 or out-of-range = default; floor at min */
+    if (norm.flash_max_records == 0 ||
+        norm.flash_max_records > CAPUP_FLASH_RECORDS_MAX) {
+        norm.flash_max_records = CAPUP_FLASH_RECORDS_DEFAULT;
+    }
+    if (norm.flash_max_records < CAPUP_FLASH_RECORDS_MIN) {
+        norm.flash_max_records = CAPUP_FLASH_RECORDS_MIN;
+    }
 
     /* Cross-field constraints */
     if (norm.storage == CAPTURE_STORE_NONE && norm.mode != CAPTURE_MODE_INSTANT) {

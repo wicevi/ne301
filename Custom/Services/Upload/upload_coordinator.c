@@ -110,6 +110,15 @@ typedef struct {
 #pragma pack(pop)
 #define IDX_ENTRY_SIZE      (sizeof(cap_idx_entry_t))
 #define IDX_STATE_DELETED   0xFFu
+
+/* Day-.idx compaction triggers. State transitions APPEND and deletes append a
+ * tombstone, so a day file only ever grows. Once raw entries >= 4x the live
+ * count (and at least 64 raw), rewrite the file with only the live entries -
+ * or remove it entirely when nothing is live. Later loads of that day then
+ * read n_live*36B instead of the whole history (the 1-capture-per-minute era
+ * left ~4k entries/day: 240 ms per count sweep with 32 live records). */
+#define IDX_COMPACT_MIN_RAW     64u
+#define IDX_COMPACT_FACTOR      4u
 /* Sanity: catch any toolchain packing surprise at compile time. */
 _Static_assert(IDX_ENTRY_SIZE == 36, "cap_idx_entry_t must be 36 bytes");
 
@@ -164,6 +173,11 @@ typedef struct {
     aicam_bool_t       running;
     service_state_t    state;
     osMutexId_t        mutex;            /* protects do_flush_pass re-entrancy */
+    osMutexId_t        idx_mutex;        /* serializes .idx appends against load-time
+                                          * compaction rewrites (and other appends).
+                                          * Lock order: g_up.mutex BEFORE idx_mutex -
+                                          * a flush holds g_up.mutex across move_record
+                                          * appends - never the reverse. */
     osMessageQueueId_t queue;
     osThreadId_t       task_handle;
     volatile aicam_bool_t flush_active;  /* true while do_flush_pass is running - lets the
@@ -436,13 +450,23 @@ static aicam_result_t manifest_append(FS_Type_t fs, const char *id,
     e.timestamp = ts;
     e.size = size;
 
+    /* Serialize against load-time compaction (and other appends): without
+     * this, a compact rewrite's tmp+rename could drop an append that landed
+     * between the loader's read and its rewrite. 1s is far beyond an append's
+     * latency - on timeout treat as a failed append like a fopen failure. */
+    if (g_up.idx_mutex && osMutexAcquire(g_up.idx_mutex, 1000) != osOK) {
+        LOG_SVC_ERROR("manifest_append: idx mutex timeout path=%s", mpath);
+        return AICAM_ERROR;
+    }
     void *fd = disk_file_fopen(fs, mpath, "a");
     if (!fd) {
         LOG_SVC_ERROR("manifest_append: fopen failed path=%s", mpath);
+        if (g_up.idx_mutex) osMutexRelease(g_up.idx_mutex);
         return AICAM_ERROR;
     }
     int wn = disk_file_fwrite(fs, fd, &e, IDX_ENTRY_SIZE);
     disk_file_fclose(fs, fd);
+    if (g_up.idx_mutex) osMutexRelease(g_up.idx_mutex);
     return (wn == (int)IDX_ENTRY_SIZE) ? AICAM_OK : AICAM_ERROR;
 }
 
@@ -864,8 +888,8 @@ static aicam_result_t persist_record(FS_Type_t fs, const char *id,
     uint32_t ts = (uint32_t)(meta->timestamp ? meta->timestamp : now_unix());
     if (manifest_append(fs, id, (uint8_t)state, ts, jpeg_size) != AICAM_OK) {
         /* Files exist but the index entry does not: the record is invisible
-         * to count/list/flush forever AND the flash record cap stays below
-         * FLASH_MAX_RECORDS, disarming count-based wrap cleanup while the
+         * to count/list/flush forever AND the flash record count stays below
+         * its cap, disarming count-based wrap cleanup while the
          * bytes stay consumed - this is exactly how the 2026-08-31 overnight
          * wedge started. Remove the files and fail so the caller's reactive
          * cleanup_for_space + retry path runs. */
@@ -1098,6 +1122,49 @@ static int idx_entry_cmp_ts(const void *a, const void *b)
  * array (caller frees via buffer_free) of live entries; *out_n = count.
  * NULL on failure/empty. Reading one small sequential file per day is what
  * makes count/list O(days) instead of O(records) opendir. */
+/* Best-effort compaction of one day .idx (called from manifest_load_day, which
+ * already holds the compacted live array in RAM). The load read the file
+ * OUTSIDE the idx mutex, so an append may have landed since - re-stat under
+ * the mutex and bail if the size moved (the next load retries). tmp+rename is
+ * atomic, same idiom as the meta rewrites. Any failure just leaves the
+ * original file in place. */
+static void maybe_compact_day_idx(FS_Type_t fs, const char *mpath,
+                                  const cap_idx_entry_t *live, int n_live,
+                                  long size_when_read, int n_raw_read)
+{
+    if (n_raw_read < (int)IDX_COMPACT_MIN_RAW) return;
+    if (n_live > 0 && (uint32_t)n_raw_read < (uint32_t)n_live * IDX_COMPACT_FACTOR) return;
+    if (!g_up.idx_mutex) return;
+    if (osMutexAcquire(g_up.idx_mutex, 1000) != osOK) return;
+
+    struct stat st = {0};
+    if (disk_file_stat(fs, mpath, &st) == 0 && (long)st.st_size == size_when_read) {
+        if (n_live == 0) {
+            (void)disk_file_remove(fs, mpath);
+            LOG_SVC_INFO("upload: idx compact %s removed (%d dead entries)",
+                         mpath, n_raw_read);
+        } else {
+            char tmp[104];
+            snprintf(tmp, sizeof(tmp), "%s.tmp", mpath);
+            void *fd = disk_file_fopen(fs, tmp, "w");
+            aicam_bool_t ok = AICAM_FALSE;
+            if (fd) {
+                size_t bytes = (size_t)n_live * IDX_ENTRY_SIZE;
+                int wn = disk_file_fwrite(fs, fd, live, bytes);
+                disk_file_fclose(fs, fd);
+                ok = (wn == (int)bytes) ? AICAM_TRUE : AICAM_FALSE;
+            }
+            if (ok && disk_file_rename(fs, tmp, mpath) == 0) {
+                LOG_SVC_INFO("upload: idx compact %s %d -> %d entries",
+                             mpath, n_raw_read, n_live);
+            } else {
+                (void)disk_file_remove(fs, tmp);   /* keep the original */
+            }
+        }
+    }
+    osMutexRelease(g_up.idx_mutex);
+}
+
 static cap_idx_entry_t *manifest_load_day(FS_Type_t fs, const char *date, int *out_n)
 {
     if (out_n) *out_n = 0;
@@ -1187,6 +1254,14 @@ static cap_idx_entry_t *manifest_load_day(FS_Type_t fs, const char *date, int *o
         n_live++;
     }
     qsort(uniq, (size_t)n_live, IDX_ENTRY_SIZE, idx_entry_cmp_ts);
+
+    /* Compact the on-disk ledger when dead weight dominates. Only when the
+     * read covered the whole file (no IDX_MAX_ENTRIES truncation, no short
+     * fread) - otherwise the rewrite would drop entries we never saw. */
+    if (n_read == (int)(st.st_size / IDX_ENTRY_SIZE)) {
+        maybe_compact_day_idx(fs, mpath, uniq, n_live,
+                              (long)st.st_size, n_read);
+    }
     if (out_n) *out_n = n_live;
     return uniq;
 }
@@ -1305,8 +1380,15 @@ static uint32_t count_state(FS_Type_t fs, record_state_t state)
 {
     if (fs == FS_MAX) return 0;
     uint64_t tc = rtc_get_uptime_ms();
-    uint32_t n = (uint32_t)iterate_records(fs, state, 0, 0, 0, UINT64_MAX,
-                                           AICAM_FALSE, NULL, NULL);
+    /* Shared-cache path (same pattern as count_all_records / get_flush_budget_ms):
+     * one sweep when cold, then every caller reads the 4-state RAM cache. This
+     * used to be a dedicated full sweep on EVERY call, so one wake paid 3-5
+     * manifest traversals for the same numbers. */
+    if (g_count_cache_dirty) {
+        manifest_counts_all(fs, g_count_cache);
+        g_count_cache_dirty = false;
+    }
+    uint32_t n = g_count_cache[state];
     uint64_t dt = rtc_get_uptime_ms() - tc;
     if (dt > 5) {
         UPLOAD_LOG("count_state(%d)=%u time=%lu ms\r\n",
@@ -1316,7 +1398,7 @@ static uint32_t count_state(FS_Type_t fs, record_state_t state)
 }
 
 /* Total records across all states from the RAM cache if fresh, otherwise a
- * single manifest sweep. Used by the FLASH_MAX_RECORDS cap check before each
+ * single manifest sweep. Used by the flash record-cap check before each
  * capture write - this is O(days) manifest reads, not O(records) opendir. */
 static uint32_t count_all_records(FS_Type_t fs)
 {
@@ -1334,6 +1416,17 @@ static uint32_t count_all_records(FS_Type_t fs)
          + g_count_cache[RECORD_STATE_SENT]
          + g_count_cache[RECORD_STATE_FAILED]
          + g_count_cache[RECORD_STATE_LOCAL];
+}
+
+/* Effective flash record cap: user-configurable (web), total across all
+ * states, clamped here so a stale/garbage NVS value can neither disarm the
+ * cap nor blow past the compile-time ceiling. */
+static uint32_t flash_record_cap(void)
+{
+    uint32_t cap = g_up.cfg.flash_max_records;
+    if (cap < CAPUP_FLASH_RECORDS_MIN) cap = CAPUP_FLASH_RECORDS_MIN;
+    if (cap > CAPUP_FLASH_RECORDS_MAX) cap = CAPUP_FLASH_RECORDS_MAX;
+    return cap;
 }
 
 /* Fill counts for all 4 states in a single manifest sweep (get_status). */
@@ -1591,7 +1684,7 @@ static aicam_result_t cleanup_for_space(FS_Type_t fs, uint64_t need_bytes)
     return AICAM_OK;
 }
 
-/* Count-based cleanup for the FLASH_MAX_RECORDS cap. Same state priority as
+/* Count-based cleanup for the flash record cap. Same state priority as
  * cleanup_for_space (sent→local→failed→pending), oldest first. Deletes
  * `excess` records (at minimum) to bring the total below the cap. Each delete
  * is bounded by the per-record cleanup_deadline; the total pass is bounded by
@@ -1941,7 +2034,10 @@ static void record_mark_failed(FS_Type_t fs, const char *id, const char *err)
     }
     cJSON_Delete(meta);
 
-    if (g_up.cfg.retry_max_attempts > 0 && retry >= g_up.cfg.retry_max_attempts) {
+    /* retry_enable off = no automatic retries: first failure promotes straight
+     * to FAILED (web-manual retry only). On, retry_max_attempts 0 = unlimited. */
+    if (!g_up.cfg.retry_enable ||
+        (g_up.cfg.retry_max_attempts > 0 && retry >= g_up.cfg.retry_max_attempts)) {
         (void)move_record(fs, id, RECORD_STATE_PENDING, RECORD_STATE_FAILED);
     }
 }
@@ -2360,8 +2456,10 @@ static aicam_result_t upload_one_record(FS_Type_t fs, const char *id,
     }
     cJSON_Delete(meta);
 
-    /* 0 = unlimited retries - never promote to failed/ */
-    if (g_up.cfg.retry_max_attempts > 0 && retry >= g_up.cfg.retry_max_attempts) {
+    /* retry_enable off = no automatic retries: promote straight to FAILED
+     * (web-manual retry only). On, 0 = unlimited retries - never promote. */
+    if (!g_up.cfg.retry_enable ||
+        (g_up.cfg.retry_max_attempts > 0 && retry >= g_up.cfg.retry_max_attempts)) {
         return move_record(fs, id, RECORD_STATE_PENDING, RECORD_STATE_FAILED);
     }
     return result;
@@ -2706,10 +2804,17 @@ aicam_result_t upload_coordinator_init(void *config)
         LOG_SVC_ERROR("upload_coordinator init: osMutexNew failed");
         return AICAM_ERROR;
     }
+    g_up.idx_mutex = osMutexNew(NULL);
+    if (!g_up.idx_mutex) {
+        LOG_SVC_ERROR("upload_coordinator init: osMutexNew(idx) failed");
+        osMutexDelete(g_up.mutex); g_up.mutex = NULL;
+        return AICAM_ERROR;
+    }
 
     g_up.queue = osMessageQueueNew(UPLOAD_QUEUE_DEPTH, sizeof(ULONG), &upload_queue_attr);
     if (!g_up.queue) {
         LOG_SVC_ERROR("upload_coordinator init: osMessageQueueNew failed");
+        osMutexDelete(g_up.idx_mutex); g_up.idx_mutex = NULL;
         osMutexDelete(g_up.mutex); g_up.mutex = NULL;
         return AICAM_ERROR;
     }
@@ -2829,6 +2934,7 @@ aicam_result_t upload_coordinator_deinit(void)
 {
     if (g_up.running) upload_coordinator_stop();
     if (g_up.queue) { osMessageQueueDelete(g_up.queue); g_up.queue = NULL; }
+    if (g_up.idx_mutex) { osMutexDelete(g_up.idx_mutex); g_up.idx_mutex = NULL; }
     if (g_up.mutex) { osMutexDelete(g_up.mutex); g_up.mutex = NULL; }
     g_up.initialized = AICAM_FALSE;
     g_up.state = SERVICE_STATE_UNINITIALIZED;
@@ -2866,15 +2972,15 @@ aicam_bool_t upload_coordinator_needs_network(void)
         return AICAM_TRUE;
     }
 
-    /* Counting pending/failed is only needed for the BATCH threshold decision.
+    /* Counting pending is only needed for the BATCH threshold decision.
      * INSTANT always uploads, LOCAL_ONLY never, SCHEDULED only at the flush
      * node (wake_scheduler decides) - skip the directory traverses for those
-     * modes to cut wake latency. */
+     * modes to cut wake latency. FAILED is deliberately not counted: a record
+     * there exhausted its retry budget, it never justifies waking the network. */
     capture_mode_t mode = g_up.cfg.mode;
-    uint32_t pending = 0, failed = 0;
+    uint32_t pending = 0;
     if (mode == CAPTURE_MODE_BATCH) {
         pending = count_state(g_up.active_fs, RECORD_STATE_PENDING);
-        failed  = count_state(g_up.active_fs, RECORD_STATE_FAILED);
     }
     uint64_t tn1 = rtc_get_uptime_ms();
     aicam_bool_t decision = AICAM_TRUE;
@@ -2892,14 +2998,12 @@ aicam_bool_t upload_coordinator_needs_network(void)
 
     case CAPTURE_MODE_BATCH:
         /* Bring up network only when this capture would cross the threshold
-         * (pending + 1 >= batch_count) or there's a failed backlog to retry.
-         * Otherwise just enqueue and go back to sleep - saves the multi-second
-         * network bring-up. */
-        if (failed > 0) {
-            decision = AICAM_TRUE;
-        } else {
-            decision = (pending + 1 >= g_up.cfg.batch_count) ? AICAM_TRUE : AICAM_FALSE;
-        }
+         * (pending + 1 >= batch_count). Otherwise just enqueue and go back to
+         * sleep - saves the multi-second network bring-up. FAILED records are
+         * web-manual-retry only (retry budget already exhausted) and must not
+         * wake the network: a stuck FAILED backlog used to force network
+         * bring-up and a single-record upload on every single wake. */
+        decision = (pending + 1 >= g_up.cfg.batch_count) ? AICAM_TRUE : AICAM_FALSE;
         break;
 
     case CAPTURE_MODE_SCHEDULED: {
@@ -2926,10 +3030,9 @@ aicam_bool_t upload_coordinator_needs_network(void)
         break;
     }
 
-    UPLOAD_LOG("needs_network=%d (mode=%d pending=%u failed=%u batch=%u sent=%lu) count_time=%lu ms\r\n",
+    UPLOAD_LOG("needs_network=%d (mode=%d pending=%u batch=%u) count_time=%lu ms\r\n",
            (int)decision, (int)g_up.cfg.mode,
-           (unsigned)pending, (unsigned)failed, (unsigned)g_up.cfg.batch_count,
-           (unsigned long)count_state(g_up.active_fs, RECORD_STATE_SENT),
+           (unsigned)pending, (unsigned)g_up.cfg.batch_count,
            (unsigned long)(tn1 - tn0));
     return decision;
 }
@@ -3216,25 +3319,30 @@ aicam_result_t upload_coordinator_enqueue_capture(
         }
     }
 
-    /* FLASH record-count cap. LittleFS directory operations (opendir/readdir)
-     * degrade sharply beyond a few hundred files per directory; even with the
-     * date-partitioned layout a total record count above FLASH_MAX_RECORDS
-     * makes index rebuild and counting impractically slow. SD storage has no
-     * such limitation (FAT/exFAT handles large directories efficiently). */
+    /* FLASH record-count cap (user-configurable, TOTAL across all states).
+     * LittleFS directory operations (opendir/readdir) degrade sharply beyond
+     * a few hundred files per directory; even with the date-partitioned
+     * layout a large live tree makes index rebuild and counting slow - and
+     * slows every cold boot's first-alloc full-tree scan, lengthening wake
+     * captures. SD storage has no such limitation (FAT/exFAT handles large
+     * directories efficiently). This is the COUNT cap: it only engages while
+     * free space remains - the space-based cleanup can still wrap-delete
+     * oldest records below the count cap when the volume runs out. */
     if (fs == FS_FLASH) {
 #if UPLOAD_DEBUG
         uint64_t tc0 = rtc_get_uptime_ms();
 #endif
         uint32_t total = count_all_records(fs);
+        uint32_t cap = flash_record_cap();
 #if UPLOAD_DEBUG
         UPLOAD_LOG("count_all=%lu time=%lu ms\r\n",
                    (unsigned long)total, (unsigned long)(rtc_get_uptime_ms() - tc0));
 #endif
-        if (total >= FLASH_MAX_RECORDS) {
-            LOG_SVC_WARN("upload: flash record cap reached (%lu/%u)",
-                         (unsigned long)total, FLASH_MAX_RECORDS);
+        if (total >= cap) {
+            LOG_SVC_WARN("upload: flash record cap reached (%lu/%lu)",
+                         (unsigned long)total, (unsigned long)cap);
             if (g_up.cfg.policy == STORAGE_POLICY_WRAP) {
-                uint32_t excess = total - FLASH_MAX_RECORDS + 1;
+                uint32_t excess = total - cap + 1;
                 if (cleanup_for_count(fs, excess) != AICAM_OK) {
                     LOG_SVC_ERROR("upload: count cap cleanup failed");
                     storage_full_set(AICAM_TRUE);

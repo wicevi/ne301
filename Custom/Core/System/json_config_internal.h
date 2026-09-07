@@ -384,6 +384,7 @@
 #define NVS_KEY_CAPUP_SCHED_MIN_FMT "cu_sch_%u"   /* uint16_t index 0..7 */
 #define NVS_KEY_CAPUP_KEEP_HOURS    "cu_keep_h"
 #define NVS_KEY_CAPUP_MAX_PENDING   "cu_max_pd"
+#define NVS_KEY_CAPUP_FLASH_MAX     "cu_fl_max"
 #define NVS_KEY_CAPUP_COMM_TYPE     "cu_comm"
 
 
