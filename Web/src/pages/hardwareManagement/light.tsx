@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { useLingui } from '@lingui/react';
 import { Label } from '@/components/ui/label';
-import { Input } from '@/components/ui/input';
+import { NumberField } from '@/components/number-field';
 import TimePicker from '@/components/time-picker';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -186,21 +186,24 @@ export default function Light() {
                                    max={100}
                                    step={1}
                                  />
-                                 <Input
+                                 <NumberField
                                    className="w-[65px]"
-                                   type="number"
-                                   value={lightConfig.brightness_level}
                                    min={0}
                                    max={100}
                                    step={1}
-                                   onChange={(e) => {
-                                      const input = e.target as HTMLInputElement;
-                                      const n = Math.round(Number(input.value));
-                                      const clamped = Math.max(0, Math.min(100, Number.isFinite(n) ? n : 0));
-                                      input.value = String(clamped);
-                                      setLightConfig({ ...lightConfig, brightness_level: clamped });
-                                    }}
-                                   onBlur={e => handleSetLightBrightness(Math.max(0, Math.min(100, Number.isNaN(Number((e.target as HTMLInputElement).value)) ? 0 : Number((e.target as HTMLInputElement).value))))}
+                                   value={lightConfig.brightness_level}
+                                   onCommit={v => {
+                                      const nextCfg: SetLightConfigReq = {
+                                         ...lightConfigRef.current,
+                                         brightness_level: v,
+                                      };
+                                      setLightConfig(nextCfg);
+                                      handleSetLightBrightness(v).catch((error) => {
+                                         console.error('handleSetLightBrightness', error);
+                                         // Snap the field back to the persisted config on failure
+                                         setLightConfig(lightConfigRef.current);
+                                      });
+                                   }}
                                  />
                               </div>
                            </div>
