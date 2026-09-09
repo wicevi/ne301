@@ -247,7 +247,7 @@ define pkg_project
 pkg-$(1): $(2)
 	@echo "Creating package for $(1)..."
 	@$$(RM) $$(BUILD_DIR)/$(3)_v*_pkg.bin
-	@$$(PACKER) $$(BUILD_DIR)/$(3).bin -o $$(BUILD_DIR)/$(3)_v$(7)_pkg.bin -t $(4) -n $(5) -v $(6)  $(if $(8),-s $(8)) -d $(9) -m $(DEVICE_MODEL)
+	@$$(PACKER) $$(BUILD_DIR)/$(3).bin -o $$(BUILD_DIR)/$(3)_v$(7)_pkg.bin -t $(4) -n $(5) -v $(6)  $(if $(8),-s $(8)) -d $(9) -m $(DEVICE_MODEL) --board-flash $(BOARD_FLASH_SIZE)
 	@echo "$(1) package created: $(3)_v$(7)_pkg.bin"
 endef
 
@@ -286,6 +286,7 @@ pkg-bundle: pkg
 	@echo "========================================="
 	@python $(PKG_SCRIPT_DIR)/ota_bundle_packer.py $(BUILD_DIR) \
 	    -o $(BUILD_DIR)/ne301_Full_v$(APP_VERSION_STR)_bundle.bin \
+	    --board-flash $(BOARD_FLASH_SIZE) \
 	    $(BUNDLE_EXTRA_FLAGS) -m $(DEVICE_MODEL)
 	@python $(PKG_SCRIPT_DIR)/verify_ota_package.py $(BUILD_DIR)/ne301_Full_v$(APP_VERSION_STR)_bundle.bin > /dev/null
 	@echo "Bundle created: $(BUILD_DIR)/ne301_Full_v$(APP_VERSION_STR)_bundle.bin"
