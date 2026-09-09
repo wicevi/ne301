@@ -950,7 +950,9 @@ aicam_result_t file_preview_handler(http_handler_context_t *ctx)
             mg_send(ctx->conn, chunk, (size_t)n);
         hal_mem_free(chunk);
         disk_file_fclose(fs_type, fd);
-        return AICAM_OK;
+        /* Binary response already sent above - suppress the router's JSON
+         * response, same as the download handler after its own send */
+        return AICAM_ERROR_NOT_SENT_AGAIN;
     }
 
     uint8_t *buffer = NULL;
