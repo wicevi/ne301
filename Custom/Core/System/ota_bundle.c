@@ -139,7 +139,13 @@ int ota_bundle_layout_change_valid(const ota_bundle_header_t *hdr)
         seen[p->part_id] = 1;
 
         if (p->size == 0) return -1;
-        if (p->base < FLASH_BASE || p->base + p->size > flash_end + 1) return -1;
+        /* Subtraction form: `p->base + p->size` wraps in uint32_t, which let a
+         * crafted table (base near UINT32_MAX + a size that wraps the sum back
+         * below flash_end) through this gate and on to the unchecked XSPI
+         * erase/write path. With base <= flash_end the right side cannot
+         * underflow either. */
+        if (p->base < FLASH_BASE || p->base > flash_end ||
+            p->size > flash_end + 1 - p->base) return -1;
 
         if (p->part_id == BUNDLE_PART_FSBL) {
             fsbl_seen = 1;
