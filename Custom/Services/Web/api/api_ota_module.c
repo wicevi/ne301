@@ -65,6 +65,9 @@ typedef struct {
                                    * embeds the whole compile-time table) */
     uint32_t direct_addr;         /* resolved absolute flash address */
     uint32_t direct_size;         /* target partition size from the bundle table */
+    aicam_bool_t completed;       /* its direct upload finished successfully —
+                                   * finish(result=ok) refuses to clear the
+                                   * session while a planned entry is missing */
 } bundle_plan_entry_t;
 
 typedef struct {
@@ -86,6 +89,7 @@ typedef struct {
 } ota_export_ctx_t;
 
 typedef struct {
+    uint32_t   magic;             /* OTA_UPLOAD_CTX_MAGIC - connection router tag */
     union {
         ota_header_t data;
         uint64_t align_dummy; // force 8 bytes alignment
@@ -883,6 +887,7 @@ aicam_result_t ota_bundle_precheck_handler(http_handler_context_t *ctx)
         }
 
         g_bundle_session.plan[fw].planned = AICAM_TRUE;
+        g_bundle_session.plan[fw].completed = AICAM_FALSE;
         g_bundle_session.plan[fw].direct_addr = direct_addr;
         g_bundle_session.plan[fw].direct_size = direct_size;
         total_update_bytes += entry->size;
@@ -1179,6 +1184,22 @@ aicam_result_t ota_bundle_finish_handler(http_handler_context_t *ctx)
     }
     aicam_bool_t ok = (result && strcmp(result, "ok") == 0) ? AICAM_TRUE : AICAM_FALSE;
 
+    if (ok) {
+        /* Refuse a premature "ok": begin already erased the OTA state, so
+         * clearing the session with a planned-but-unburned entry and the
+         * documented reboot would boot from missing firmware. */
+        static const uint8_t bundle_fw_codes[] = {0x01, 0x02, 0x03, 0x04, 0x08};
+        for (size_t k = 0; k < sizeof(bundle_fw_codes); k++) {
+            FirmwareType t = bundle_fw_type_to_firmware(bundle_fw_codes[k]);
+            if (t < FIRMWARE_TYPE_COUNT && g_bundle_session.plan[t].planned &&
+                !g_bundle_session.plan[t].completed) {
+                if (request) cJSON_Delete(request);
+                return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                                          "Bundle plan incomplete: firmware not yet uploaded");
+            }
+        }
+    }
+
     aicam_bool_t wifi_pending = AICAM_FALSE;
     if (ok && g_bundle_session.has_wifi_update) {
         wifi_mark_update_pending();
@@ -1204,6 +1225,10 @@ aicam_result_t ota_bundle_finish_handler(http_handler_context_t *ctx)
 
 void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data) {
     ota_upload_ctx_t *ctx = (ota_upload_ctx_t *)c->fn_data;
+
+    /* Type guard: the detached-connection router dispatches by ctx magic;
+     * never touch a context that is not ours. */
+    if (!ctx || ctx->magic != OTA_UPLOAD_CTX_MAGIC) return;
 
     if (ev == MG_EV_CLOSE || ev == MG_EV_ERROR) {
         if (ctx) {
@@ -1277,7 +1302,8 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
             ota_send_response(c, API_ERROR_INTERNAL_ERROR, "OOM");
             return;
         }
-        
+        ctx->magic = OTA_UPLOAD_CTX_MAGIC;
+
         ctx->content_length = total_len;
         ctx->fw_type_param = parse_firmware_type(fw_type_str);
 
@@ -1565,6 +1591,16 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
             }
 
             // WiFi firmware is written to WIFI_FW_BASE (flash_header_t + .rps).
+            /* Bundle direct burn finished for this entry: mark it so
+             * bundle/finish can refuse a premature "ok" while something in
+             * the plan is still missing. */
+            if (ctx->direct_mode && g_bundle_session.active) {
+                if (ctx->fw_type_param == FIRMWARE_AI_1 || ctx->fw_type_param == FIRMWARE_AI_2) {
+                    g_bundle_session.plan[FIRMWARE_AI_2].completed = AICAM_TRUE;
+                } else if (ctx->fw_type_param < FIRMWARE_TYPE_COUNT) {
+                    g_bundle_session.plan[ctx->fw_type_param].completed = AICAM_TRUE;
+                }
+            }
             LOG_SVC_INFO("OTA Success!");
             ota_send_response(c, API_ERROR_NONE, "Upgrade successful");
             goto cleanup;

@@ -11,6 +11,8 @@
 #include "buffer_mgr.h"
 #include "storage.h"
 #include <sys/stat.h>
+/* communication_type_t for the upload_comm_type range check below. */
+#include "communication_service.h"
 
 /* ==================== NVS Storage Implementation ==================== */
 
@@ -505,7 +507,12 @@ aicam_result_t json_config_load_capture_upload_from_nvs(capture_upload_config_t 
         config->flash_max_records = u32;
     }
     if (json_config_nvs_read_uint8 (NVS_KEY_CAPUP_COMM_TYPE, &u8) == AICAM_OK) {
-        config->upload_comm_type = (u8 >= (uint8_t)4 /*COMM_TYPE_MAX*/) ? 0 /*COMM_TYPE_NONE*/ : (uint32_t)u8;
+        /* upload_comm_type stores communication_type_t. Compare against the
+         * enum's real ceiling, not a hard-coded 4: COMM_TYPE_POE is 4 today,
+         * and the stale bound silently reset a saved PoE upload network to
+         * default on every reboot. */
+        config->upload_comm_type =
+            (u8 >= (uint8_t)COMM_TYPE_MAX) ? (uint32_t)COMM_TYPE_NONE : (uint32_t)u8;
     }
 
     return AICAM_OK;

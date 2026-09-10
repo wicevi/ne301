@@ -181,7 +181,6 @@ static void build_full_path(const char *dir, const char *filename,
 #define FILE_UPLOAD_STREAM_BUF_SIZE   10240
 #define FILE_UPLOAD_FLASH_MAX_SIZE    (16 * 1024 * 1024)
 #define FILE_UPLOAD_SD_MAX_SIZE       (16 * 1024 * 1024)
-#define FILE_UPLOAD_CTX_MAGIC         0x4655504Cu
 #define FILE_UPLOAD_PROGRESS_INTERVAL 102400u
 
 typedef struct {
