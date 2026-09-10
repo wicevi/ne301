@@ -4,6 +4,7 @@
  */
 
 #include "ota_bundle.h"
+#include "ota_header.h"
 
 /* Device compile-time partition table derived from mem_map.h. Order matches
  * bundle_part_id_t so index == id. */
@@ -114,6 +115,52 @@ int ota_bundle_layout_matches_device(const ota_bundle_header_t *hdr)
         }
     }
     return 0;
+}
+
+/* NE301: a layout-changing bundle that MOVES a burned partition must also
+ * carry that partition's firmware. The new FSBL boots and the system state
+ * is rebuilt against the NEW addresses, so a moved partition without its
+ * image (e.g. a bundle packed with --exclude app) points boot selection at
+ * blank flash - unbootable. Returns the first moved-but-missing burned part
+ * id (bundle_part_id_t), or -1 when every moved burned part is covered by
+ * an entry. A partition missing from the bundle table counts as moved: the
+ * table IS the layout after the burn. */
+int ota_bundle_moved_burn_part_missing_fw(const ota_bundle_header_t *hdr)
+{
+    static const struct {
+        bundle_part_id_t part;
+        uint8_t          fw;
+    } burned_parts[] = {
+        { BUNDLE_PART_APP1, OTA_FW_TYPE_APP },
+        { BUNDLE_PART_WEB,  OTA_FW_TYPE_WEB },
+        { BUNDLE_PART_AI_1, OTA_FW_TYPE_AI_MODEL },
+        { BUNDLE_PART_WIFI, OTA_FW_TYPE_WIFI },
+    };
+
+    if (!hdr) return -1;
+
+    /* FSBL is covered by the dedicated "layout-changing bundle must contain
+     * FSBL" rule in the precheck; every other burned partition is checked
+     * here. */
+    for (size_t k = 0; k < sizeof(burned_parts) / sizeof(burned_parts[0]); k++) {
+        uint32_t base = 0, size = 0;
+        bundle_part_id_t id = burned_parts[k].part;
+
+        if (ota_bundle_part_lookup(hdr, (uint8_t)id, &base, &size) == 0 &&
+            base == s_device_parts[id].base) {
+            continue;   /* declared and unmoved */
+        }
+        /* moved (or missing from the table): its firmware must be on board */
+        int found = 0;
+        for (uint32_t i = 0; i < hdr->entry_count; i++) {
+            if (hdr->entries[i].fw_type == burned_parts[k].fw) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) return (int)id;
+    }
+    return -1;
 }
 
 /* Partitions the bundle burn path resolves addresses from — mirrors

@@ -1523,6 +1523,11 @@ aicam_result_t system_controller_register_io_trigger(system_controller_t *contro
              if (evs[i].duty == WAKE_DUTY_UPLOAD_FLUSH) need_flush   = AICAM_TRUE;
              wake_scheduler_mark_handled(evs[i].duty, evs[i].due_unix_sec);
          }
+         /* Verdict line for field diagnosis: a pure flush wake must show
+          * capture=0 - a 1 there means an unsolicited image was taken. */
+         LOG_SVC_INFO("RTC wake verdict: events=%d capture=%d flush=%d flags=0x%lX",
+                      n, (int)need_capture, (int)need_flush,
+                      (unsigned long)wakeup_flag);
          /* Single NVS write for the whole cycle, before the (potentially
           * 30s+) drain below so the marks survive a power cut mid-drain. */
          wake_scheduler_flush_state();

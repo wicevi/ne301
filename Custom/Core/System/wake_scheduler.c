@@ -115,7 +115,16 @@ static uint64_t compute_next_capture(uint64_t now_unix_sec)
                 out = midnight_ts + next;
             }
         } else if (tc->interval_sec > 0) {
-            out = now_ts + tc->interval_sec;
+            /* Register the next lattice point after the last REAL capture
+             * (same anchoring as collect_capture_in_range): registering
+             * from "now" would let an unrelated wake in between slide the
+             * capture schedule. Clamp forward if the marker is behind the
+             * clock (first cycle / clock step). */
+            uint64_t last = get_handled_at(WAKE_DUTY_CAPTURE);
+            out = (last != 0) ? (last + tc->interval_sec) : 0;
+            if (out <= now_ts || out == 0) {
+                out = now_ts + tc->interval_sec;
+            }
         }
         break;
     case AICAM_TIMER_CAPTURE_MODE_ABSOLUTE: {
@@ -169,9 +178,21 @@ static int collect_capture_in_range(uint64_t from_unix_sec, uint64_t to_unix_sec
     switch (tc->capture_mode) {
     case AICAM_TIMER_CAPTURE_MODE_INTERVAL: {
         if (tc->interval_sec == 0) break;
-        uint64_t base = (tc->interval_mode == AICAM_TIMER_INTERVAL_MODE_SCHEDULED)
-                            ? (midnight_ts + tc->start_time)
-                            : (now_ts - tc->interval_sec); /* arbitrary anchor */
+        uint64_t base;
+        if (tc->interval_mode == AICAM_TIMER_INTERVAL_MODE_SCHEDULED) {
+            base = midnight_ts + tc->start_time;
+        } else {
+            /* Anchor the lattice on the last REAL capture (the persisted
+             * handled marker), not on the query time: a grid derived from
+             * `now` always contains `now`, so an unrelated wake - e.g. an
+             * upload-flush alarm landing between two captures - would find
+             * a "due" capture and take an unsolicited image. The marker is
+             * already written on every capture wake (mark_handled), so this
+             * adds no new persistence. First cycle (marker 0) falls back to
+             * the old now-anchored behavior. */
+            uint64_t last = get_handled_at(WAKE_DUTY_CAPTURE);
+            base = (last != 0) ? last : (now_ts - tc->interval_sec);
+        }
         if (base > from_unix_sec) {
             /* step backwards to ≤ from. Cap iterations to avoid runaway
              * loop if base underflowed or interval is tiny. */
