@@ -932,7 +932,12 @@ aicam_result_t file_preview_handler(http_handler_context_t *ctx)
     size_t file_size = (size_t)st.st_size;
 
     if (is_previewable_image(fname)) {
-        // Send image binary - Content-Length + mg_send loop, no malloc
+        // Send image binary through the event-driven chunked sender used by
+        // downloads. mg_send copies into the connection send buffer, so an
+        // inline read+send loop would grow and repeatedly realloc a near-2MB
+        // queue (the preview size cap) instead of streaming an 8KB working
+        // set, and an allocation failure mid-loop would strand the client
+        // with an already-advertised Content-Length.
         mg_printf(ctx->conn,
                   "HTTP/1.1 200 OK\r\n"
                   "Content-Type: %s\r\n"
@@ -940,18 +945,21 @@ aicam_result_t file_preview_handler(http_handler_context_t *ctx)
                   "Connection: close\r\n"
                   "\r\n",
                   get_mime_type(fname), (unsigned long)file_size);
-        uint8_t *chunk = (uint8_t *)hal_mem_alloc_large(8192);
-        if (!chunk) {
+
+        file_download_ctx_t *dc = (file_download_ctx_t *)buffer_calloc(1, sizeof(*dc));
+        if (!dc) {
             disk_file_fclose(fs_type, fd);
             return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Memory allocation failed");
         }
-        int n;
-        while ((n = disk_file_fread(fs_type, fd, chunk, 8192)) > 0)
-            mg_send(ctx->conn, chunk, (size_t)n);
-        hal_mem_free(chunk);
-        disk_file_fclose(fs_type, fd);
-        /* Binary response already sent above - suppress the router's JSON
-         * response, same as the download handler after its own send */
+        dc->magic     = FILE_DOWNLOAD_CTX_MAGIC;
+        dc->fs_type   = fs_type;
+        dc->fd        = fd;              /* closed by the event handler cleanup */
+        dc->remaining = file_size;
+        dc->sent      = 0;
+
+        ctx->conn->fn_data = dc;
+        ctx->conn->fn      = file_download_event_handler;
+
         return AICAM_ERROR_NOT_SENT_AGAIN;
     }
 
