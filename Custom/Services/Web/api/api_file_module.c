@@ -187,7 +187,8 @@ typedef struct {
     uint32_t     magic;
     FS_Type_t    fs_type;
     void        *fd;
-    char         full_path[MAX_PATH_LEN];
+    char         full_path[MAX_PATH_LEN];   /* temp path actually written   */
+    char         final_path[MAX_PATH_LEN];  /* path renamed to on success   */
     size_t       total_received;
     size_t       content_length;
     uint8_t      write_buf[FILE_UPLOAD_STREAM_BUF_SIZE];
@@ -258,8 +259,8 @@ void file_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data
         if (ctx) {
             /* Close/error before the success path ran means a truncated body:
              * mark failed so cleanup drops the buffered partial instead of
-             * flushing it, and removes the partial file rather than leaving a
-             * truncated copy over the "w"-opened target. */
+             * flushing it, and removes the temp file. Any pre-existing file
+             * at the target path was never touched. */
             ctx->failed = AICAM_TRUE;
             file_upload_cleanup(ctx);
             c->fn_data = NULL;
@@ -322,7 +323,20 @@ void file_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data
 
         char fpath[MAX_PATH_LEN];
         build_full_path(dir, fn, fpath, sizeof(fpath));
-        void *fd = disk_file_fopen(fst, fpath, "w");
+
+        /* Never open the target with "w": truncating an existing file before
+         * the body arrives means any mid-upload failure destroys the original
+         * (cleanup removes the partial). Write to a temp sibling instead and
+         * rename over the target only after the last byte lands. */
+        static uint32_t s_upload_seq = 0;
+        char tpath[MAX_PATH_LEN];
+        if (snprintf(tpath, sizeof(tpath), "%s.%08x.upld",
+                     fpath, (unsigned)(++s_upload_seq)) >= (int)sizeof(tpath)) {
+            file_upload_send_response(c, API_ERROR_INVALID_REQUEST, "Path too long");
+            return;
+        }
+
+        void *fd = disk_file_fopen(fst, tpath, "w");
         if (!fd) {
             file_upload_send_response(c, API_ERROR_INTERNAL_ERROR, "Cannot create file");
             return;
@@ -330,7 +344,7 @@ void file_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data
 
         ctx = (file_upload_ctx_t *)buffer_calloc(1, sizeof(*ctx));
         if (!ctx) {
-            disk_file_fclose(fst, fd); disk_file_remove(fst, fpath);
+            disk_file_fclose(fst, fd); disk_file_remove(fst, tpath);
             file_upload_send_response(c, API_ERROR_INTERNAL_ERROR, "OOM");
             return;
         }
@@ -340,7 +354,8 @@ void file_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data
         ctx->fd             = fd;
         ctx->content_length = total;
         ctx->initialized    = AICAM_TRUE;
-        strncpy(ctx->full_path, fpath, sizeof(ctx->full_path) - 1);
+        strncpy(ctx->full_path, tpath, sizeof(ctx->full_path) - 1);
+        strncpy(ctx->final_path, fpath, sizeof(ctx->final_path) - 1);
 
         c->fn_data = ctx;
         c->pfn     = NULL;
@@ -395,21 +410,56 @@ void file_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data
             disk_file_fclose(ctx->fs_type, ctx->fd);
             ctx->fd = NULL;
 
-            char spath[MAX_PATH_LEN];
+            /* Full body landed: promote the temp sibling to the target path.
+             * flash: lfs_rename is an atomic overwrite; SD: the fx backend
+             * parks an existing destination under a backup name first.
+             * Until this succeeds the pre-existing file at the target is
+             * untouched. */
+            if (disk_file_rename(ctx->fs_type, ctx->full_path, ctx->final_path) != 0) {
+                ctx->failed = AICAM_TRUE;
+                file_upload_cleanup(ctx); c->fn_data = NULL;
+                file_upload_send_response(c, API_ERROR_INTERNAL_ERROR, "Rename failed");
+                return;
+            }
+
             unsigned ssz = (unsigned)ctx->total_received;
-            strncpy(spath, ctx->full_path, sizeof(spath) - 1);
-            spath[sizeof(spath) - 1] = 0;
+            char rpath[MAX_PATH_LEN];
+            strncpy(rpath, ctx->final_path, sizeof(rpath) - 1);
+            rpath[sizeof(rpath) - 1] = 0;
             buffer_free(ctx); c->fn_data = NULL;
 
-            mg_http_reply(c, 200,
-                "Content-Type: application/json\r\n"
-                "Connection: close\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
-                "Access-Control-Allow-Headers: Content-Type, Authorization\r\n",
-                "{\"success\":true,\"error_code\":\"NONE\","
-                "\"message\":\"File uploaded successfully\","
-                "\"data\":{\"path\":\"%s\",\"size\":%u}}", spath, ssz);
+            /* Build the body with cJSON: the path can contain quotes,
+             * backslashes or unicode characters that a raw %s would emit
+             * unescaped, producing invalid JSON. */
+            cJSON *body = cJSON_CreateObject();
+            cJSON *data = cJSON_CreateObject();
+            if (body && data) {
+                if (!cJSON_AddItemToObject(body, "data", data))
+                    cJSON_Delete(data); /* not adopted: free it here */
+                else if (cJSON_AddBoolToObject(body, "success", 1) &&
+                         cJSON_AddStringToObject(body, "error_code", "NONE") &&
+                         cJSON_AddStringToObject(body, "message",
+                                                 "File uploaded successfully") &&
+                         cJSON_AddStringToObject(data, "path", rpath) &&
+                         cJSON_AddNumberToObject(data, "size", ssz)) {
+                    char *jb = cJSON_PrintUnformatted(body);
+                    if (jb) {
+                        mg_http_reply(c, 200,
+                            "Content-Type: application/json\r\n"
+                            "Connection: close\r\n"
+                            "Access-Control-Allow-Origin: *\r\n"
+                            "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+                            "Access-Control-Allow-Headers: Content-Type, Authorization\r\n",
+                            "%s", jb);
+                        cJSON_free(jb);
+                        c->is_draining = 1;
+                        cJSON_Delete(body);
+                        return;
+                    }
+                }
+            }
+            cJSON_Delete(body);
+            file_upload_send_response(c, API_ERROR_INTERNAL_ERROR, "Response build failed");
         }
         return;
     }

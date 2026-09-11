@@ -1837,6 +1837,14 @@ aicam_result_t network_halow_connect_handler(http_handler_context_t *ctx)
     use_saved_json = cJSON_GetObjectItem(request_json, "use_saved_password");
     use_saved_password = (use_saved_json != NULL && cJSON_IsTrue(use_saved_json)) ? AICAM_TRUE : AICAM_FALSE;
 
+    /* bssid points into request_json; the tree is deleted before the final
+     * response is built, so keep a local copy for the echo below. */
+    char bssid_buf[32];
+    if (bssid != NULL) {
+        snprintf(bssid_buf, sizeof(bssid_buf), "%s", bssid);
+        bssid = bssid_buf;
+    }
+
     if (ssid == NULL || ssid[0] == '\0' || strlen(ssid) >= 32) {
         cJSON_Delete(request_json);
         return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Missing or invalid 'ssid'");
