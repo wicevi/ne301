@@ -1226,9 +1226,14 @@ aicam_result_t ota_bundle_finish_handler(http_handler_context_t *ctx)
 void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data) {
     ota_upload_ctx_t *ctx = (ota_upload_ctx_t *)c->fn_data;
 
-    /* Type guard: the detached-connection router dispatches by ctx magic;
-     * never touch a context that is not ours. */
-    if (!ctx || ctx->magic != OTA_UPLOAD_CTX_MAGIC) return;
+    /* Type guard for detached (post-HDRS) events: the router dispatches by
+     * ctx magic, never touch a context that is not ours. The FIRST call
+     * (MG_EV_HTTP_HDRS) arrives with fn_data still pointing at the server
+     * instance - that phase creates and attaches the ctx, so it must skip
+     * the check (same structure as file_upload_stream_processor). */
+    if (ev != MG_EV_HTTP_HDRS) {
+        if (!ctx || ctx->magic != OTA_UPLOAD_CTX_MAGIC) return;
+    }
 
     if (ev == MG_EV_CLOSE || ev == MG_EV_ERROR) {
         if (ctx) {

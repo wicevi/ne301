@@ -32,12 +32,12 @@ aicam_result_t web_api_register_file_module(void);
  * @param ev      Mongoose event type
  * @param ev_data Event data (mg_http_message* for MG_EV_HTTP_HDRS)
  */
+void file_upload_stream_processor(struct mg_connection *c, int ev,
+                                  void *ev_data);
+
 /* First field of file_upload_ctx_t; the detached-connection router in
  * web_server.c dispatches by this tag (see OTA_UPLOAD_CTX_MAGIC too). */
 #define FILE_UPLOAD_CTX_MAGIC 0x4655504Cu  /* 'FUPL' */
-
-void file_upload_stream_processor(struct mg_connection *c, int ev,
-                                  void *ev_data);
 
 /**
  * @brief GET /api/v1/files/list - List directory contents
