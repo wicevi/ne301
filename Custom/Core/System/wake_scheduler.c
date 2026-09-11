@@ -12,7 +12,6 @@
 
 #include <string.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <time.h>
 
 /* ==================== Persistent state ==================== */
@@ -536,7 +535,8 @@ uint64_t wake_scheduler_next_capture(uint64_t now_unix_sec)
     return 0;
 }
 
-int wake_scheduler_due_events(uint64_t from_unix_sec, uint64_t to_unix_sec,
+int wake_scheduler_due_events(uint64_t now_unix_sec,
+                              uint64_t from_unix_sec, uint64_t to_unix_sec,
                               wake_event_t *out_events, int max_events)
 {
     if (!out_events || max_events <= 0) return 0;
@@ -552,24 +552,38 @@ int wake_scheduler_due_events(uint64_t from_unix_sec, uint64_t to_unix_sec,
      * interval keeps >=2 capture events inside the ±60s poll window, the
      * WAKE_DUTY_MAX-sized buffer filled with capture events alone, and the
      * flush event was silently dropped: scheduled upload never fired in
-     * full-speed mode. Use the LATEST unfiltered event per duty — the
-     * handled markers are monotonic maxima, so marking the latest suppresses
-     * every earlier one as well. */
-    uint64_t cap_due = 0, flu_due = 0;
+     * full-speed mode.
+     *
+     * Within the window prefer the LATEST node that has already ARRIVED
+     * (node <= now) and fall back to the latest future node only when
+     * nothing arrived is pending. Taking the plain latest claimed the
+     * NEXT node at every wake (mark_handled is a monotonic maximum), so a
+     * burst of absolute nodes spaced inside the tolerance window lost its
+     * tail: 14:29/14:30/14:31 captures + a 14:30 flush produced exactly two
+     * photos — the 14:31 alarm woke, found every node <= the marker taken by
+     * the 14:30 wake, and slept without capturing. The fallback preserves
+     * the early-wake semantics (U0/RTC wake up to WAKE_TOLERANCE_SEC ahead
+     * of the node still fires it instead of sleeping out the remainder). */
+    uint64_t cap_due = 0, cap_fut = 0;
+    uint64_t flu_due = 0, flu_fut = 0;
 
     uint64_t cap_times[8];
     int n_cap = collect_capture_in_range(from_unix_sec, to_unix_sec, cap_times, 8);
     for (int i = 0; i < n_cap; i++) {
         if (cap_times[i] <= cap_handled) continue;
-        if (cap_times[i] > cap_due) cap_due = cap_times[i];
+        if (cap_times[i] > cap_fut) cap_fut = cap_times[i];
+        if (cap_times[i] <= now_unix_sec && cap_times[i] > cap_due) cap_due = cap_times[i];
     }
+    if (cap_due == 0) cap_due = cap_fut;
 
     uint64_t flu_times[8];
     int n_flu = collect_upload_in_range(from_unix_sec, to_unix_sec, flu_times, 8);
     for (int i = 0; i < n_flu; i++) {
         if (flu_times[i] <= flu_handled) continue;
-        if (flu_times[i] > flu_due) flu_due = flu_times[i];
+        if (flu_times[i] > flu_fut) flu_fut = flu_times[i];
+        if (flu_times[i] <= now_unix_sec && flu_times[i] > flu_due) flu_due = flu_times[i];
     }
+    if (flu_due == 0) flu_due = flu_fut;
 
     int n = 0;
     if (cap_due != 0 && n < max_events) {

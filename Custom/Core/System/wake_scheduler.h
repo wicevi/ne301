@@ -75,19 +75,32 @@ uint64_t wake_scheduler_next_capture(uint64_t now_unix_sec);
 
 /**
  * @brief Collect the distinct (by duty) events in [from, to] — at most ONE
- *        event per duty, the latest one not yet marked handled. Consumers
- *        only need "is this duty due" plus a timestamp to mark; returning
- *        every lattice point would starve the second duty in small caller
- *        buffers (1-min capture intervals filled the buffer with capture
- *        events alone and the flush event was dropped).
+ *        event per duty. Consumers only need "is this duty due" plus a
+ *        timestamp to mark; returning every lattice point would starve the
+ *        second duty in small caller buffers (1-min capture intervals filled
+ *        the buffer with capture events alone and the flush event was
+ *        dropped).
+ *        Selection prefers the LATEST node that has already ARRIVED
+ *        (node <= now_unix_sec) and only falls back to the latest still-
+ *        future node in the window when nothing arrived is pending: claiming
+ *        a future node while an arrived one waits marks it handled at this
+ *        wake, so its own (already-armed) alarm then wakes, judges everything
+ *        handled and sleeps without capturing — the last node of every
+ *        absolute burst spaced inside the tolerance window was swallowed.
+ *        The fallback keeps the early-wake semantics: a U0/RTC wake landing
+ *        up to WAKE_TOLERANCE_SEC ahead of the node still fires it
+ *        immediately instead of sleeping out the remainder.
  *        Skips events whose due_unix_sec <= last_handled_at[duty].
+ * @param now_unix_sec  current wall-clock time (arrival cutoff, NOT the
+ *                     window bounds — callers pass [now-60, now+60])
  * @param from_unix_sec  inclusive start
  * @param to_unix_sec    inclusive end
  * @param out_events     caller-provided buffer
  * @param max_events     buffer capacity
  * @return number of events written (0..max_events)
  */
-int wake_scheduler_due_events(uint64_t from_unix_sec,
+int wake_scheduler_due_events(uint64_t now_unix_sec,
+                              uint64_t from_unix_sec,
                               uint64_t to_unix_sec,
                               wake_event_t *out_events,
                               int max_events);

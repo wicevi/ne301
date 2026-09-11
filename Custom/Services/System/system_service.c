@@ -1652,6 +1652,7 @@ aicam_result_t system_controller_register_io_trigger(system_controller_t *contro
          uint64_t now_unix = rtc_get_timeStamp();
          wake_event_t evs[WAKE_DUTY_MAX];
          int n = wake_scheduler_due_events(
+             now_unix,
              now_unix > WAKE_TOLERANCE_SEC ? now_unix - WAKE_TOLERANCE_SEC : 0,
              now_unix + WAKE_TOLERANCE_SEC,
              evs, WAKE_DUTY_MAX);
@@ -3448,6 +3449,7 @@ aicam_result_t system_service_poll_scheduled_flush(void)
     uint64_t now = rtc_get_timeStamp();
     wake_event_t evs[WAKE_DUTY_MAX];
     int n = wake_scheduler_due_events(
+        now,
         now > WAKE_TOLERANCE_SEC ? now - WAKE_TOLERANCE_SEC : 0,
         now + WAKE_TOLERANCE_SEC, evs, WAKE_DUTY_MAX);
 
