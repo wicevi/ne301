@@ -195,6 +195,14 @@ aicam_result_t json_config_save_work_mode_config_to_nvs(const work_mode_config_t
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save timer start time to NVS");
 
+    result = json_config_nvs_write_uint32(NVS_KEY_TIMER_END_TIME, config->timer_trigger.end_time);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save timer end time to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_TIMER_ANCHOR, config->timer_trigger.anchor_time);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save timer anchor to NVS");
+
     result = json_config_nvs_write_string(NVS_KEY_RTSP_URL, config->video_stream_mode.rtsp_server_url);
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save rtsp url to NVS");
@@ -2853,6 +2861,36 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
         config->work_mode_config.timer_trigger.start_time = temp_uint32;
     else
         json_config_nvs_write_uint32(NVS_KEY_TIMER_START_TIME, config->work_mode_config.timer_trigger.start_time);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_TIMER_END_TIME, &temp_uint32);
+    if (result == AICAM_OK) {
+        config->work_mode_config.timer_trigger.end_time = temp_uint32;
+    } else {
+        /* Key absent = config written by firmware that had no end_time at
+         * all (its web UI could not even set one): the SCHEDULED scheduler
+         * IGNORED the field and ran a full-day grid anchored at start_time.
+         * Translate that observed behavior into the new semantics instead
+         * of letting 0 fall through as "ends at midnight" (which would
+         * silently drop every post-midnight node after OTA): full day =
+         * start T with end T-1min. This branch writes the key back, so the
+         * migration is strictly ONE-SHOT (first boot after OTA) and
+         * idempotent on a failed write. start_time == 0 needs no migration
+         * (0/0 is the full-day representation already). */
+        timer_trigger_config_t *tt = &config->work_mode_config.timer_trigger;
+        if (tt->interval_mode == AICAM_TIMER_INTERVAL_MODE_SCHEDULED &&
+            tt->start_time != 0 && tt->start_time < 86400u) {
+            tt->end_time = (tt->start_time + 86400u - 60u) % 86400u;
+            LOG_CORE_INFO("Legacy config: end_time migrated to full-day window (start %lu, end %lu)",
+                          (unsigned long)tt->start_time, (unsigned long)tt->end_time);
+        }
+        json_config_nvs_write_uint32(NVS_KEY_TIMER_END_TIME, tt->end_time);
+    }
+
+    result = json_config_nvs_read_uint32(NVS_KEY_TIMER_ANCHOR, &temp_uint32);
+    if (result == AICAM_OK)
+        config->work_mode_config.timer_trigger.anchor_time = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_TIMER_ANCHOR, config->work_mode_config.timer_trigger.anchor_time);
 
     result = json_config_nvs_read_string(NVS_KEY_RTSP_URL, config->work_mode_config.video_stream_mode.rtsp_server_url, sizeof(config->work_mode_config.video_stream_mode.rtsp_server_url));
     if (result != AICAM_OK)
