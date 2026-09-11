@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 
 /* ==================== Persistent state ==================== */
 
@@ -163,6 +164,31 @@ static aicam_bool_t interval_lattice_params(const timer_trigger_config_t *tc,
     return AICAM_TRUE;
 }
 
+/* Local weekday of a node timestamp, in the timer config's encoding:
+ * 0=Monday ... 6=Sunday — the same math scheduler_manager's REPEAT_WEEKLY
+ * trigger uses ((tm_wday + 6) % 7 on the timezone-shifted clock), so the
+ * low-power path and the active RTC path always agree about which day a
+ * timestamp lands on. `t` is on the RTC scale (midnight_ts + seconds-of-day). */
+static int weekday_idx_of(uint64_t t)
+{
+    time_t local = (time_t)((int64_t)t + (int64_t)rtc_get_timezone() * 3600);
+    struct tm tm;
+    localtime_r(&local, &tm);
+    return (tm.tm_wday + 6) % 7;
+}
+
+/* Does time node `node` fire on weekday `wd` (0=Mon..6=Sun)? weekdays[] is
+ * per-node: 0 = every day, 1=Monday ... 7=Sunday — mirror of
+ * map_weekdays_to_bits()/REPEAT_WEEKLY registration in system_service. */
+static aicam_bool_t node_fires_on_weekday(const timer_trigger_config_t *tc,
+                                          uint32_t node, int wd)
+{
+    if (node >= tc->time_node_count) return AICAM_FALSE;
+    uint8_t sel = tc->weekdays[node];
+    if (sel == 0) return AICAM_TRUE;
+    return (wd == (int)(sel - 1)) ? AICAM_TRUE : AICAM_FALSE;
+}
+
 /**
  * Compute next capture-trigger absolute time given a "now" timestamp.
  * Mirrors system_controller_get_next_capture_at() but is config-driven so it
@@ -213,17 +239,25 @@ static uint64_t compute_next_capture(uint64_t now_unix_sec)
     }
     case AICAM_TIMER_CAPTURE_MODE_ABSOLUTE: {
         if (tc->time_node_count == 0) break;
-        uint32_t earliest = UINT32_MAX;
-        for (uint32_t i = 0; i < tc->time_node_count && i < 10; i++) {
-            if (tc->time_node[i] > now_sec && tc->time_node[i] < earliest) {
-                earliest = tc->time_node[i];
+        /* Walk forward day by day (a week always covers every weekday) and
+         * take the earliest node that both fires on that day's weekday and
+         * is still ahead of now. The active path registers absolute nodes
+         * REPEAT_WEEKLY with map_weekdays_to_bits(); arming sleep without
+         * the same filter would wake the device on non-selected days and
+         * turn a weekly schedule into a daily one. */
+        int wd_today = weekday_idx_of(midnight_ts);
+        for (int d = 0; d < 7; d++) {
+            int wd = (wd_today + d) % 7;
+            uint32_t earliest = UINT32_MAX;
+            for (uint32_t i = 0; i < tc->time_node_count && i < 10; i++) {
+                if (!node_fires_on_weekday(tc, i, wd)) continue;
+                if (d == 0 && tc->time_node[i] <= now_sec) continue;
+                if (tc->time_node[i] < earliest) earliest = tc->time_node[i];
             }
-        }
-        if (earliest != UINT32_MAX) {
-            out = midnight_ts + earliest;
-        } else {
-            /* All past today → first node tomorrow */
-            out = midnight_ts + 86400u + tc->time_node[0];
+            if (earliest != UINT32_MAX) {
+                out = midnight_ts + (uint64_t)d * 86400u + earliest;
+                break;
+            }
         }
         break;
     }
@@ -337,13 +371,20 @@ static int collect_capture_in_range(uint64_t from_unix_sec, uint64_t to_unix_sec
     }
     case AICAM_TIMER_CAPTURE_MODE_ABSOLUTE: {
         /* Check today's nodes and tomorrow's first node, broaden if window > 1 day. */
+        int wd_today = weekday_idx_of(midnight_ts);
         for (uint32_t i = 0; i < tc->time_node_count && i < 10 && n < max; i++) {
             uint64_t t_today = midnight_ts + tc->time_node[i];
-            if (t_today >= from_unix_sec && t_today <= to_unix_sec) {
+            /* Per-node weekday filter (weekdays[i]: 0=all, 1=Mon..7=Sun) —
+             * without it the wake handler would judge a Wednesday-only node
+             * due on every day and capture on non-selected ones. Today and
+             * tomorrow are checked against their own weekdays. */
+            if (node_fires_on_weekday(tc, i, wd_today) &&
+                t_today >= from_unix_sec && t_today <= to_unix_sec) {
                 out_times[n++] = t_today;
             }
             uint64_t t_tomorrow = t_today + 86400u;
-            if (t_tomorrow >= from_unix_sec && t_tomorrow <= to_unix_sec && n < max) {
+            if (node_fires_on_weekday(tc, i, (wd_today + 1) % 7) &&
+                t_tomorrow >= from_unix_sec && t_tomorrow <= to_unix_sec && n < max) {
                 out_times[n++] = t_tomorrow;
             }
         }
