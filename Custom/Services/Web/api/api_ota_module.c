@@ -909,15 +909,16 @@ aicam_result_t ota_bundle_precheck_handler(http_handler_context_t *ctx)
                                   "(the bootloader embeds the partition table)");
     }
 
-    /* ...and every burned partition the bundle MOVES must carry its firmware:
-     * after the burn the system runs on the bundle's table, so e.g. a moved
-     * APP1 in a bundle packed with --exclude app would boot from a blank
-     * address. */
+    /* ...and every burned partition the bundle MOVES or RESIZES must carry
+     * its firmware: after the burn the system runs on the bundle's table, so
+     * e.g. a moved APP1 in a bundle packed with --exclude app would boot from
+     * a blank address, and a resized one can have its stale tail overwritten
+     * by a later partition's image. */
     if (layout_changed &&
         ota_bundle_moved_burn_part_missing_fw(&g_bundle_session.header) >= 0) {
         bundle_session_clear();
         return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
-                                  "Layout-changing bundle moves a burn partition without its firmware");
+                                  "Layout-changing bundle moves or resizes a burn partition without its firmware");
     }
 
     /* ---- pass 2: build the plan JSON ---- */

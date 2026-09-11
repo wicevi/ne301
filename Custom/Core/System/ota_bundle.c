@@ -117,12 +117,14 @@ int ota_bundle_layout_matches_device(const ota_bundle_header_t *hdr)
     return 0;
 }
 
-/* NE301: a layout-changing bundle that MOVES a burned partition must also
- * carry that partition's firmware. The new FSBL boots and the system state
- * is rebuilt against the NEW addresses, so a moved partition without its
+/* NE301: a layout-changing bundle that MOVES or RESIZES a burned partition
+ * must also carry that partition's firmware. The new FSBL boots and the system
+ * state is rebuilt against the NEW addresses, so a moved partition without its
  * image (e.g. a bundle packed with --exclude app) points boot selection at
- * blank flash - unbootable. Returns the first moved-but-missing burned part
- * id (bundle_part_id_t), or -1 when every moved burned part is covered by
+ * blank flash - unbootable. A same-base resize is just as bad: shrinking APP1
+ * while later partitions shift down lets another bundled image burn over the
+ * stale tail of the existing app. Returns the first moved/resized-but-missing
+ * burned part id (bundle_part_id_t), or -1 when every such part is covered by
  * an entry. A partition missing from the bundle table counts as moved: the
  * table IS the layout after the burn. */
 int ota_bundle_moved_burn_part_missing_fw(const ota_bundle_header_t *hdr)
@@ -147,10 +149,11 @@ int ota_bundle_moved_burn_part_missing_fw(const ota_bundle_header_t *hdr)
         bundle_part_id_t id = burned_parts[k].part;
 
         if (ota_bundle_part_lookup(hdr, (uint8_t)id, &base, &size) == 0 &&
-            base == s_device_parts[id].base) {
-            continue;   /* declared and unmoved */
+            base == s_device_parts[id].base &&
+            size == s_device_parts[id].size) {
+            continue;   /* declared and unchanged (address + size) */
         }
-        /* moved (or missing from the table): its firmware must be on board */
+        /* moved/resized (or missing from the table): its firmware must be on board */
         int found = 0;
         for (uint32_t i = 0; i < hdr->entry_count; i++) {
             if (hdr->entries[i].fw_type == burned_parts[k].fw) {

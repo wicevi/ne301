@@ -2088,12 +2088,19 @@ static int halow_parse_ipv4_item(cJSON *root, const char *key, uint8_t out[4])
     cJSON *item = cJSON_GetObjectItem(root, key);
     const char *str;
     unsigned int a, b, c, d;
+    int consumed = -1;
 
     if (item == NULL || !cJSON_IsString(item)) {
         return -1;
     }
     str = cJSON_GetStringValue(item);
-    if (str == NULL || sscanf(str, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
+    /* Strict dotted quad: bare sscanf also accepts "300.1.1.1" or "1.2.3.4junk",
+     * and the values below are truncated into uint8_t octets — the saved
+     * address would silently differ from what the user typed. */
+    if (str == NULL ||
+        sscanf(str, "%u.%u.%u.%u%n", &a, &b, &c, &d, &consumed) != 4 ||
+        consumed != (int)strlen(str) ||
+        a > 255u || b > 255u || c > 255u || d > 255u) {
         return -1;
     }
     out[0] = (uint8_t)a;
@@ -3759,7 +3766,12 @@ aicam_result_t network_poe_config_handler(http_handler_context_t *ctx) {
             if (item && cJSON_IsString(item)) { \
                 const char* ip_str = cJSON_GetStringValue(item); \
                 unsigned int a, b, c, d; \
-                if (sscanf(ip_str, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) { \
+                int consumed_ = -1; \
+                /* strict dotted quad - bare sscanf takes "300.1.1.1" or \
+                 * "1.2.3.4junk" and truncates into the uint8_t octets */ \
+                if (sscanf(ip_str, "%u.%u.%u.%u%n", &a, &b, &c, &d, &consumed_) == 4 && \
+                    consumed_ == (int)strlen(ip_str) && \
+                    a <= 255u && b <= 255u && c <= 255u && d <= 255u) { \
                     target_array[0] = (uint8_t)a; \
                     target_array[1] = (uint8_t)b; \
                     target_array[2] = (uint8_t)c; \
@@ -3891,7 +3903,12 @@ aicam_result_t network_poe_validate_handler(http_handler_context_t *ctx) {
         if (item && cJSON_IsString(item)) { \
             const char* ip_str = cJSON_GetStringValue(item); \
             unsigned int a, b, c, d; \
-            if (sscanf(ip_str, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) { \
+            int consumed_ = -1; \
+            /* strict dotted quad - bare sscanf takes "300.1.1.1" or \
+             * "1.2.3.4junk" and truncates into the uint8_t octets */ \
+            if (sscanf(ip_str, "%u.%u.%u.%u%n", &a, &b, &c, &d, &consumed_) == 4 && \
+                consumed_ == (int)strlen(ip_str) && \
+                a <= 255u && b <= 255u && c <= 255u && d <= 255u) { \
                 target_array[0] = (uint8_t)a; \
                 target_array[1] = (uint8_t)b; \
                 target_array[2] = (uint8_t)c; \
