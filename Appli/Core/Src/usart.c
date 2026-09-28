@@ -178,7 +178,10 @@ void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  /* Log/console UART. 115200 -> 921600: verbose SDK tracing (module SLSDK/
+   * NETIF) now streams here; the extra bandwidth keeps per-line blocking
+   * UART writes short. */
+  huart2.Init.BaudRate = 921600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;

@@ -26,11 +26,13 @@ typedef int   (*log_get_free_bytes_func_t)(uint64_t *out_free_bytes);  /* 0 = ok
 typedef void (*log_custom_output_func_t)(const char *msg, int len);
 
 /* Async file-output enqueue callback. When async file mode is enabled via
- * log_set_async_file(), the OUTPUT_FILE branch of log_message() no longer
+ * log_set_async_file(), the OUTPUT_FILE stage of log_message() no longer
  * writes to disk inline; instead it hands each formatted, ANSI-stripped line
- * to this callback (expected non-blocking). A background task later drains
- * the queue and calls log_file_flush_line() to perform the actual write. */
-typedef void (*log_enqueue_cb_t)(const char *line, int len);
+ * plus its module name to this callback (expected non-blocking). A background
+ * task later drains the queue and calls log_file_flush_line() to perform the
+ * actual write; the module name is carried along because flush re-applies
+ * the per-output module routing (only_module/not_module). */
+typedef void (*log_enqueue_cb_t)(const char *line, int len, const char *module);
 
 typedef enum {
     LOG_DEBUG,
@@ -72,6 +74,9 @@ typedef enum {
     OUTPUT_CUSTOM
 } OutputType;
 
+/* Max module names accepted in one route list ("A,B,C"). */
+#define LOG_ROUTE_MAX 4
+
 typedef struct {
     OutputType type;
     union {
@@ -87,6 +92,17 @@ typedef struct {
             log_custom_output_func_t func;
         } custom;
     } config;
+    /* File-output module routing (OUTPUT_FILE only; both lists empty = all
+     * modules). Comma-separated module names given at registration (e.g.
+     * "SLSDK,NWP"), split into these NULL-terminated arrays backed by heap
+     * buffers owned by the output and freed in log_shutdown().
+     * only_modules: receive ONLY these modules' lines (plus NULL-module
+     *               maintenance lines from log_file_flush_line).
+     * not_modules: receive every module's lines EXCEPT these. */
+    const char *only_modules[LOG_ROUTE_MAX];
+    const char *not_modules[LOG_ROUTE_MAX];
+    char *route_only_buf;
+    char *route_not_buf;
     bool enabled;
 } log_output_t;
 
@@ -113,6 +129,11 @@ int log_register_module(const char *name, LogLevel level, LogLevel file_level);
 int log_add_custom_output(log_custom_output_func_t func);
 int log_remove_custom_output(log_custom_output_func_t func);
 int log_add_output(OutputType type, const char *filename, size_t max_size, int max_files);
+/* Same as log_add_output, plus module routing for file outputs (see
+ * log_output_t.only_modules / not_modules; comma-separated list, e.g.
+ * "SLSDK,NWP"; pass NULL to accept all modules). */
+int log_add_output_filtered(OutputType type, const char *filename, size_t max_size, int max_files,
+                            const char *only_modules, const char *not_modules);
 int log_set_output_enabled(OutputType type, bool enabled);
 void log_message(LogLevel level, const char *module_name, const char *format, ...);
 int log_init(log_manager_t *mgr, log_lock_func_t lock, log_unlock_func_t unlock, log_file_ops_t *file_ops, log_get_time_func_t get_time_func);
@@ -122,8 +143,9 @@ int log_init(log_manager_t *mgr, log_lock_func_t lock, log_unlock_func_t unlock,
  * caller-owned drain task must invoke log_file_flush_line() to persist. */
 void log_set_async_file(bool enable, log_enqueue_cb_t cb);
 
-/* Persist one already-formatted, ANSI-stripped line to the file output,
- * performing rotation + circuit-breaker handling. Intended to be called by the
- * async drain task (NOT the log_message() caller). Takes log_mutex internally. */
-void log_file_flush_line(const char *line, int len);
+/* Persist one already-formatted, ANSI-stripped line to every enabled
+ * OUTPUT_FILE output whose module routing accepts `module` (NULL = all file
+ * outputs), performing rotation + circuit-breaker handling. Intended to be
+ * called by the async drain task (NOT the log_message() caller). Takes log_mutex internally. */
+void log_file_flush_line(const char *line, int len, const char *module);
 #endif

@@ -70,8 +70,55 @@ static int rotate_file(const char *filename, int max_files)
     return (ops->rename(filename, new_path) == 0) ? 0 : -1;
 }
 
+/* Split a comma-separated module list ("A, B,C") into a NULL-terminated array
+ * (max LOG_ROUTE_MAX entries). Tokens point into a heap copy owned by the
+ * output (route_*_buf, freed in log_shutdown). Empty/NULL list -> empty array.
+ * Called under log_mutex at registration, so strtok is safe. Returns token
+ * count, or -1 on allocation failure. */
+static int parse_route_list(const char *list, const char *out[LOG_ROUTE_MAX], char **buf)
+{
+    *buf = NULL;
+    for (int i = 0; i < LOG_ROUTE_MAX; i++) out[i] = NULL;
+    if (list == NULL || list[0] == '\0') return 0;
+
+    char *copy = strdup(list);
+    if (!copy) return -1;
+
+    int n = 0;
+    for (char *tok = strtok(copy, ","); tok != NULL && n < LOG_ROUTE_MAX; tok = strtok(NULL, ",")) {
+        while (*tok == ' ') tok++;   /* tolerate "A, B" spacing */
+        out[n++] = tok;
+    }
+    *buf = copy;
+    return n;
+}
+
+static bool module_in_route_list(const char *const list[LOG_ROUTE_MAX], const char *module)
+{
+    for (int i = 0; i < LOG_ROUTE_MAX && list[i] != NULL; i++) {
+        if (module != NULL && strcmp(list[i], module) == 0) return true;
+    }
+    return false;
+}
+
+/* Module routing for one file output: does it want a line from `module`?
+ * NULL module (maintenance lines written directly via log_file_flush_line)
+ * is accepted by every file output. */
+static bool output_wants_module(const log_output_t *output, const char *module)
+{
+    if (output->only_modules[0] != NULL) {
+        if (module == NULL) return true;
+        if (!module_in_route_list(output->only_modules, module)) return false;
+    }
+    if (output->not_modules[0] != NULL && module_in_route_list(output->not_modules, module)) {
+        return false;
+    }
+    return true;
+}
+
 /* Persist one already-formatted, ANSI-stripped line to every enabled OUTPUT_FILE
- * output, performing size-check rotation + circuit-breaker handling.
+ * output whose module routing accepts `module`, performing size-check
+ * rotation + circuit-breaker handling.
  *
  * Concurrency: does NOT take log_mutex. In async mode the only caller is the
  * drain task (log_message enqueues instead of writing); in sync mode the only
@@ -80,7 +127,7 @@ static int rotate_file(const char *filename, int max_files)
  * The slow LittleFS I/O thus runs WITHOUT log_mutex held, so log_message
  * callers never block on a file write — the whole point of the async path.
  * The file_ops themselves take storage_lock internally. */
-void log_file_flush_line(const char *line, int len)
+void log_file_flush_line(const char *line, int len, const char *module)
 {
     if (!log_manager || !log_manager->file_ops || !line || len <= 0) return;
     log_file_ops_t *ops = log_manager->file_ops;
@@ -90,6 +137,7 @@ void log_file_flush_line(const char *line, int len)
         if (output->type != OUTPUT_FILE) continue;
         if (!output->enabled) continue;
         if (output->config.file.disabled) continue;
+        if (!output_wants_module(output, module)) continue;
         const char *filename = output->config.file.filename;
 
         size_t current_size = 0;
@@ -220,6 +268,12 @@ int log_remove_custom_output(log_custom_output_func_t func)
 
 int log_add_output(OutputType type, const char *filename, size_t max_size, int max_files)
 {
+    return log_add_output_filtered(type, filename, max_size, max_files, NULL, NULL);
+}
+
+int log_add_output_filtered(OutputType type, const char *filename, size_t max_size, int max_files,
+                            const char *only_modules, const char *not_modules)
+{
     if (!log_manager) return -1;
 
     LOCK(log_manager);
@@ -234,9 +288,16 @@ int log_add_output(OutputType type, const char *filename, size_t max_size, int m
     log_manager->outputs = new_outputs;
     log_output_t *output = &log_manager->outputs[log_manager->output_count];
     memset(output, 0, sizeof(log_output_t));
-    
+
     output->type = type;
     output->enabled = true;
+    if (parse_route_list(only_modules, output->only_modules, &output->route_only_buf) < 0
+        || parse_route_list(not_modules, output->not_modules, &output->route_not_buf) < 0) {
+        hal_mem_free(output->route_only_buf);
+        hal_mem_free(output->route_not_buf);
+        UNLOCK(log_manager);
+        return -1;
+    }
     if (type == OUTPUT_FILE) {
         if (!filename) {
             UNLOCK(log_manager);
@@ -359,8 +420,8 @@ void log_message(LogLevel level, const char *module_name, const char *format, ..
     // Write to output
     for (size_t i = 0; i < log_manager->output_count; i++) {
         log_output_t *output = &log_manager->outputs[i];
-        if (!output->enabled) continue; 
-    
+        if (!output->enabled) continue;
+
         switch (output->type) {
             case OUTPUT_CONSOLE:
                 if (level < module_level) break;
@@ -368,33 +429,7 @@ void log_message(LogLevel level, const char *module_name, const char *format, ..
                 fflush(stdout);
                 break;
 
-            case OUTPUT_FILE: {
-                if (level < file_level || level == LOG_SIMPLE) break;
-                /* Circuit breaker: once a prior write/open/rename failed (or
-                 * registration found free space too low), skip all file output
-                 * for the rest of this run. See log_file_flush_line() for the
-                 * write/rotate/breaker logic. */
-                if (output->config.file.disabled) break;
-
-                /* Strip ANSI once here so the drain task receives clean text
-                 * and doesn't re-strip. */
-                char clean_buffer[LOG_MAX_LINE];
-                int clean_len = strip_ansi_sequences(log_buffer, clean_buffer, sizeof(clean_buffer));
-                if (clean_len < 0) clean_len = 0;
-                if (clean_len == 0) break;
-
-                if (log_manager->async_file && log_manager->enqueue_cb) {
-                    /* Async: hand the line to the drain task (non-blocking).
-                     * The caller never blocks on LittleFS file I/O. */
-                    log_manager->enqueue_cb(clean_buffer, clean_len);
-                } else {
-                    /* Sync fallback (pre-async behavior): write inline. We
-                     * already hold log_mutex; flush_line takes none. */
-                    log_file_flush_line(clean_buffer, clean_len);
-                }
-                break;
-            }
-            case OUTPUT_CUSTOM:
+            case OUTPUT_CUSTOM: {
                 if (level < module_level) break;
                 log_custom_output_node_t *node = log_manager->custom_outputs;
                 while (node) {
@@ -404,6 +439,48 @@ void log_message(LogLevel level, const char *module_name, const char *format, ..
                     node = node->next;
                 }
                 break;
+            }
+            default:
+                break;
+        }
+    }
+
+    /* File outputs are routed as a GROUP (not inside the per-output switch):
+     * first check whether any file target wants this module's line, then
+     * enqueue/write exactly ONCE for all of them — log_file_flush_line()
+     * re-applies the same per-output routing, which the async drain side
+     * needs since the queue only carries the module name, not the targets. */
+    if (level != LOG_SIMPLE && level >= file_level) {
+        int any_file_target = 0;
+        for (size_t i = 0; i < log_manager->output_count; i++) {
+            log_output_t *output = &log_manager->outputs[i];
+            if (output->type != OUTPUT_FILE) continue;
+            if (!output->enabled) continue;
+            /* Circuit breaker: once a prior write/open/rename failed (or
+             * registration found free space too low), skip all file output
+             * for the rest of this run. See log_file_flush_line(). */
+            if (output->config.file.disabled) continue;
+            if (!output_wants_module(output, module_name)) continue;
+            any_file_target = 1;
+            break;
+        }
+        if (any_file_target) {
+            /* Strip ANSI once here so the drain task receives clean text
+             * and doesn't re-strip. */
+            char clean_buffer[LOG_MAX_LINE];
+            int clean_len = strip_ansi_sequences(log_buffer, clean_buffer, sizeof(clean_buffer));
+            if (clean_len < 0) clean_len = 0;
+            if (clean_len > 0) {
+                if (log_manager->async_file && log_manager->enqueue_cb) {
+                    /* Async: hand the line to the drain task (non-blocking).
+                     * The caller never blocks on LittleFS file I/O. */
+                    log_manager->enqueue_cb(clean_buffer, clean_len, module_name);
+                } else {
+                    /* Sync fallback (pre-async behavior): write inline. We
+                     * already hold log_mutex; flush_line takes none. */
+                    log_file_flush_line(clean_buffer, clean_len, module_name);
+                }
+            }
         }
     }
 
@@ -428,6 +505,8 @@ void log_shutdown()
         log_output_t *output = &log_manager->outputs[i];
         if (output->type == OUTPUT_FILE) {
             hal_mem_free(output->config.file.filename);
+            hal_mem_free(output->route_only_buf);
+            hal_mem_free(output->route_not_buf);
         }
     }
     hal_mem_free(log_manager->outputs);

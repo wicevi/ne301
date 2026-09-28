@@ -943,13 +943,20 @@ build-dirs: $(BUILD_DIR)
 # Make all objects depend on directories
 $(OBJECTS): | build-dirs
 
+# Flag-carrying includes: objects must rebuild when defines/sources change in
+# any of these .mk files — the plain "%.c Makefile" prerequisite leaves stale
+# objects compiled with old C_DEFS (e.g. silabs_sdk.mk debug-log switches).
+MK_INCLUDES := Makefile ../stedgeai.mk \
+               ../Custom/Common/Lib/SiliconLabs_SDK_4_1_1/silabs_sdk.mk \
+               ../Custom/Common/Lib/mmx108/mmx108.mk
+
 # Compile C source files (CFLAGS via @response file: Windows CMD ~8191 char limit)
-$(BUILD_DIR)/%.o: %.c Makefile | build-dirs
+$(BUILD_DIR)/%.o: %.c $(MK_INCLUDES) | build-dirs
 	@echo "CC $<"
 	@$(file >$@.rsp,$(CFLAGS) -Wa,-a,-ad,-alms=$(BUILD_DIR)/$(notdir $(<:.c=.lst)))
 	@$(CC) -c @$@.rsp $< -o $@
 
-$(BUILD_DIR)/%.o: ../%.c Makefile | build-dirs
+$(BUILD_DIR)/%.o: ../%.c $(MK_INCLUDES) | build-dirs
 	@echo "CC $<"
 	@$(file >$@.rsp,$(CFLAGS) -Wa,-a,-ad,-alms=$(BUILD_DIR)/$(notdir $(<:.c=.lst)))
 	@$(CC) -c @$@.rsp $< -o $@

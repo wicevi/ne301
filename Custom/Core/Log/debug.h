@@ -46,6 +46,14 @@ extern "C" {
 #define DEBUG_MODULE_SERVICE        "SERVICE"
 #define DEBUG_MODULE_TASK           "TASK"
 #define DEBUG_MODULE_APP            "APP"
+/* WiseConnect SDK-internal traces: sl_debug_log() redirect
+ * (Custom/Common/Lib/SiliconLabs_SDK_4_1_1/port/src/sl_sdk_debug_log.c) */
+#define DEBUG_MODULE_SDK            "SLSDK"
+/* Host-side SDK call tracing from sl_net_netif.c (NWP_SDK_CALL/NWP_SDK_CB).
+ * Both modules log to the UART console at full DEBUG verbosity and are kept
+ * out of the aicam.log file output (module routing): their volume overflows
+ * the async file queue and drops lines. */
+#define DEBUG_MODULE_NETIF          "NETIF"
 
 /* ==================== Log Level Mapping ==================== */
 
@@ -237,6 +245,19 @@ typedef struct {
 #define LOG_APP_WARN(fmt, ...)      LOG_OUTPUT_COLOR(LOG_LEVEL_WARN, DEBUG_MODULE_APP, LOG_COLOR_WARN MODULE_COLOR_APP "[APP] ", fmt, ##__VA_ARGS__)
 #define LOG_APP_INFO(fmt, ...)      LOG_OUTPUT_COLOR(LOG_LEVEL_INFO, DEBUG_MODULE_APP, LOG_COLOR_INFO MODULE_COLOR_APP "[APP] ", fmt, ##__VA_ARGS__)
 #define LOG_APP_DEBUG(fmt, ...)     LOG_OUTPUT_COLOR(LOG_LEVEL_DEBUG, DEBUG_MODULE_APP, LOG_COLOR_DEBUG MODULE_COLOR_APP "[APP] ", fmt, ##__VA_ARGS__)
+
+// WiseConnect SDK / netif-layer SDK-call tracing — emitted on the UART console
+// at full verbosity, kept out of the aicam.log file output (module routing).
+// Plain macros: the log line header already carries module + level, so no
+// extra in-message prefix (avoids "[SLSDK] [DEBUG] [SDK] ..." duplication).
+#define LOG_SDK_ERROR(fmt, ...)     log_message(LOG_LEVEL_ERROR, DEBUG_MODULE_SDK, fmt, ##__VA_ARGS__)
+#define LOG_SDK_WARN(fmt, ...)      log_message(LOG_LEVEL_WARN, DEBUG_MODULE_SDK, fmt, ##__VA_ARGS__)
+#define LOG_SDK_INFO(fmt, ...)      log_message(LOG_LEVEL_INFO, DEBUG_MODULE_SDK, fmt, ##__VA_ARGS__)
+#define LOG_SDK_DEBUG(fmt, ...)     log_message(LOG_LEVEL_DEBUG, DEBUG_MODULE_SDK, fmt, ##__VA_ARGS__)
+#define LOG_NETIF_ERROR(fmt, ...)   log_message(LOG_LEVEL_ERROR, DEBUG_MODULE_NETIF, fmt, ##__VA_ARGS__)
+#define LOG_NETIF_WARN(fmt, ...)    log_message(LOG_LEVEL_WARN, DEBUG_MODULE_NETIF, fmt, ##__VA_ARGS__)
+#define LOG_NETIF_INFO(fmt, ...)    log_message(LOG_LEVEL_INFO, DEBUG_MODULE_NETIF, fmt, ##__VA_ARGS__)
+#define LOG_NETIF_DEBUG(fmt, ...)   log_message(LOG_LEVEL_DEBUG, DEBUG_MODULE_NETIF, fmt, ##__VA_ARGS__)
 
 // Backward compatibility macros
 #define LOG_DRV_FATAL(fmt, ...)     LOG_DRV_ERROR(fmt, ##__VA_ARGS__)

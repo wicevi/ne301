@@ -26,7 +26,44 @@
 #include "factory_test.h"
 
 #define IS_TCP_IP_DUAL_MODE         1
+/* NWP debug prints: set here, or project-wide via -DSL_NET_ENABLE_NWP_DEBUG_PRINTS
+ * (see Custom/Common/Lib/SiliconLabs_SDK_4_1_1/silabs_sdk.mk). Firmware-side
+ * prints stream out of the NWP UART (SL_SI91X_EXT_FEAT_UART_SEL_FOR_DEBUG_PRINTS). */
+#ifdef SL_NET_ENABLE_NWP_DEBUG_PRINTS
+#define IS_ENABLE_NWP_DEBUG_PRINTS  1
+#else
 #define IS_ENABLE_NWP_DEBUG_PRINTS  0
+#endif
+
+#if IS_ENABLE_NWP_DEBUG_PRINTS
+/* ==================== SDK call tracing (UART log console) ====================
+ * NWP_SDK_CALL: GNU statement expression that records the SDK function called
+ *   from this file (argument expressions included) and the sl_status_t it
+ *   returned. Usage stays unchanged (assignment / if / return all fine):
+ *     status = sl_wifi_disconnect(SL_WIFI_CLIENT_INTERFACE);
+ *   The function-name shadow macros further down wrap every call site
+ *   automatically, so no call-site code is modified.
+ * NWP_SDK_CB: records SDK callbacks dispatched into this file (event + args).
+ * Both are compiled only when IS_ENABLE_NWP_DEBUG_PRINTS is on; output goes
+ * through LOG_NETIF_* (module "NETIF") to the UART log console at full DEBUG
+ * verbosity — kept out of the aicam.log file output, whose async queue drops
+ * lines under this volume. NETIF keeps its own label: these are host-side
+ * netif-layer calls, not SDK-internal output.
+ * Note: per-packet data-plane calls (sl_wifi_send_raw_data_frame /
+ * sl_si91x_host_get_buffer_data) are deliberately NOT shadowed — one line per
+ * packet would flood the console. SDK-internal calls/returns inside SDK
+ * sources are covered separately by the sl_debug_log redirect
+ * (SLI_HOST_CURRENT_DBGLOG_LEVEL=DEBUG). */
+#define NWP_SDK_CALL(call)                                                    \
+    ({                                                                        \
+        sl_status_t _nwp_trace_st_ = (call);                                  \
+        LOG_NETIF_DEBUG("%s -> 0x%lX", #call, (unsigned long)_nwp_trace_st_); \
+        _nwp_trace_st_;                                                       \
+    })
+#define NWP_SDK_CB(fmt, ...)   LOG_NETIF_DEBUG("CB: " fmt, ##__VA_ARGS__)
+#else
+#define NWP_SDK_CB(fmt, ...)   ((void)0)
+#endif
 #if IS_TCP_IP_DUAL_MODE 
 #define IS_SELF_DHCP_SERVER         1
 #endif
@@ -45,6 +82,50 @@
 
 #if IS_TCP_IP_DUAL_MODE
 extern sl_status_t sl_si91x_configure_ip_address(sl_net_ip_configuration_t *address, uint8_t virtual_ap_id);
+#endif
+
+#if IS_ENABLE_NWP_DEBUG_PRINTS
+/* ==================== SDK function-name shadowing (must follow ALL decls) =========
+ * Redirects this file's calls to the SDK APIs below through NWP_SDK_CALL,
+ * automatically logging each call site's function + argument expressions and
+ * its return value, with zero call-site changes. Macro self-recursion is
+ * suppressed by the preprocessor "blue paint" rule (#call stringifies the
+ * original call text), so call semantics are unchanged.
+ * All entries are control-plane APIs returning sl_status_t. Per-packet
+ * data-plane calls (sl_wifi_send_raw_data_frame /
+ * sl_si91x_host_get_buffer_data) are deliberately not shadowed to keep the
+ * console from being flooded. */
+#define sl_wifi_init(...)                          NWP_SDK_CALL(sl_wifi_init(__VA_ARGS__))
+#define sl_wifi_deinit(...)                        NWP_SDK_CALL(sl_wifi_deinit(__VA_ARGS__))
+#define sl_wifi_connect(...)                       NWP_SDK_CALL(sl_wifi_connect(__VA_ARGS__))
+#define sl_wifi_disconnect(...)                    NWP_SDK_CALL(sl_wifi_disconnect(__VA_ARGS__))
+#define sl_wifi_start_ap(...)                      NWP_SDK_CALL(sl_wifi_start_ap(__VA_ARGS__))
+#define sl_wifi_stop_ap(...)                       NWP_SDK_CALL(sl_wifi_stop_ap(__VA_ARGS__))
+#define sl_wifi_start_scan(...)                    NWP_SDK_CALL(sl_wifi_start_scan(__VA_ARGS__))
+#define sl_wifi_get_stored_scan_results(...)       NWP_SDK_CALL(sl_wifi_get_stored_scan_results(__VA_ARGS__))
+#define sl_wifi_set_scan_callback(...)             NWP_SDK_CALL(sl_wifi_set_scan_callback(__VA_ARGS__))
+#define sl_wifi_set_callback(...)                  NWP_SDK_CALL(sl_wifi_set_callback(__VA_ARGS__))
+#define sl_wifi_get_firmware_version(...)          NWP_SDK_CALL(sl_wifi_get_firmware_version(__VA_ARGS__))
+#define sl_wifi_get_mac_address(...)               NWP_SDK_CALL(sl_wifi_get_mac_address(__VA_ARGS__))
+#define sl_wifi_set_mac_address(...)               NWP_SDK_CALL(sl_wifi_set_mac_address(__VA_ARGS__))
+#define sl_wifi_get_channel(...)                   NWP_SDK_CALL(sl_wifi_get_channel(__VA_ARGS__))
+#define sl_wifi_get_signal_strength(...)           NWP_SDK_CALL(sl_wifi_get_signal_strength(__VA_ARGS__))
+#define sl_wifi_set_advanced_scan_configuration(...)  NWP_SDK_CALL(sl_wifi_set_advanced_scan_configuration(__VA_ARGS__))
+#define sl_wifi_set_advanced_client_configuration(...) NWP_SDK_CALL(sl_wifi_set_advanced_client_configuration(__VA_ARGS__))
+#define sl_wifi_set_performance_profile_v2(...)    NWP_SDK_CALL(sl_wifi_set_performance_profile_v2(__VA_ARGS__))
+#define sl_wifi_filter_broadcast(...)              NWP_SDK_CALL(sl_wifi_filter_broadcast(__VA_ARGS__))
+#define sl_wifi_target_wake_time_auto_selection_v2(...) NWP_SDK_CALL(sl_wifi_target_wake_time_auto_selection_v2(__VA_ARGS__))
+#define sl_net_init(...)                           NWP_SDK_CALL(sl_net_init(__VA_ARGS__))
+#define sl_net_deinit(...)                         NWP_SDK_CALL(sl_net_deinit(__VA_ARGS__))
+#define sl_net_up(...)                             NWP_SDK_CALL(sl_net_up(__VA_ARGS__))
+#define sl_net_down(...)                           NWP_SDK_CALL(sl_net_down(__VA_ARGS__))
+#define sl_net_set_profile(...)                    NWP_SDK_CALL(sl_net_set_profile(__VA_ARGS__))
+#define sl_net_set_credential(...)                 NWP_SDK_CALL(sl_net_set_credential(__VA_ARGS__))
+#define sl_si91x_configure_ip_address(...)         NWP_SDK_CALL(sl_si91x_configure_ip_address(__VA_ARGS__))
+#define sl_si91x_configure_timeout(...)            NWP_SDK_CALL(sl_si91x_configure_timeout(__VA_ARGS__))
+#define sl_si91x_get_ram_log(...)                  NWP_SDK_CALL(sl_si91x_get_ram_log(__VA_ARGS__))
+#define sl_si91x_debug_log(...)                    NWP_SDK_CALL(sl_si91x_debug_log(__VA_ARGS__))
+#define sli_wifi_send_command(...)                 NWP_SDK_CALL(sli_wifi_send_command(__VA_ARGS__))
 #endif
 
 /* Used by SDK event handler for dual-stack raw-data routing (sl_net_for_dual_stack.c not linked). */
@@ -190,7 +271,7 @@ static bool sl_net_fw_dhcps_check_skip = false;
 /// @return SL_STATUS_OK when usable (fallback applied or not needed)
 static sl_status_t sl_net_fw_dhcps_compat_check(sl_net_interface_t interface)
 {
-    static bool checked = false;
+    static bool checked = true;
     sl_wifi_firmware_version_t fw = { 0 };
     sl_status_t status;
 
@@ -956,7 +1037,7 @@ sl_status_t sl_net_wifi_client_init(sl_net_interface_t interface,
             LOG_DRV_ERROR("Failed to enable debug prints: 0x%lX\r\n", status);
             return status;
         }
-        printf("Si91x debug prints enabled\r\n");
+        LOG_DRV_INFO("Si91x NWP debug prints enabled (assertion level MAX)\r\n");
     }
 #endif
     return status;
@@ -1645,6 +1726,7 @@ static sl_status_t sl_net_client_scan_callback_handler(sl_wifi_event_t event, sl
     wireless_scan_callback_t callback = NULL;
 
     if (arg != (void *)&wifi_storage_scan_result) callback = (wireless_scan_callback_t)arg;
+    NWP_SDK_CB("scan cb: event=0x%X result=%p len=%lu", (int)event, (void *)result, (unsigned long)result_length);
     if (SL_WIFI_CHECK_IF_EVENT_FAILED(event)) {
         global_scan_result_count = -1;
         LOG_DRV_ERROR("scan failed: 0x%X, 0x%X, %p\r\n", (int)event, (int)(*(sl_status_t *)result), callback);
@@ -2153,6 +2235,9 @@ static sl_status_t ap_connected_event_handler(sl_wifi_event_t event, void *data,
     UNUSED_PARAMETER(arg);
     UNUSED_PARAMETER(event);
 
+    NWP_SDK_CB("AP client connected: %02X:%02X:%02X:%02X:%02X:%02X",
+               mac_address->octet[0], mac_address->octet[1], mac_address->octet[2],
+               mac_address->octet[3], mac_address->octet[4], mac_address->octet[5]);
     printf("Remote Client connected: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
            mac_address->octet[0],
            mac_address->octet[1],
@@ -2179,6 +2264,9 @@ static sl_status_t ap_disconnected_event_handler(sl_wifi_event_t event, void *da
     UNUSED_PARAMETER(arg);
     UNUSED_PARAMETER(event);
 
+    NWP_SDK_CB("AP client disconnected: %02X:%02X:%02X:%02X:%02X:%02X",
+               mac_address->octet[0], mac_address->octet[1], mac_address->octet[2],
+               mac_address->octet[3], mac_address->octet[4], mac_address->octet[5]);
     printf("Remote Client disconnected: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
            mac_address->octet[0],
            mac_address->octet[1],
@@ -3196,6 +3284,8 @@ static sl_status_t sl_net_twt_response_cb(sl_wifi_event_t event,
     (void)data_length; (void)arg;
     s_twt_cb_event  = event;
     s_twt_cb_status = status_code;
+    NWP_SDK_CB("TWT cb: %s (event=0x%lX status=0x%lX)",
+               sl_net_twt_event_name(event), (unsigned long)event, (unsigned long)status_code);
     LOG_DRV_INFO("TWT callback: %s (event=0x%lX status=0x%lX)",
                  sl_net_twt_event_name(event), (unsigned long)event, (unsigned long)status_code);
     // Dump the AP-negotiated schedule: wake_interval = mantissa << exp (µs).

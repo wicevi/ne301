@@ -28,6 +28,12 @@ C_SOURCES += $(SL_SISDK)/src/sl_mem_pool.c
 C_SOURCES += $(SL_PORT)/src/sl_slist.c
 C_SOURCES += $(SL_PORT)/src/sli_cmsis_os2_ext_task_register.c
 C_SOURCES += $(SL_PORT)/src/sli_cmsis_os2_thread_flags.c
+# Strong override of the SDK's __WEAK sl_debug_log(): routes every
+# SL_DEBUG_LOG_V2 trace (API call/status/event callback) into generic_log as
+# module "SLSDK" -> dedicated timestamped slsdk.log (module-routed output,
+# kept out of the system aicam.log).
+# Compiled empty unless SL_SDK_DEBUG_LOG_ENABLE is defined (see C_DEFS below).
+C_SOURCES += $(SL_PORT)/src/sl_sdk_debug_log.c
 
 # --- wsdk common ---
 C_SOURCES += $(SL_WSDK)/components/common/src/sl_utility.c
@@ -135,6 +141,22 @@ C_INCLUDES += -I$(SL_WSDK)/resources/defaults
 
 # --- preprocessor defines ---
 C_DEFS += -DSLI_SI917
+# --- WiseConnect SDK debug logging (compile-macro gated) -------------------
+# SL_SDK_DEBUG_LOG_ENABLE: arm the sl_debug_log() redirect in
+# port/src/sl_sdk_debug_log.c (module "SLSDK"). Output goes to the UART log
+# console (921600) at full DEBUG verbosity, NOT to aicam.log — the async file
+# queue drops lines under this trace volume.
+# SLI_HOST_CURRENT_DBGLOG_LEVEL: compile-time gate in sl_constants.h deciding
+# which SL_DEBUG_LOG_V2 levels survive; SDK default is WARN-only, so force
+# DEBUG to also capture API entry/return values and event callbacks.
+# SL_NET_ENABLE_NWP_DEBUG_PRINTS: flips IS_ENABLE_NWP_DEBUG_PRINTS in
+# Custom/Hal/Network/netif_manager/sl_net_netif.c to 1 (NWP fw UART debug
+# prints + ram-dump helpers); its host-side call/callback traces (module
+# "NETIF", NWP_SDK_CALL/NWP_SDK_CB) go to the same UART log console.
+# Comment these three out and rebuild for release.
+C_DEFS += -DSL_SDK_DEBUG_LOG_ENABLE
+C_DEFS += -DSLI_HOST_CURRENT_DBGLOG_LEVEL=SLI_HOST_DBGLOG_LVL_DEBUG
+C_DEFS += -DSL_NET_ENABLE_NWP_DEBUG_PRINTS
 # ponytail: forces SL_SI91X_EXT_FEAT_XTAL_CLK = ENABLE(1) = bit22 (external 32kHz XTAL).
 # v4 SDK changed sl_wifi_device.h #if to `SI917 && RADIO_BOARD_VER2` (was `||` in v3),
 # which flips the 917 sleep-clock source to UULP_GPIO_3 bypass (bit23) and breaks

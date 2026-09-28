@@ -30,7 +30,7 @@ VERSION_PATCH  := 1
 # Version suffix (optional, for alpha/beta/rc releases)
 # Examples: alpha, beta, rc1, dev
 # Leave empty for production releases
-VERSION_SUFFIX := 
+VERSION_SUFFIX := wtest
 
 # =============================================================================
 # Build number auto-generation

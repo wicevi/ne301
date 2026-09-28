@@ -79,13 +79,16 @@ const osThreadAttr_t ymodem_task_attributes = {
  * Ring is SPSC: producers are serialized by log_mutex (only one log_message
  * runs at a time), and the drainer is exclusive (drain task OR debug_flush_logs,
  * mutually excluded by g_log_flush_mtx). __DMB() orders the head/tail updates
- * the same way the cmd_queue already does. */
+ * the same way the cmd_queue already does. Each slot also carries the line's
+ * module name so the drainer can re-apply per-output file routing (SLSDK
+ * lines go to slsdk.log, the rest to aicam.log). */
 
-#define LOG_QUEUE_SLOTS   32
+#define LOG_QUEUE_SLOTS   64   /* 32→64: verbose SLSDK tracing overflows 32 */
 #define LOG_LINE_MAX      256   /* matches LOG_MAX_LINE in generic_log.c */
 
 static char    g_log_ring[LOG_QUEUE_SLOTS][LOG_LINE_MAX] ALIGN_32 IN_PSRAM;
 static int     g_log_ring_len[LOG_QUEUE_SLOTS];
+static const char *g_log_ring_mod[LOG_QUEUE_SLOTS];  /* module name (static-lifetime literal) */
 static volatile uint16_t g_log_ring_wr;   /* producer index (under log_mutex) */
 static volatile uint16_t g_log_ring_rd;   /* consumer index (drainer only)   */
 static volatile uint32_t g_log_dropped;   /* lines dropped because ring full */
@@ -133,7 +136,7 @@ static uint64_t debug_log_get_time(void);
 static void debug_uart_log_output(const char *msg, int len);
 
 // Async log writer (drain task + enqueue callback)
-static void debug_log_enqueue(const char *line, int len);
+static void debug_log_enqueue(const char *line, int len, const char *module);
 static void debug_log_writer_task(void *argument);
 static void debug_log_drain_ring(void);
 
@@ -531,9 +534,15 @@ aicam_result_t debug_update_config(void)
     log_register_module(DEBUG_MODULE_SERVICE, g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
     log_register_module(DEBUG_MODULE_TASK, g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
     log_register_module(DEBUG_MODULE_APP, g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
+    /* SDK + netif-call traces: full DEBUG verbosity on the UART console (both
+     * redirects are compile-time gated). Kept OUT of the aicam.log file output
+     * via module routing — their volume overflows the async file queue and
+     * drops lines. */
+    log_register_module(DEBUG_MODULE_SDK, LOG_LEVEL_DEBUG, LOG_LEVEL_DEBUG);
+    log_register_module(DEBUG_MODULE_NETIF, LOG_LEVEL_DEBUG, LOG_LEVEL_DEBUG);
     log_register_module("SYSTEM", g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
-    log_register_module("SIMPLE", g_debug_ctx.config.console_level, g_debug_ctx.config.file_level); 
-    
+    log_register_module("SIMPLE", g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
+
     return AICAM_OK;
 }
 
@@ -771,16 +780,25 @@ static aicam_result_t debug_init_logging(void)
     log_register_module(DEBUG_MODULE_SERVICE, g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
     log_register_module(DEBUG_MODULE_TASK, g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
     log_register_module(DEBUG_MODULE_APP, g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
+    /* SDK + netif-call traces: full DEBUG verbosity on the UART console (both
+     * redirects are compile-time gated). Kept OUT of the aicam.log file output
+     * via module routing — their volume overflows the async file queue and
+     * drops lines. */
+    log_register_module(DEBUG_MODULE_SDK, LOG_LEVEL_DEBUG, LOG_LEVEL_DEBUG);
+    log_register_module(DEBUG_MODULE_NETIF, LOG_LEVEL_DEBUG, LOG_LEVEL_DEBUG);
     log_register_module("SYSTEM", g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
     log_register_module("SIMPLE", g_debug_ctx.config.console_level, g_debug_ctx.config.file_level);
-    
+
     // Add console output
     log_add_output(OUTPUT_CONSOLE, NULL, 0, 0);
-    
-    // Add file output
-    log_add_output(OUTPUT_FILE, DEBUG_DEFAULT_LOG_FILE_NAME, 
-                   g_debug_ctx.config.log_file_size, 
-                   g_debug_ctx.config.log_rotation_count);
+
+    // Add main file output — everything EXCEPT the SDK trace modules: their
+    // volume overflows the async file queue and drops lines, so they are
+    // emitted on the UART console instead (see module registration above).
+    log_add_output_filtered(OUTPUT_FILE, DEBUG_DEFAULT_LOG_FILE_NAME,
+                            g_debug_ctx.config.log_file_size,
+                            g_debug_ctx.config.log_rotation_count,
+                            NULL, DEBUG_MODULE_SDK "," DEBUG_MODULE_NETIF);
     
     // Add custom UART output
     log_add_custom_output(debug_uart_log_output);
@@ -963,7 +981,7 @@ static void debug_uart_log_output(const char *msg, int len)
  * Enqueue runs under log_mutex (single producer). Drain is exclusive via
  * g_log_flush_mtx (single consumer). Both use __DMB() to order ring indices. */
 
-static void debug_log_enqueue(const char *line, int len)
+static void debug_log_enqueue(const char *line, int len, const char *module)
 {
     if (!line || len <= 0) return;
     if (len > LOG_LINE_MAX) len = LOG_LINE_MAX;   /* truncate over-long lines */
@@ -978,6 +996,7 @@ static void debug_log_enqueue(const char *line, int len)
     }
     memcpy(g_log_ring[g_log_ring_wr], line, (size_t)len);
     g_log_ring_len[g_log_ring_wr] = len;
+    g_log_ring_mod[g_log_ring_wr] = module;   /* static-lifetime module literal */
     __DMB();
     g_log_ring_wr = next_wr;
 
@@ -997,14 +1016,15 @@ static void debug_log_drain_ring(void)
         __DMB();
         int len = g_log_ring_len[g_log_ring_rd];
         if (len > 0 && len <= LOG_LINE_MAX) {
-            log_file_flush_line(g_log_ring[g_log_ring_rd], len);
+            log_file_flush_line(g_log_ring[g_log_ring_rd], len, g_log_ring_mod[g_log_ring_rd]);
         }
+        g_log_ring_mod[g_log_ring_rd] = NULL;
         __DMB();
         g_log_ring_rd = (uint16_t)((g_log_ring_rd + 1) % LOG_QUEUE_SLOTS);
     }
 
     /* If lines were dropped, write a single summary line so the loss is
-     * visible in the log file. */
+     * visible in the log file. NULL module = every file output. */
     uint32_t dropped = g_log_dropped;
     if (dropped > 0) {
         g_log_dropped = 0;
@@ -1012,7 +1032,7 @@ static void debug_log_drain_ring(void)
         int n = snprintf(sum, sizeof(sum),
             "[LOG] %lu log line(s) dropped (queue full)\r\n",
             (unsigned long)dropped);
-        if (n > 0) log_file_flush_line(sum, n);
+        if (n > 0) log_file_flush_line(sum, n, NULL);
     }
 
     osMutexRelease(g_log_flush_mtx);
