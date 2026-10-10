@@ -111,6 +111,14 @@ int usb_cherry_host_init(usbh_event_handler_t event_cb)
     /* Power the external USB device (PB13 rail) and let it settle,
      * mirroring the former usb_host_ecm_init() timing. */
     pwr_manager_acquire(pwr_manager_get_handle(PWR_USB_NAME));
+    /* [customer custom] this variant wires the UVC camera supply to the
+     * SENSOR rail (shared with the native camera): hold it before the host
+     * scans so the camera can enumerate. Refcounted - a concurrently active
+     * native camera is unaffected, and boot pruning (camera_register
+     * skipped for the UVC source) is compensated here. Do NOT merge into
+     * mainline: standard boards leave the sensor rail idle during USB
+     * sessions. */
+    pwr_manager_acquire(pwr_manager_get_handle(PWR_SENSOR_NAME));
     osDelay(100);
 
     usb_cherry_dispatch_event = event_cb;
@@ -118,6 +126,7 @@ int usb_cherry_host_init(usbh_event_handler_t event_cb)
     if (ret != 0) {
         printf("[USB] host init failed: %d\r\n", ret);
         pwr_manager_release(pwr_manager_get_handle(PWR_USB_NAME));
+        pwr_manager_release(pwr_manager_get_handle(PWR_SENSOR_NAME));
         usb_cherry_dispatch_event = NULL;
         return ret;
     }
@@ -133,6 +142,8 @@ int usb_cherry_host_deinit(void)
     usbh_deinitialize(0);
     usb_cherry_dispatch_event = NULL;
     pwr_manager_release(pwr_manager_get_handle(PWR_USB_NAME));
+    /* [customer custom] release the shared sensor rail with it */
+    pwr_manager_release(pwr_manager_get_handle(PWR_SENSOR_NAME));
     usb_cherry_host_inited = 0;
     return 0;
 }
