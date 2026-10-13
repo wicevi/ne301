@@ -271,7 +271,10 @@ static bool sl_net_fw_dhcps_check_skip = false;
 /// @return SL_STATUS_OK when usable (fallback applied or not needed)
 static sl_status_t sl_net_fw_dhcps_compat_check(sl_net_interface_t interface)
 {
-    static bool checked = true;
+    // (Was temporarily pinned `true` while the 2.1.1.255 NWP debug firmware
+    // ran — its version numbers would have tripped the < 2.16.5 fallback.
+    // Restored for the 4.2.0 / 2.17.5 firmware, which passes the check.)
+    static bool checked = false;
     sl_wifi_firmware_version_t fw = { 0 };
     sl_status_t status;
 
@@ -1028,9 +1031,16 @@ sl_status_t sl_net_wifi_client_init(sl_net_interface_t interface,
         return SL_STATUS_OK;
     }
 #if IS_ENABLE_NWP_DEBUG_PRINTS
-    else if (status == SL_STATUS_OK) {
+    else if (status == SL_STATUS_OK
+             && configuration != NULL
+             && ((const sl_wifi_device_configuration_t *)configuration)->boot_option != BURN_NWP_FW
+             && ((const sl_wifi_device_configuration_t *)configuration)->boot_option != BURN_M4_FW) {
+        // Burn (firmware-update) boot options leave the NWP in its bootloader:
+        // no WLAN firmware is running, so the SLI_COMMON_REQ_DEBUG_LOG command
+        // is rejected (fw status 7 -> 0x10007) and must not fail the update
+        // init path (wifi_update_process -> sl_net_init).
         debug_config.assert_level = SL_SI91X_ASSERTION_LEVEL_MAX;
-        debug_config.assert_type = SL_SI91X_ASSERTION_TYPE_ALL; 
+        debug_config.assert_type = SL_SI91X_ASSERTION_TYPE_ALL;
 
         status = sl_si91x_debug_log(&debug_config);
         if (status != SL_STATUS_OK) {

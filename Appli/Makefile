@@ -914,11 +914,11 @@ LDFLAGS += -Wl,--out-implib=$(BUILD_DIR)/secure_nsclib.o
 LDFLAGS += -Wl,--start-group $(LIBS) -Wl,--end-group
 
 ##################################################################
-# WiseConnect SDK. Was: SiliconLabs_SDK (v4.0.2). Switched to the
-# 4.1.1 port (Custom/Hal now uses 4.1.1 APIs: sli_wifi_send_command,
-# sli_buffer_manager_free_buffer, rx_irq bus model). Rollback to 4.0.2
-# = git revert the 4.1.1 port commit (restores SDK tree + Custom/Hal + this line).
-include ../Custom/Common/Lib/SiliconLabs_SDK_4_1_1/silabs_sdk.mk
+# WiseConnect SDK. Was: SiliconLabs_SDK (v4.0.2) -> 4.1.1. Switched to
+# the 4.2.0 vendor drop (same Custom/Hal API surface; sockets/websocket
+# now compile from the SDK's network_stack subtree). Rollback to 4.1.1
+# = git revert the 4.2.0 upgrade commit.
+include ../Custom/Common/Lib/SiliconLabs_SDK_4_2_0/silabs_sdk.mk
 include ../Custom/Common/Lib/mmx108/mmx108.mk
 
 ######################################
@@ -947,7 +947,7 @@ $(OBJECTS): | build-dirs
 # any of these .mk files — the plain "%.c Makefile" prerequisite leaves stale
 # objects compiled with old C_DEFS (e.g. silabs_sdk.mk debug-log switches).
 MK_INCLUDES := Makefile ../stedgeai.mk \
-               ../Custom/Common/Lib/SiliconLabs_SDK_4_1_1/silabs_sdk.mk \
+               ../Custom/Common/Lib/SiliconLabs_SDK_4_2_0/silabs_sdk.mk \
                ../Custom/Common/Lib/mmx108/mmx108.mk
 
 # Compile C source files (CFLAGS via @response file: Windows CMD ~8191 char limit)
