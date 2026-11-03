@@ -17,6 +17,8 @@ import { useNavigate } from 'react-router-dom';
 import WifiReloadMask from '@/components/wifi-reload-mask';
 import { retryFetch } from '@/utils';
 import { useAuthStore } from '@/store/auth';
+import NtpSettings from './ntp-settings';
+import UsbSettings from './usb';
 
 export default function DevicePassword({ setCurrentPage }: { setCurrentPage: (page: string | null) => void }) {
     const { i18n } = useLingui();
@@ -388,6 +390,8 @@ export default function DevicePassword({ setCurrentPage }: { setCurrentPage: (pa
                         </div>
                     </div>
                     <Button variant="primary" className="mt-4 grow-0 self-end" onClick={() => handleConfirmLoginPasswordChange()}>{i18n._('common.save')}</Button>
+                    <NtpSettings />
+                    <UsbSettings />
                 </div>
             )}
             {confirmWifiPasswordDialog()}
