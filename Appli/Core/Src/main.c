@@ -64,6 +64,7 @@ extern int __uncached_bss_end__;
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "system_service.h"
+#include "usb_cherry.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -361,6 +362,14 @@ void StartMainTask(void *argument)
     core_system_init();
     // step_end_time_ms = rtc_get_uptime_ms();
     // step_duration_ms = step_end_time_ms - step_start_time_ms;
+
+    /* USB device (synced from NE302): CDC console for logs comes up on every
+     * boot; the RNDIS NIC is added only on the config-mode path (decided
+     * inside the boot task from the U0 wakeup flag). Placed AFTER
+     * core_system_init so the config manager is up: usb_config.device_enable
+     * =OFF skips USB init entirely (power saving). Runs as a low-priority
+     * background task. */
+    usb_cherry_device_boot_start();
     printf("BOOT: %lu ms\r\n", (unsigned long)rtc_get_uptime_ms());
 
 #if POWER_MODULE_TEST

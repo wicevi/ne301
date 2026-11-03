@@ -28,6 +28,8 @@
 #include "version.h"
 #include "fsbl_app_common.h"
 #include "wifi.h"
+#include "netif_manager.h"
+#include "usb_cherry.h"
 /* ==================== Helper Functions ==================== */
 
 static uint32_t restart_delay_seconds = 3;
@@ -357,12 +359,117 @@ aicam_result_t device_storage_config_handler(http_handler_context_t *ctx) {
     }
     
     aicam_result_t api_result = api_response_success(ctx, json_string, "Storage configuration updated successfully");
-    
+
     // Cleanup
     cJSON_Delete(response_json);
     //hal_mem_free(json_string);
-    
+
     return api_result;
+}
+
+/**
+ * @brief GET /api/v1/device/usb - USB device status (config + runtime)
+ */
+aicam_result_t device_usb_status_handler(http_handler_context_t *ctx) {
+    if (!ctx) return AICAM_ERROR_INVALID_PARAM;
+
+    if (!web_api_verify_method(ctx, "GET")) {
+        return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Only GET method is allowed");
+    }
+
+    usb_config_t usb_cfg = { .device_enable = AICAM_TRUE };
+    (void)json_config_get_usb_config(&usb_cfg);
+
+    cJSON* response_json = cJSON_CreateObject();
+    if (!response_json) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to create response");
+    }
+
+    cJSON_AddBoolToObject(response_json, "enabled", usb_cfg.device_enable);
+    cJSON_AddBoolToObject(response_json, "running",
+                          usb_cherry_device_is_inited() ? AICAM_TRUE : AICAM_FALSE);
+    cJSON_AddBoolToObject(response_json, "rndis_active",
+                          usb_cherry_device_rndis_is_active() ? AICAM_TRUE : AICAM_FALSE);
+    /* USB and hotspot share one address now: tell the UI whether THIS page
+     * rides the USB link (client IP == the fixed RNDIS lease). */
+    cJSON_AddBoolToObject(response_json, "via_usb",
+                          usb_cherry_device_request_from_client(ctx->request.client_ip)
+                              ? AICAM_TRUE : AICAM_FALSE);
+
+    char* json_string = cJSON_Print(response_json);
+    cJSON_Delete(response_json);
+    if (!json_string) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to serialize response");
+    }
+
+    aicam_result_t api_result = api_response_success(ctx, json_string, NULL);
+    return api_result;
+}
+
+/**
+ * @brief POST /api/v1/device/usb/config - Set usb.device_enable (applied immediately)
+ * @details enabled=false: the USB device is torn down right away (bus power
+ *          released) and stays down across reboots until re-enabled.
+ *          enabled=true: persists the switch and, if the device was not
+ *          running (disabled this boot), starts the full composite — a web
+ *          session is by definition the configuration-mode context.
+ */
+aicam_result_t device_usb_config_handler(http_handler_context_t *ctx) {
+    if (!ctx) return AICAM_ERROR_INVALID_PARAM;
+
+    if (!web_api_verify_method(ctx, "POST")) {
+        return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Only POST method is allowed");
+    }
+
+    cJSON* request_json = web_api_parse_body(ctx);
+    if (!request_json) {
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Invalid JSON request body");
+    }
+
+    cJSON* enabled_item = cJSON_GetObjectItem(request_json, "enabled");
+    if (!enabled_item || !cJSON_IsBool(enabled_item)) {
+        cJSON_Delete(request_json);
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Missing or invalid 'enabled' field");
+    }
+    aicam_bool_t enabled = cJSON_IsTrue(enabled_item) ? AICAM_TRUE : AICAM_FALSE;
+    cJSON_Delete(request_json);
+
+    usb_config_t usb_cfg = { .device_enable = enabled };
+    aicam_result_t result = json_config_set_usb_config(&usb_cfg);
+    if (result != AICAM_OK) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to save USB configuration");
+    }
+
+    /* Apply immediately so the power saving takes effect without a reboot.
+     * Synchronous deinit right here: the web server dispatches handlers on
+     * a single thread, so concurrent enable/disable requests are naturally
+     * serialized — no deferred teardown, no races. When this request
+     * arrived over the RNDIS netif the response may not reach the browser
+     * (the NIC just died); the frontend treats that network error as
+     * success. */
+    if (enabled == AICAM_FALSE) {
+        (void)usb_cherry_device_deinit();
+    } else if (!usb_cherry_device_is_inited()) {
+        (void)usb_cherry_device_init_ex(1);
+    }
+
+    cJSON* response_json = cJSON_CreateObject();
+    if (!response_json) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to create response");
+    }
+
+    cJSON_AddBoolToObject(response_json, "enabled", enabled);
+    cJSON_AddBoolToObject(response_json, "running",
+                          usb_cherry_device_is_inited() ? AICAM_TRUE : AICAM_FALSE);
+    cJSON_AddStringToObject(response_json, "message", "USB configuration updated");
+
+    char* json_string = cJSON_Print(response_json);
+    cJSON_Delete(response_json);
+    if (!json_string) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to serialize response");
+    }
+
+    return api_response_success(ctx, json_string, "USB configuration updated");
 }
 
 /**
@@ -1117,6 +1224,130 @@ aicam_result_t device_camera_config_handler(http_handler_context_t *ctx) {
     } else {
         return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Only GET and POST methods are allowed");
     }
+}
+
+/**
+ * @brief GET/POST /api/v1/system/ntp/config - NTP time-sync configuration
+ *
+ * GET: {"enable": bool, "servers": [str], "running": bool}
+ * POST (partial update): {"enable": bool?, "servers": [str]?}
+ *      - servers entries must be non-empty, <= NTP_SERVER_NAME_MAX_LEN-1 chars
+ *      - enable=true requires at least one server
+ *      Changes are persisted and applied immediately (enable/restart fires
+ *      one SNTP request right away).
+ */
+static cJSON* ntp_config_build_response(const ntp_config_persist_t *ntp_cfg) {
+    cJSON* response_json = cJSON_CreateObject();
+    if (!response_json) return NULL;
+
+    cJSON_AddBoolToObject(response_json, "enable", ntp_cfg->enable);
+    cJSON* servers = cJSON_CreateArray();
+    for (int i = 0; i < ntp_cfg->server_count && i < NTP_SERVER_MAX_COUNT; i++) {
+        cJSON_AddItemToArray(servers, cJSON_CreateString(ntp_cfg->servers[i]));
+    }
+    cJSON_AddItemToObject(response_json, "servers", servers);
+    cJSON_AddBoolToObject(response_json, "running", nm_sntp_is_running());
+    return response_json;
+}
+
+aicam_result_t system_ntp_config_handler(http_handler_context_t *ctx) {
+    if (!ctx) return AICAM_ERROR_INVALID_PARAM;
+
+    const char* method = ctx->request.method;
+
+    ntp_config_persist_t ntp_cfg;
+    if (json_config_get_ntp_config(&ntp_cfg) != AICAM_OK) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "NTP configuration unavailable");
+    }
+
+    if (strcmp(method, "GET") == 0) {
+        cJSON* response_json = ntp_config_build_response(&ntp_cfg);
+        if (!response_json) {
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to create response");
+        }
+        char* json_string = cJSON_Print(response_json);
+        cJSON_Delete(response_json);
+        if (!json_string) {
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to serialize response");
+        }
+        return api_response_success(ctx, json_string, "NTP configuration");
+    }
+
+    if (strcmp(method, "POST") != 0) {
+        return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Only GET and POST methods are allowed");
+    }
+
+    cJSON* request_json = web_api_parse_body(ctx);
+    if (!request_json) {
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Invalid JSON request body");
+    }
+
+    /* Partial update: absent keys keep their current values. */
+    cJSON* enable_item = cJSON_GetObjectItem(request_json, "enable");
+    if (enable_item && cJSON_IsBool(enable_item)) {
+        ntp_cfg.enable = cJSON_IsTrue(enable_item) ? AICAM_TRUE : AICAM_FALSE;
+    }
+
+    cJSON* servers_item = cJSON_GetObjectItem(request_json, "servers");
+    if (servers_item && cJSON_IsArray(servers_item)) {
+        int cnt = cJSON_GetArraySize(servers_item);
+
+        /* Validate every entry before touching the config. */
+        for (int i = 0; i < cnt; i++) {
+            cJSON* it = cJSON_GetArrayItem(servers_item, i);
+            if (!cJSON_IsString(it) || it->valuestring == NULL || it->valuestring[0] == '\0') {
+                cJSON_Delete(request_json);
+                return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                    "Server entries must be non-empty strings");
+            }
+            if (strlen(it->valuestring) >= NTP_SERVER_NAME_MAX_LEN) {
+                cJSON_Delete(request_json);
+                char msg[80];
+                snprintf(msg, sizeof(msg), "Server name too long (max %d chars)",
+                         NTP_SERVER_NAME_MAX_LEN - 1);
+                return api_response_error(ctx, API_ERROR_INVALID_REQUEST, msg);
+            }
+        }
+        if (cnt > NTP_SERVER_MAX_COUNT) {
+            cJSON_Delete(request_json);
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Too many servers (max %d)", NTP_SERVER_MAX_COUNT);
+            return api_response_error(ctx, API_ERROR_INVALID_REQUEST, msg);
+        }
+
+        for (int i = 0; i < cnt; i++) {
+            const char* name = cJSON_GetArrayItem(servers_item, i)->valuestring;
+            strncpy(ntp_cfg.servers[i], name, sizeof(ntp_cfg.servers[i]) - 1);
+            ntp_cfg.servers[i][sizeof(ntp_cfg.servers[i]) - 1] = '\0';
+        }
+        ntp_cfg.server_count = (uint8_t)cnt;
+    }
+
+    if (ntp_cfg.enable && ntp_cfg.server_count == 0) {
+        cJSON_Delete(request_json);
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+            "Cannot enable NTP sync without a server address");
+    }
+
+    cJSON_Delete(request_json);
+
+    /* Persist, then apply at runtime (stop / restart with a fresh request). */
+    aicam_result_t result = json_config_set_ntp_config(&ntp_cfg);
+    if (result != AICAM_OK) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to save NTP configuration");
+    }
+    (void)nm_sntp_apply_config(ntp_cfg.servers, ntp_cfg.server_count, ntp_cfg.enable);
+
+    cJSON* response_json = ntp_config_build_response(&ntp_cfg);
+    if (!response_json) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to create response");
+    }
+    char* json_string = cJSON_Print(response_json);
+    cJSON_Delete(response_json);
+    if (!json_string) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to serialize response");
+    }
+    return api_response_success(ctx, json_string, "NTP configuration updated");
 }
 
 /**
@@ -2249,6 +2480,20 @@ static const api_route_t device_module_routes[] = {
     },
     {
         .method = "GET",
+        .path = API_PATH_PREFIX "/device/usb",
+        .handler = device_usb_status_handler,
+        .require_auth = AICAM_TRUE,
+        .user_data = NULL
+    },
+    {
+        .method = "POST",
+        .path = API_PATH_PREFIX "/device/usb/config",
+        .handler = device_usb_config_handler,
+        .require_auth = AICAM_TRUE,
+        .user_data = NULL
+    },
+    {
+        .method = "GET",
         .path = API_PATH_PREFIX "/device/firmware-versions",
         .handler = firmware_versions_handler,
         .require_auth = AICAM_TRUE,
@@ -2342,6 +2587,20 @@ static const api_route_t device_module_routes[] = {
         .method = "POST",
         .path = API_PATH_PREFIX "/system/time",
         .handler = system_time_handler,
+        .require_auth = AICAM_TRUE,
+        .user_data = NULL
+    },
+    {
+        .method = "GET",
+        .path = API_PATH_PREFIX "/system/ntp/config",
+        .handler = system_ntp_config_handler,
+        .require_auth = AICAM_TRUE,
+        .user_data = NULL
+    },
+    {
+        .method = "POST",
+        .path = API_PATH_PREFIX "/system/ntp/config",
+        .handler = system_ntp_config_handler,
         .require_auth = AICAM_TRUE,
         .user_data = NULL
     },

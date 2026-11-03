@@ -1,15 +1,21 @@
 /**
  * @file    usb_device_composite.c
- * @brief   CherryUSB composite device on USB1_OTG_HS (J21 Type-C):
- *          - RNDIS network adapter (lwip netif + DHCP server for the PC)
+ * @brief   CherryUSB device on USB1_OTG_HS (J21 Type-C):
  *          - CDC-ACM virtual COM redirected to the debug log/console
+ *          - RNDIS network adapter (lwip netif + DHCP server for the PC),
+ *            only when the device starts with the RNDIS function active
  *
  * Role note (vs the host side): here the NE301 is the USB *device*. The PC
- * is the USB host: it sees one RNDIS NIC (shares the NE301's network via
- * lwip IP forwarding — lwipopts has IP_FORWARD=1) plus one virtual COM port
- * carrying the same log/console as the USART2 debug UART.
+ * is the USB host: it sees one virtual COM port carrying the same
+ * log/console as the USART2 debug UART, plus — when RNDIS is active — one
+ * RNDIS NIC (shares the NE301's network via lwip IP forwarding; lwipopts
+ * has IP_FORWARD=1).
  *
- * Start/stop from the debug CLI: `usb device <init|deinit|status>`.
+ * Boot policy (synced from NE302): usb_cherry_device_boot_start() runs at
+ * boot and brings the CDC console up on every start; the RNDIS NIC is added
+ * only on the configuration-mode path (see usb_dev_boot_task). The function
+ * set can also be switched later via `usb_cherry_device_set_rndis()` or the
+ * debug CLI: `usb device <init|deinit|status>`.
  */
 #include <stdio.h>
 #include <string.h>
@@ -28,6 +34,10 @@
 #include "lwip/timeouts.h"
 #include "chip_id_mac.h"
 #include "Log/debug.h"
+#include "u0_module.h"
+#include "system_service.h"
+#include "json_config_mgr.h"
+#include "netif_manager.h"   /* ud netif glue + LINK_UP/DOWN event reports */
 
 /*!< RNDIS function endpoints */
 #define RNDIS_IN_EP  0x81
@@ -66,8 +76,12 @@
 
 #define UDHCP_SERVER_PORT      67
 #define UDHCP_CLIENT_PORT      68
-#define UDHCP_CLIENT_IP_3RD    20       /* 192.168.20.x */
-#define UDHCP_CLIENT_IP_4TH    100      /* single client: always .100 */
+/* Shared-subnet plan: the ud netif sits on the SAME 192.168.10.0/24 as the
+ * device hotspot (same IP 192.168.10.10), so the web UI is reachable via
+ * one address over both links. The USB PC gets a FIXED lease outside the
+ * AP dhcpserver pool (host octets 100..250, see dhcpserver.c): .251. */
+#define UDHCP_SUBNET_3RD       10       /* 192.168.10.x (== AP subnet) */
+#define UDHCP_CLIENT_IP_4TH    251      /* single client: always .251, outside the AP pool */
 #define UDHCP_LEASE_TIME_S     86400
 
 /* defined below (netif section) */
@@ -136,7 +150,7 @@ static void udhcp_send_reply(struct udhcp_msg *req, uint8_t msg_type,
     if (include_addr) memcpy(rsp->yiaddr, yiaddr, 4);
     /* siaddr: next-server — mirror the AP dhcpserver (some clients check it) */
     rsp->siaddr[0] = 192; rsp->siaddr[1] = 168;
-    rsp->siaddr[2] = UDHCP_CLIENT_IP_3RD; rsp->siaddr[3] = 1;
+    rsp->siaddr[2] = UDHCP_SUBNET_3RD; rsp->siaddr[3] = 1;
     memcpy(rsp->chaddr, req->chaddr, 16);
 
     uint16_t o = DHCP_MSG_FIXED_LEN;
@@ -145,7 +159,7 @@ static void udhcp_send_reply(struct udhcp_msg *req, uint8_t msg_type,
     out[o++] = 53; out[o++] = 1; out[o++] = msg_type;
     /* 54: server identifier */
     out[o++] = 54; out[o++] = 4;
-    out[o++] = 192; out[o++] = 168; out[o++] = UDHCP_CLIENT_IP_3RD; out[o++] = 1;
+    out[o++] = 192; out[o++] = 168; out[o++] = UDHCP_SUBNET_3RD; out[o++] = 1;
     if (include_addr) {
         /* 51: lease time */
         out[o++] = 51; out[o++] = 4;
@@ -155,10 +169,10 @@ static void udhcp_send_reply(struct udhcp_msg *req, uint8_t msg_type,
         out[o++] = 1; out[o++] = 4; out[o++] = 255; out[o++] = 255; out[o++] = 255; out[o++] = 0;
         /* 3: router */
         out[o++] = 3; out[o++] = 4;
-        out[o++] = 192; out[o++] = 168; out[o++] = UDHCP_CLIENT_IP_3RD; out[o++] = 1;
+        out[o++] = 192; out[o++] = 168; out[o++] = UDHCP_SUBNET_3RD; out[o++] = 1;
         /* 6: dns (the device itself) */
         out[o++] = 6; out[o++] = 4;
-        out[o++] = 192; out[o++] = 168; out[o++] = UDHCP_CLIENT_IP_3RD; out[o++] = 1;
+        out[o++] = 192; out[o++] = 168; out[o++] = UDHCP_SUBNET_3RD; out[o++] = 1;
     }
     out[o++] = 255; /* end */
 
@@ -182,7 +196,7 @@ static void udhcp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 {
     (void)arg; (void)pcb; (void)addr; (void)port;
 
-    static const uint8_t client_ip[4] = {192, 168, UDHCP_CLIENT_IP_3RD, UDHCP_CLIENT_IP_4TH};
+    static const uint8_t client_ip[4] = {192, 168, UDHCP_SUBNET_3RD, UDHCP_CLIENT_IP_4TH};
 
     if (p == NULL || p->len < DHCP_MSG_FIXED_LEN + 4) {
         if (p) pbuf_free(p);
@@ -208,7 +222,7 @@ static void udhcp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
             bool server_match = true;
             if (v54 && olen == 4) {
                 server_match = (v54[0] == 192 && v54[1] == 168 &&
-                                v54[2] == UDHCP_CLIENT_IP_3RD && v54[3] == 1);
+                                v54[2] == UDHCP_SUBNET_3RD && v54[3] == 1);
             }
             if (!server_match) {
                 break; /* another server's client */
@@ -247,10 +261,16 @@ static void udhcp_start(void)
         return;
     }
     ip_set_option(g_udhcp_pcb, SOF_BROADCAST);
-    /* Bind to THIS netif's address (not ANY): avoids clashing with another
-     * port-67 server (the AP's dhcpserver binds its own netif IP), and for
-     * 255.255.255.255 datagrams lwip prefers the pcb whose local_ip matches
-     * the receiving netif + pcb->netif_idx, so both servers can coexist. */
+    /* The AP dhcpserver binds the SAME IP:port (shared-subnet plan: one web
+     * address for hotspot + USB). udp_bind() rejects the duplicate unless
+     * BOTH pcbs set SOF_REUSEADDR; incoming traffic is split by the
+     * pcb->netif_idx set below. */
+    ip_set_option(g_udhcp_pcb, SOF_REUSEADDR);
+    /* Bind to THIS netif's address with pcb->netif_idx set: with the shared
+     * subnet both port-67 servers bind the same IP (REUSEADDR above makes
+     * that legal), and incoming datagrams are delivered only to the pcb
+     * whose netif_idx matches the receiving netif — so this server answers
+     * only USB clients, the AP dhcpserver only hotspot clients. */
     g_udhcp_pcb->netif_idx = (u8_t)(rndis_dev_netif.num + 1);
     if (udp_bind(g_udhcp_pcb, &rndis_dev_netif.ip_addr, UDHCP_SERVER_PORT) != ERR_OK) {
         printf("[USB-DEV] mini-dhcps: bind failed\r\n");
@@ -260,7 +280,7 @@ static void udhcp_start(void)
     }
     udp_recv(g_udhcp_pcb, udhcp_recv, NULL);
     printf("[USB-DEV] mini-dhcps: serving 192.168.%u.%u\r\n",
-           UDHCP_CLIENT_IP_3RD, UDHCP_CLIENT_IP_4TH);
+           UDHCP_SUBNET_3RD, UDHCP_CLIENT_IP_4TH);
 }
 
 static void udhcp_stop(void)
@@ -272,15 +292,31 @@ static void udhcp_stop(void)
     }
 }
 
+/* Runtime function-set selector: 1 = RNDIS NIC + CDC console (config-mode
+ * boot path / CLI / "ud" netif), 0 = CDC console only (sleep fast-boot
+ * path). Decides both the reported config descriptor and whether the RNDIS
+ * interfaces/netif are registered at usbd_initialize time. */
+static volatile uint8_t g_rndis_active;
+
 static const uint8_t device_descriptor[] = {
     USB_DEVICE_DESCRIPTOR_INIT(USB_2_0, 0xEF, 0x02, 0x01, USBD_VID, USBD_PID, 0x0100, 0x01)
 };
 
 /* Composite configuration: RNDIS (IAD, interfaces 0-1) + CDC-ACM (2-3) */
-static const uint8_t config_descriptor[] = {
+static const uint8_t config_descriptor_rndis_cdc[] = {
     USB_CONFIG_DESCRIPTOR_INIT(USB_CONFIG_SIZE, 0x04, 0x01, USB_CONFIG_BUS_POWERED, USBD_MAX_POWER),
     CDC_RNDIS_DESCRIPTOR_INIT(0x00, RNDIS_INT_EP, RNDIS_OUT_EP, RNDIS_IN_EP, CDC_MAX_MPS, 0x02),
     CDC_ACM_DESCRIPTOR_INIT(0x02, CDC_INT_EP, CDC_OUT_EP, CDC_IN_EP, CDC_MAX_MPS, 0x04)
+};
+
+/* Console-only configuration: CDC-ACM (interfaces 0-1).
+ * Selected on the sleep fast-boot path, where the RNDIS NIC (and its lwip
+ * netif + DHCP server + tx thread) must not come up — the CDC console is
+ * the only function the wake cycle needs. */
+#define USB_CONFIG_SIZE_CDC (9 + CDC_ACM_DESCRIPTOR_LEN)
+static const uint8_t config_descriptor_cdc_only[] = {
+    USB_CONFIG_DESCRIPTOR_INIT(USB_CONFIG_SIZE_CDC, 0x02, 0x01, USB_CONFIG_BUS_POWERED, USBD_MAX_POWER),
+    CDC_ACM_DESCRIPTOR_INIT(0x00, CDC_INT_EP, CDC_OUT_EP, CDC_IN_EP, CDC_MAX_MPS, 0x02)
 };
 
 static const uint8_t device_quality_descriptor[] = {
@@ -306,7 +342,7 @@ static const uint8_t *device_descriptor_callback(uint8_t speed)
 static const uint8_t *config_descriptor_callback(uint8_t speed)
 {
     (void)speed;
-    return config_descriptor;
+    return g_rndis_active ? config_descriptor_rndis_cdc : config_descriptor_cdc_only;
 }
 
 static const uint8_t *device_quality_descriptor_callback(uint8_t speed)
@@ -340,6 +376,54 @@ static volatile uint8_t g_dev_configured;
  * new transfers until RESUME/RESET. */
 static volatile uint8_t g_dev_suspended;
 static volatile uint8_t g_rndis_tx_busy;
+/* Fixed IP the mini DHCP server leases to the USB PC (see UDHCP_* above);
+ * filled in rndis_dev_netif_start(). */
+static ip4_addr_t g_ud_client_ip;
+
+/*
+ * Egress disambiguation for the shared subnet: ud and the hotspot netif
+ * both live on 192.168.10.0/24 with the SAME device IP, and lwip's
+ * ip4_route_src() returns the FIRST netif matching the subnet — ud is
+ * netif_add()ed later so it sits at the head of netif_list and would steal
+ * every hotspot-client flow. Wired into lwip via LWIP_HOOK_IP4_ROUTE_SRC
+ * (lwipopts.h):
+ *   - dest == the USB client  -> ud
+ *   - other hosts on the subnet -> first OTHER netif on that subnet
+ *   - everything else -> NULL (fall through to lwip's own logic)
+ * lwip 2.2 TCP additionally pins replies to the ingress netif
+ * (pcb->netif_idx), so web/TCP replies are correct even without the hook;
+ * this covers UDP/ICMP/forwarded flows.
+ */
+struct netif *usb_ud_ip4_route_hook(const ip4_addr_t *src, const ip4_addr_t *dest)
+{
+    struct netif *ud = &rndis_dev_netif;
+
+    (void)src;
+    if (dest == NULL || !g_dev_inited) {
+        return NULL;
+    }
+    if (!netif_is_up(ud) || !netif_is_link_up(ud)) {
+        return NULL;
+    }
+    if (!ip4_addr_netcmp(dest, netif_ip4_addr(ud), netif_ip4_netmask(ud))) {
+        return NULL;
+    }
+
+    if (ip4_addr_cmp(dest, &g_ud_client_ip)) {
+        return ud;
+    }
+
+    for (struct netif *n = netif_list; n != NULL; n = n->next) {
+        if (n == ud) {
+            continue;
+        }
+        if (netif_is_up(n) && netif_is_link_up(n) &&
+            ip4_addr_netcmp(dest, netif_ip4_addr(n), netif_ip4_netmask(n))) {
+            return n;
+        }
+    }
+    return NULL;
+}
 
 /* Diagnostics for `usb device status` (IRQ-safe increments) */
 static volatile uint32_t g_stat_rndis_rx_frames;
@@ -533,9 +617,14 @@ static int rndis_dev_netif_start(void)
 
     if (netif_get_by_index(rndis_dev_netif.num + 1) == &rndis_dev_netif) return 0;
 
-    IP4_ADDR(&ipaddr, 192, 168, UDHCP_CLIENT_IP_3RD, 1);
+    IP4_ADDR(&g_ud_client_ip, 192, 168, UDHCP_SUBNET_3RD, UDHCP_CLIENT_IP_4TH);
+
+    /* Same IP as the hotspot (NETIF_WIFI_AP_DEFAULT_IP): the web UI is one
+     * address (192.168.10.10) on both links. Duplicate IP on two netifs is
+     * deliberate — the route hook above disambiguates the egress side. */
+    IP4_ADDR(&ipaddr, 192, 168, UDHCP_SUBNET_3RD, 10);
     IP4_ADDR(&netmask, 255, 255, 255, 0);
-    IP4_ADDR(&gw, 192, 168, UDHCP_CLIENT_IP_3RD, 1);
+    IP4_ADDR(&gw, 192, 168, UDHCP_SUBNET_3RD, 10);
     err_t err = netifapi_netif_add(&rndis_dev_netif, &ipaddr, &netmask, &gw, NULL,
                                    &rndis_dev_netif_init, &tcpip_input);
     if (err != ERR_OK) {
@@ -588,11 +677,6 @@ static struct {
     uint8_t buf[CDC_CONSOLE_RING_SIZE];
 } g_cdc_tx_ring, g_cdc_rx_ring;
 
-static volatile uint8_t g_cdc_dtr;
-/* Host reader detected: DTR asserted OR the host has sent us at least one
- * byte (tools/scripts that open the port without DTR). Console output is
- * gated on this instead of DTR alone. Cleared on bus reset/disconnect. */
-static volatile uint8_t g_cdc_host_active;
 static volatile uint8_t g_cdc_ep_tx_busy;
 static osThreadId_t g_usb_dev_thread;
 static volatile uint8_t g_usb_dev_thread_run;
@@ -626,12 +710,12 @@ static uint8_t ring_pop(uint8_t *buf, volatile uint32_t *head, volatile uint32_t
  */
 void usb_console_output_hook(const char *msg, int len)
 {
-    /* Gate on CONFIGURED only: many terminals/scripts open the COM port
-     * without asserting DTR — output must still flow. If nothing reads the
-     * endpoint, the first chunk parks in g_cdc_ep_tx_busy until a reader
-     * appears (ring absorbs the backlog, overflow drops). */
+    /* CONFIGURED-gated only: stream logs in real time as soon as the host
+     * enumerates the device — no reader (DTR/rx) handshake. Producers never
+     * block (ring push, drop on overflow); if the host is not actually
+     * reading, the first chunk parks in g_cdc_ep_tx_busy and the ring
+     * absorbs the backlog (lossy by design, like any console). */
     if (!g_dev_configured || g_dev_suspended) return;
-    if (!g_cdc_dtr && !g_cdc_host_active) return;
     if (msg == NULL || len <= 0) return;
 
     uint32_t primask = __get_PRIMASK();
@@ -653,9 +737,6 @@ static void cdc_acm_bulk_out(uint8_t busid, uint8_t ep, uint32_t nbytes)
     (void)ep;
     /* read_buffer belongs to this function alone; reuse via static below. */
     static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t cdc_read_buffer[512];
-    if (nbytes > 0) {
-        g_cdc_host_active = 1; /* reader on the host side: enable console tx */
-    }
     for (uint32_t i = 0; i < nbytes && i < sizeof(cdc_read_buffer); i++) {
         ring_push(g_cdc_rx_ring.buf, &g_cdc_rx_ring.head, g_cdc_rx_ring.tail, cdc_read_buffer[i]);
     }
@@ -686,13 +767,13 @@ static struct usbd_endpoint cdc_in_ep = {
     .ep_cb = cdc_acm_bulk_in
 };
 
-/* DTR means "a terminal is attached on the PC side" (informational; console
- * tx is gated on DTR OR any received host data — see g_cdc_host_active). */
+/* DTR means "a terminal is attached on the PC side" — informational only:
+ * console tx is NOT reader-gated (logs stream from enumeration on), this
+ * just logs the port open/close transitions. */
 void usbd_cdc_acm_set_dtr(uint8_t busid, uint8_t intf, bool dtr)
 {
     (void)busid;
     (void)intf;
-    g_cdc_dtr = dtr ? 1 : 0;
     printf("[USB-DEV] console port %s\r\n", dtr ? "opened" : "closed");
 }
 
@@ -755,6 +836,8 @@ static struct usbd_interface intf_acm1;
 static const char *dev_event_name(uint8_t event)
 {
     switch (event) {
+        case USBD_EVENT_INIT: return "init";
+        case USBD_EVENT_DEINIT: return "deinit";
         case USBD_EVENT_RESET: return "reset";
         case USBD_EVENT_CONNECTED: return "connected";
         case USBD_EVENT_DISCONNECTED: return "disconnected";
@@ -772,6 +855,8 @@ static void usbd_event_handler(uint8_t busid, uint8_t event)
         case USBD_EVENT_CONFIGURED:
             g_dev_configured = 1;
             g_dev_suspended = 0;
+            /* Host enumerated us: the RNDIS/CDC link to the PC is alive. */
+            nm_report_netif_event(NETIF_NAME_USB_DEV, NETIF_EVT_LINK_UP, NULL);
             /* RNDIS arms its own first read via its notify handler. Arm the
              * CDC console OUT endpoint here (no auto-arm for CDC-ACM). */
             cdc_acm_bulk_out(busid, CDC_OUT_EP, 0);
@@ -791,14 +876,16 @@ static void usbd_event_handler(uint8_t busid, uint8_t event)
             g_dev_suspended = 0;
             g_cdc_ep_tx_busy = 0;
             g_rndis_tx_busy = 0;
-            g_cdc_host_active = 0; /* re-learn the reader after re-enum */
+            /* Bus reset or cable gone. Suspend alone is NOT reported — the
+             * host may just be sleeping. */
+            nm_report_netif_event(NETIF_NAME_USB_DEV, NETIF_EVT_LINK_DOWN, NULL);
             break;
         default:
             break;
     }
 }
 
-int usb_cherry_device_init(void)
+int usb_cherry_device_init_ex(int with_rndis)
 {
     if (g_dev_inited) {
         return 0;
@@ -808,13 +895,19 @@ int usb_cherry_device_init(void)
         return -1;
     }
 
-    if (rndis_dev_netif_start() != 0) {
-        printf("[USB-DEV] rndis netif start failed\r\n");
-        return -1;
+    g_rndis_active = with_rndis ? 1 : 0;
+
+    if (g_rndis_active) {
+        if (rndis_dev_netif_start() != 0) {
+            printf("[USB-DEV] rndis netif start failed\r\n");
+            return -1;
+        }
     }
 
-    uint8_t mac[6];
-    netif_chip_id_get_mac(mac, NETIF_CHIP_MAC_USB_RNDIS);
+    uint8_t mac[6] = {0};
+    if (g_rndis_active) {
+        netif_chip_id_get_mac(mac, NETIF_CHIP_MAC_USB_RNDIS);
+    }
 
     g_cdc_console_sem = osSemaphoreNew(1, 0, NULL);
     if (g_cdc_console_sem == NULL) {
@@ -837,11 +930,16 @@ int usb_cherry_device_init(void)
 
     usbd_desc_register(0, &composite_descriptor);
 
-    /* RNDIS function (interfaces 0-1) — init_intf also registers its 3 endpoints. */
-    usbd_add_interface(0, usbd_rndis_init_intf(&intf_rndis0, RNDIS_OUT_EP, RNDIS_IN_EP, RNDIS_INT_EP, mac));
-    usbd_add_interface(0, usbd_rndis_init_intf(&intf_rndis1, RNDIS_OUT_EP, RNDIS_IN_EP, RNDIS_INT_EP, mac));
+    /* usbd_add_interface assigns interface numbers by registration order:
+     * composite = RNDIS 0-1 + CDC 2-3, console-only = CDC 0-1 — matching
+     * config_descriptor_rndis_cdc / config_descriptor_cdc_only above. */
+    if (g_rndis_active) {
+        /* RNDIS function — init_intf also registers its 3 endpoints. */
+        usbd_add_interface(0, usbd_rndis_init_intf(&intf_rndis0, RNDIS_OUT_EP, RNDIS_IN_EP, RNDIS_INT_EP, mac));
+        usbd_add_interface(0, usbd_rndis_init_intf(&intf_rndis1, RNDIS_OUT_EP, RNDIS_IN_EP, RNDIS_INT_EP, mac));
+    }
 
-    /* CDC-ACM console function (interfaces 2-3) + its data endpoints. */
+    /* CDC-ACM console function + its data endpoints. */
     usbd_add_interface(0, usbd_cdc_acm_init_intf(0, &intf_acm0));
     usbd_add_interface(0, usbd_cdc_acm_init_intf(0, &intf_acm1));
     usbd_add_endpoint(0, &cdc_out_ep);
@@ -853,8 +951,38 @@ int usb_cherry_device_init(void)
         usb_cherry_device_deinit();
         return ret;
     }
+    printf("[USB-DEV] started: %s\r\n",
+           g_rndis_active ? "RNDIS + CDC console" : "CDC console only");
     g_dev_inited = 1;
     return 0;
+}
+
+int usb_cherry_device_init(void)
+{
+    return usb_cherry_device_init_ex(1);
+}
+
+int usb_cherry_device_set_rndis(int enable)
+{
+    if (enable) {
+        if (g_dev_inited && g_rndis_active) {
+            return 0;
+        }
+    } else {
+        if (!g_dev_inited || !g_rndis_active) {
+            return 0;
+        }
+    }
+    /* Function set changes the reported config descriptor, so the device
+     * must re-enumerate: usbd_desc_register() resets the interface table,
+     * making a full deinit/init cycle safe. */
+    usb_cherry_device_deinit();
+    return usb_cherry_device_init_ex(enable ? 1 : 0);
+}
+
+int usb_cherry_device_rndis_is_active(void)
+{
+    return g_rndis_active;
 }
 
 int usb_cherry_device_deinit(void)
@@ -886,6 +1014,21 @@ int usb_cherry_device_is_inited(void)
     return g_dev_inited;
 }
 
+/* True when the given dotted-quad string equals the fixed IP leased to the
+ * USB PC — lets the web API tell "this request arrived over the USB link"
+ * now that the USB and hotspot paths share one address. */
+int usb_cherry_device_request_from_client(const char *ip_str)
+{
+    ip4_addr_t addr;
+    if (ip_str == NULL || !g_dev_inited) {
+        return 0;
+    }
+    if (ip4addr_aton(ip_str, &addr) == 0) {
+        return 0;
+    }
+    return ip4_addr_cmp(&addr, &g_ud_client_ip) ? 1 : 0;
+}
+
 void usb_cherry_device_diag(char *buf, int buflen)
 {
     snprintf(buf, buflen,
@@ -902,9 +1045,72 @@ void usb_cherry_device_diag(char *buf, int buflen)
              ip4addr_ntoa((const ip4_addr_t *)&rndis_dev_netif.ip_addr));
 }
 
-/* ==================== netif_manager glue ("ud") ===================== */
+/* ==================== boot-time start (wake-path aware) ============== */
 
-#include "netif_manager.h"
+/*
+ * NE302 boot policy: the CDC console comes up on EVERY boot so logs are on
+ * the virtual COM port from the start; the RNDIS NIC is added only on the
+ * configuration-mode path. The wake source decides:
+ *   - time-optimized wake (RTC / short press / PIR / IO = sleep fast-boot
+ *     path): CDC console only — no lwip netif, DHCP server or tx thread.
+ *   - everything else (cold boot, long press AP, remote wake = config
+ *     mode path): full RNDIS + CDC composite.
+ * Classification reuses system_service's canonical helpers; the U0 flag
+ * cache is refreshed first so it reflects THIS boot (u0_module_register
+ * ran earlier in driver_core_init).
+ *
+ * Master switch: usb_config.device_enable (web system settings, default
+ * ON). OFF -> the USB device side is not initialized AT ALL (no composite
+ * device, no DWC2 clocks/IRQ) — power saving. The boot task runs after
+ * core_system_init, so the config manager is up when this reads it.
+ */
+static void usb_dev_boot_task(void *argument)
+{
+    (void)argument;
+
+    usb_config_t usb_cfg;
+    if (json_config_get_usb_config(&usb_cfg) == AICAM_OK &&
+        usb_cfg.device_enable != AICAM_TRUE) {
+        printf("[USB-DEV] boot: disabled by config (usb.device_enable=0), skipping init\r\n");
+        osThreadTerminate(osThreadGetId());
+        return;
+    }
+
+    uint32_t flag = 0;
+    (void)u0_module_get_wakeup_flag(&flag);
+
+    wakeup_source_type_t src = system_service_get_wakeup_source_type();
+    int fast_wake = (system_service_requires_time_optimized_mode(src) == AICAM_TRUE);
+
+    int ret = usb_cherry_device_init_ex(!fast_wake);
+    printf("[USB-DEV] boot: wake src %d (%s path) -> %s%s\r\n", (int)src,
+           fast_wake ? "fast-boot" : "config-mode",
+           fast_wake ? "CDC console" : "CDC console + RNDIS",
+           (ret == 0) ? "" : " FAILED");
+
+    osThreadTerminate(osThreadGetId());
+}
+
+static const osThreadAttr_t usb_dev_boot_attr = {
+    .name = "usbDevBoot",
+    /* Low priority: must never delay the boot sequence (the fast-boot
+     * path is latency-critical); the host polls the bus at its own pace. */
+    .priority = (osPriority_t)osPriorityLow,
+    .stack_size = 4096,
+};
+
+int usb_cherry_device_boot_start(void)
+{
+    if (osThreadNew(usb_dev_boot_task, NULL, &usb_dev_boot_attr) == NULL) {
+        printf("[USB-DEV] boot task create failed\r\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* ==================== netif_manager glue ("ud") ===================== */
+/* netif_manager.h included at the top: the usbd event handler reports
+ * LINK_UP/LINK_DOWN long before this glue section. */
 
 static netif_state_t usb_dev_netif_state(void)
 {
@@ -939,7 +1145,13 @@ int usb_dev_netif_ctrl(const char *if_name, int cmd, void *param)
 
     switch ((netif_cmd_t)cmd) {
         case NETIF_CMD_INIT:
-            ret = usb_cherry_device_init();
+            /* "ud" IS the RNDIS function: on a fast-boot (CDC-only) start,
+             * INIT upgrades the running device to the composite config. */
+            if (usb_cherry_device_is_inited() && !usb_cherry_device_rndis_is_active()) {
+                ret = usb_cherry_device_set_rndis(1);
+            } else {
+                ret = usb_cherry_device_init();
+            }
             break;
         case NETIF_CMD_UP:
             /* The netif comes up together with the composite device. */
