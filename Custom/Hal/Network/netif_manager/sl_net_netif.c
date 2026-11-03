@@ -2531,7 +2531,7 @@ extern void sl_si91x_host_sim_spi4_dma(uint8_t mode);
 #endif
 void sl_net_thread(void *arg)
 {
-    int event_flag = 0, ret = 0;
+    int event_flag = 0, sta_ret = -1, ap_ret = -1;
     uint8_t try_times = 0;
     sl_status_t status = SL_STATUS_OK;
     netif_state_t ap_state = NETIF_STATE_DEINIT, client_state = NETIF_STATE_DEINIT;
@@ -2548,12 +2548,13 @@ void sl_net_thread(void *arg)
                 osMutexRelease(sl_net_mutex);
                 LOG_DRV_INFO("Save the current network card status: ap_state = %d, client_state = %d\r\n", ap_state, client_state);
                 try_times = 0;
+                sta_ret = -1;
+                ap_ret = -1;
+                osMutexAcquire(sl_net_mutex, osWaitForever);
+                sl_net_ap_netif_deinit();
+                sl_net_client_netif_deinit(); 
+                osMutexRelease(sl_net_mutex);
                 do {
-                    ret = 0;
-                    osMutexAcquire(sl_net_mutex, osWaitForever);
-                    sl_net_ap_netif_deinit();
-                    sl_net_client_netif_deinit(); 
-                    osMutexRelease(sl_net_mutex);
                     osDelay(try_times * 500 + 500);
                     osMutexAcquire(sl_net_mutex, osWaitForever);
                 #ifdef SLI_SI91X_SIMULATION_C1C2_ERROR
@@ -2566,30 +2567,48 @@ void sl_net_thread(void *arg)
                     sl_si91x_host_sim_spi4_dma(0);
                 #endif
                     if (client_state > NETIF_STATE_DEINIT) {
-                        ret = sl_net_client_netif_init();
-                        if (ret) goto recover_end;
-                        if (client_state == NETIF_STATE_UP) {
-                            ret = sl_net_client_netif_up();
-                            if (ret) goto recover_end;
+                        if (sta_ret != 0) {
+                            sta_ret = sl_net_client_netif_init();
+                            if (sta_ret == 0 && client_state == NETIF_STATE_UP) {
+                                sta_ret = sl_net_client_netif_up();
+                            }
                         }
+                    } else {
+                        sta_ret = 0;
                     }
                     if (ap_state > NETIF_STATE_DEINIT) {
-                        ret = sl_net_ap_netif_init();
-                        if (ret) goto recover_end;
-                        if (ap_state == NETIF_STATE_UP) {
-                            ret = sl_net_ap_netif_up();
-                            if (ret) goto recover_end;
+                        if (ap_ret != 0) {
+                            ap_ret = sl_net_ap_netif_init();
+                            if (ap_ret == 0 && ap_state == NETIF_STATE_UP) {
+                                ap_ret = sl_net_ap_netif_up();
+                            }
                         }
+                    } else {
+                        ap_ret = 0;
                     }
-                recover_end:
+                    if (sta_ret != 0) {
+                        LOG_DRV_WARN("WIFI STA recovery failed, try %d times, ret = 0x%X", (try_times + 1), sta_ret);
+                        sl_net_client_netif_deinit();
+                    }
+                    if (ap_ret != 0) {
+                        LOG_DRV_WARN("WIFI AP recovery failed, try %d times, ret = 0x%X", (try_times + 1), ap_ret);
+                        sl_net_ap_netif_deinit();
+                    }
                     osMutexRelease(sl_net_mutex);
-                    LOG_DRV_INFO("%dth recovery result: 0x%X", (try_times + 1), ret);
-                } while (++try_times < 10 && ret != 0);
+                } while (++try_times < 10 && (sta_ret != 0 || ap_ret != 0));
                 sl_net_is_recovering = 0;
-                if (ret == 0) {
+                /* Partial recovery counts for routing: if either netif came
+                 * back, re-pick the default interface (the other one may be
+                 * gone). Full success additionally clears the error flag and
+                 * logs OK; otherwise keep the storm-guard below (clear the
+                 * flag too — a re-trigger would tear down the healthy netif
+                 * for another all-or-nothing cycle). */
+                if (sta_ret == 0 || ap_ret == 0) {
                     netif_manager_change_default_if();
+                }
+                if (sta_ret == 0 && ap_ret == 0) {
                     osEventFlagsClear(sl_net_events, SL_NET_EVENT_FIRMWARE_ERROR);
-                	LOG_DRV_INFO("WIFI firmware recovery successful!");
+                    LOG_DRV_INFO("WIFI firmware recovery successful!");
                 } else {
                     /* ponytail: clear FIRMWARE_ERROR on final failure too — the
                      * wait above uses NoClear, so a stale bit re-enters the
@@ -2598,7 +2617,8 @@ void sl_net_thread(void *arg)
                      * drain-loop hot spins). Back off 100ms; only a NEW firmware
                      * error re-triggers recovery. */
                     osEventFlagsClear(sl_net_events, SL_NET_EVENT_FIRMWARE_ERROR);
-                    LOG_DRV_INFO("WIFI firmware recovery failed after %d tries, backoff 100ms", try_times);
+                    LOG_DRV_INFO("WIFI firmware recovery failed after %d tries (sta=0x%X, ap=0x%X), backoff 100ms",
+                                 try_times, sta_ret, ap_ret);
                     osDelay(100);
                 }
             } else if (event_flag & SL_NET_EVENT_STA_DISCONNECTED) {
