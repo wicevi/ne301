@@ -355,12 +355,25 @@ extern unsigned int lwip_port_rand(void);
 #define TCPIP_THREAD_STACKSIZE         1024
 #define TCPIP_THREAD_PRIO              58
 
-#define SNTP_MAX_SERVERS               3
+/* 4th slot is free for a user-added server (web API; keep in sync with
+ * NTP_SERVER_MAX_COUNT in json_config_mgr.h). */
+#define SNTP_MAX_SERVERS               4
 #define SNTP_SERVER_DNS                1
 #define SNTP_DEBUG                     LWIP_DBG_OFF
 extern void sntp_set_system_time(uint32_t sec);
 extern void sntp_get_system_time(uint32_t *sec, uint32_t *us);
 #define SNTP_SET_SYSTEM_TIME(sec)      sntp_set_system_time(sec)
 #define SNTP_GET_SYSTEM_TIME(sec, us)  sntp_get_system_time(&sec, &us)
+
+/* Shared-subnet egress routing: the USB RNDIS netif ("ud") and the device
+ * hotspot sit on the SAME 192.168.10.0/24 with the same IP (one web address
+ * for both links). lwip's ip4_route_src() picks the first subnet match, so
+ * this hook pins the egress netif per destination (USB client -> ud, other
+ * subnet hosts -> the hotspot netif). Implemented in
+ * Custom/Hal/usb/usb_device_composite.c (synced from NE302). */
+struct netif;
+struct ip4_addr;
+struct netif *usb_ud_ip4_route_hook(const struct ip4_addr *src, const struct ip4_addr *dest);
+#define LWIP_HOOK_IP4_ROUTE_SRC(src, dest) usb_ud_ip4_route_hook((src), (dest))
 
 #endif /* LWIP_LWIPOPTS_H */

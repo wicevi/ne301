@@ -845,6 +845,21 @@ aicam_result_t json_config_save_day_night_config_to_nvs(const day_night_config_t
     return result;
 }
 
+// save USB device configuration to NVS
+aicam_result_t json_config_save_usb_config_to_nvs(const usb_config_t *config)
+{
+    if (!config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+    aicam_result_t result = json_config_nvs_write_bool(NVS_KEY_USB_DEVICE_ENABLE, config->device_enable);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save USB device enable to NVS");
+
+    LOG_CORE_INFO("USB configuration saved to NVS successfully");
+    return result;
+}
+
 // save ISP configuration to NVS
 aicam_result_t json_config_save_isp_config_to_nvs(const isp_config_t *config)
 {
@@ -1143,6 +1158,11 @@ aicam_result_t json_config_save_network_service_config_to_nvs(const network_serv
     if (poe_result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save PoE configuration to NVS");
 
+    // Save NTP time-sync configuration
+    aicam_result_t ntp_result = json_config_save_ntp_config_to_nvs(&config->ntp);
+    if (ntp_result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save NTP configuration to NVS");
+
     LOG_CORE_INFO("Network service configuration saved to NVS successfully");
     return result;
 }
@@ -1203,6 +1223,97 @@ aicam_result_t json_config_save_poe_config_to_nvs(const poe_config_persist_t *co
     result = json_config_nvs_write_bool(NVS_KEY_POE_DETECT_CONFLICT, config->detect_ip_conflict);
 
     LOG_CORE_INFO("PoE configuration saved to NVS successfully");
+    return AICAM_OK;
+}
+
+// Save NTP time-sync configuration to NVS
+aicam_result_t json_config_save_ntp_config_to_nvs(const ntp_config_persist_t *config)
+{
+    if (!config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+    aicam_result_t result = AICAM_OK;
+
+    static const char *ntp_server_keys[NTP_SERVER_MAX_COUNT] = {
+        NVS_KEY_NTP_SERVER_0, NVS_KEY_NTP_SERVER_1,
+        NVS_KEY_NTP_SERVER_2, NVS_KEY_NTP_SERVER_3,
+    };
+
+    result = json_config_nvs_write_bool(NVS_KEY_NTP_ENABLE, config->enable);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save NTP enable to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_NTP_SERVER_COUNT, config->server_count);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save NTP server count to NVS");
+
+    for (int i = 0; i < NTP_SERVER_MAX_COUNT; i++)
+    {
+        result = json_config_nvs_write_string(ntp_server_keys[i], config->servers[i]);
+        if (result != AICAM_OK)
+            LOG_CORE_ERROR("Failed to save NTP server %d to NVS", i);
+    }
+
+    LOG_CORE_INFO("NTP configuration saved to NVS successfully");
+    return AICAM_OK;
+}
+
+// Load NTP time-sync configuration from NVS
+aicam_result_t json_config_load_ntp_config_from_nvs(ntp_config_persist_t *config)
+{
+    if (!config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    static const char *ntp_server_keys[NTP_SERVER_MAX_COUNT] = {
+        NVS_KEY_NTP_SERVER_0, NVS_KEY_NTP_SERVER_1,
+        NVS_KEY_NTP_SERVER_2, NVS_KEY_NTP_SERVER_3,
+    };
+
+    json_config_nvs_read_bool(NVS_KEY_NTP_ENABLE, &config->enable);
+
+    uint32_t temp_val = 0;
+    if (json_config_nvs_read_uint32(NVS_KEY_NTP_SERVER_COUNT, &temp_val) == AICAM_OK)
+    {
+        config->server_count = (temp_val > NTP_SERVER_MAX_COUNT) ? NTP_SERVER_MAX_COUNT
+                                                                 : (uint8_t)temp_val;
+    }
+    else
+    {
+        json_config_nvs_write_uint32(NVS_KEY_NTP_SERVER_COUNT, config->server_count);
+    }
+
+    for (int i = 0; i < NTP_SERVER_MAX_COUNT; i++)
+    {
+        if (json_config_nvs_read_string(ntp_server_keys[i], config->servers[i],
+                                        sizeof(config->servers[i])) != AICAM_OK)
+        {
+            /* Key absent (first boot after OTA): keep the default_config
+             * value already primed in *config and persist it, so a later
+             * partial write never sees a missing slot. */
+            json_config_nvs_write_string(ntp_server_keys[i], config->servers[i]);
+        }
+    }
+
+    /* Defense against corrupt data: enabled sync with no usable server falls
+     * back to the compiled defaults (default_config already primed config). */
+    uint8_t usable = 0;
+    for (int i = 0; i < config->server_count; i++)
+    {
+        if (config->servers[i][0] != '\0') usable++;
+    }
+    if (config->enable && usable == 0)
+    {
+        LOG_CORE_WARN("NTP enabled but no usable server in NVS, using defaults");
+        config->server_count = 3;
+        strncpy(config->servers[0], "time.windows.com", sizeof(config->servers[0]) - 1);
+        strncpy(config->servers[1], "pool.ntp.org", sizeof(config->servers[1]) - 1);
+        strncpy(config->servers[2], "time1.google.com", sizeof(config->servers[2]) - 1);
+        config->servers[3][0] = '\0';
+    }
+
     return AICAM_OK;
 }
 
@@ -1714,6 +1825,10 @@ aicam_result_t json_config_save_to_nvs(const aicam_global_config_t *config)
     result = json_config_save_day_night_config_to_nvs(&config->device_service.day_night_config);
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save day/night configuration to NVS");
+    // Save USB device configuration
+    result = json_config_save_usb_config_to_nvs(&config->usb_config);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save USB configuration to NVS");
 
     // Save network service configuration
     result = json_config_save_network_service_config_to_nvs(&config->network_service);
@@ -2265,6 +2380,13 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
         config->device_service.day_night_config.ir_brightness = (uint8_t)temp_uint32;
     else
         json_config_nvs_write_uint32(NVS_KEY_DN_IR_BRIGHTNESS, config->device_service.day_night_config.ir_brightness);
+    // Load USB device configuration (absent key keeps the compiled-in
+    // default: device_enable = TRUE)
+    result = json_config_nvs_read_bool(NVS_KEY_USB_DEVICE_ENABLE, &temp_bool);
+    if (result == AICAM_OK)
+        config->usb_config.device_enable = temp_bool;
+    else
+        json_config_nvs_write_bool(NVS_KEY_USB_DEVICE_ENABLE, config->usb_config.device_enable);
 
     // Load ISP configuration
     result = json_config_nvs_read_bool(NVS_KEY_ISP_VALID, &temp_bool);
@@ -2650,6 +2772,11 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
     result = json_config_load_poe_config_from_nvs(&config->network_service.poe);
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to load PoE configuration from NVS");
+
+    // Load NTP time-sync configuration
+    result = json_config_load_ntp_config_from_nvs(&config->network_service.ntp);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to load NTP configuration from NVS");
 
     // Load MQTT service configuration - base config (persistable, no pointers)
     // Basic connection

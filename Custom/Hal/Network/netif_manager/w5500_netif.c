@@ -233,6 +233,9 @@ void w5500_isr_thread(void *arg)
                     w5500_is_need_reinit = 1;
                     osMutexRelease(w5500_mutex);
                     netif_manager_change_default_if();
+                    /* Cable pulled / chip reset: report outside w5500_mutex so
+                     * subscribers are free to take their own locks. */
+                    nm_report_netif_event(NETIF_NAME_ETH_WAN, NETIF_EVT_LINK_DOWN, NULL);
                     goto isr_thread_exit_check;
                 }
             }

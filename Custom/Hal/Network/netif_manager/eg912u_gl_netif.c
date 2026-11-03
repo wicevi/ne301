@@ -142,7 +142,12 @@ void eg912u_ppp_status_cb(ppp_pcb* pcb, int err_code, void *ctx)
 #endif /* PPP_IPV4_SUPPORT */
         osEventFlagsSet(eg912u_events, EG912U_EVENT_PPP_CNT);
     } else if (err_code == PPPERR_USER) {
+        /* Requested by our own netif down (pppapi_close) — a controlled
+         * shutdown, not a link loss; IF_DOWN covers it. */
         osEventFlagsSet(eg912u_events, EG912U_EVENT_PPP_EXIT);
+    } else {
+        /* Carrier dropped / PPP protocol failure: unexpected link loss. */
+        nm_report_netif_event(NETIF_NAME_4G_CAT1, NETIF_EVT_LINK_DOWN, NULL);
     }
 }
 

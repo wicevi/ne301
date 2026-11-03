@@ -233,6 +233,20 @@ typedef struct {
     char last_error_msg[64];                // Last error message
 } poe_config_persist_t;
 
+/* NTP server slot count (keep in sync with SNTP_MAX_SERVERS in lwipopts.h) */
+#define NTP_SERVER_MAX_COUNT        4
+/* Max NTP server name length incl. NUL (must also fit an IPv4/IPv6 literal) */
+#define NTP_SERVER_NAME_MAX_LEN     64
+
+/**
+ * @brief NTP (SNTP) time-sync configuration for persistent storage
+ */
+typedef struct {
+    aicam_bool_t enable;                    // NTP sync switch (AICAM_TRUE = sync enabled)
+    uint8_t server_count;                   // Valid server entries (1..NTP_SERVER_MAX_COUNT)
+    char servers[NTP_SERVER_MAX_COUNT][NTP_SERVER_NAME_MAX_LEN]; // Server names/IPs, empty slot = ""
+} ntp_config_persist_t;
+
 /**
  * @brief Network service configuration structure
  */
@@ -279,6 +293,9 @@ typedef struct {
     uint8_t halow_ps_mode;
     /** Auto-learned HaLow S1G join channel for selective scan (0: off). Not user-facing. */
     uint8_t halow_join_channel;
+
+    // NTP time-sync settings
+    ntp_config_persist_t ntp;               // NTP configuration
 } network_service_config_t;
  
  // Power mode configuration structure
@@ -639,6 +656,17 @@ typedef struct {
     day_night_config_t day_night_config;
 } device_service_config_t;
 
+/* ==================== USB Configuration ==================== */
+
+typedef struct {
+    aicam_bool_t device_enable;   /* Master switch for the USB device (CDC
+                                   * console + RNDIS NIC). OFF (default is
+                                   * ON): nothing on the USB device side is
+                                   * initialized at boot — no composite
+                                   * device, no DWC2 IRQ, saves power. The
+                                   * host sees no enumeration at all. */
+} usb_config_t;
+
 typedef struct {
     uint32_t session_timeout_ms;                       // Session timeout in milliseconds
     aicam_bool_t enable_session_timeout;               // Enable session timeout
@@ -764,6 +792,7 @@ typedef struct {
     power_mode_config_t power_mode_config; // Power mode configuration
     device_info_config_t device_info;
     device_service_config_t device_service;
+    usb_config_t usb_config;               // USB device configuration
     network_service_config_t network_service;
     mqtt_service_config_t mqtt_service;
     auth_mgr_config_t auth_mgr;
@@ -1147,6 +1176,19 @@ aicam_result_t json_config_get_day_night_config(day_night_config_t *day_night_co
  * @return aicam_result_t Operation result
  */
 aicam_result_t json_config_set_day_night_config(const day_night_config_t *day_night_config);
+/**
+ * @brief Get USB device configuration
+ * @param usb_config USB configuration structure pointer
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_get_usb_config(usb_config_t *usb_config);
+
+/**
+ * @brief Set USB device configuration (persisted to NVS immediately)
+ * @param usb_config USB configuration structure pointer
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_set_usb_config(const usb_config_t *usb_config);
 
 /**
  * @brief Get ISP configuration
@@ -1199,6 +1241,23 @@ aicam_result_t json_config_set_poe_config(const poe_config_persist_t *poe_config
  * @return poe_ip_mode_t IP mode
  */
 poe_ip_mode_t json_config_get_poe_ip_mode(void);
+
+/* ==================== NTP Configuration API ==================== */
+
+/**
+ * @brief Get NTP time-sync configuration
+ * @param ntp_config NTP configuration structure pointer
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_get_ntp_config(ntp_config_persist_t *ntp_config);
+
+/**
+ * @brief Set NTP time-sync configuration (persists to NVS; the caller applies
+ *        it at runtime via nm_sntp_apply_config())
+ * @param ntp_config NTP configuration structure pointer
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_set_ntp_config(const ntp_config_persist_t *ntp_config);
 
 /**
  * @brief Set PoE IP mode

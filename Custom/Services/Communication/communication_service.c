@@ -30,14 +30,22 @@
 
 
 /* ==================== Communication Service Context ==================== */
-#define BACKGROUND_EVT_SCAN     (1UL << 0)
-#define BACKGROUND_EVT_DECISION (1UL << 1)
+#define BACKGROUND_EVT_SCAN         (1UL << 0)
+#define BACKGROUND_EVT_DECISION     (1UL << 1)
+#define BACKGROUND_EVT_RECONNECT    (1UL << 2)
+/* Reconnect poll period: the event flag wakes the task immediately, this
+ * timeout lets due retries fire without a fresh event. */
+#define COMM_RECONNECT_POLL_MS      1000U
 uint8_t background_scan_task_stack[1024 * 4] ALIGN_32 IN_PSRAM;
 /* Startup decision runs on its own thread: the startup-timeout timer callback
  * runs on the small timer thread and may only set an event; the decision/connect
  * path (netif up can block up to 30 s + deep calls) needs a large stack and must
  * not share the scan thread (scan blocks ~3 s and would be starved). */
 uint8_t startup_decision_task_stack[1024 * 16] ALIGN_32 IN_PSRAM;
+/* Auto-reconnect runs netif up paths (PoE DHCP waits up to 15 s, WiFi join
+ * blocks several seconds, deep vendor calls) — same large-stack treatment as
+ * the decision task. */
+uint8_t netif_reconnect_task_stack[1024 * 16] ALIGN_32 IN_PSRAM;
 
 
 typedef struct {
@@ -48,6 +56,7 @@ typedef struct {
     communication_service_stats_t stats;
     osThreadId_t scan_task_id;
     osThreadId_t decision_task_id;
+    osThreadId_t reconnect_task_id;
     osEventFlagsId_t background_events;
 
     // Network interface management
@@ -642,6 +651,201 @@ static void startup_decision_task(void *argument)
     }
 }
 
+/* ==================== Link Monitor & Auto Reconnect ==================== */
+
+/* Per-netif intent tracking fed by nm_report_netif_event():
+ *  - IF_DOWN (controlled: CLI "ifconfig down", web API, comm switch) sets
+ *    user_down and RECONNECT NEVER fires for that netif again until an IF_UP;
+ *  - LINK_DOWN (unexpected: cable pulled, router gone, USB unplug, PPP drop)
+ *    sets link_lost and arms the reconnect task.
+ * Ordering is safe: a controlled down that races a link loss may emit
+ * LINK_DOWN first, but the trailing IF_DOWN is authoritative. */
+typedef struct {
+    const char *if_name;        // monitored netif (NULL = unused slot)
+    aicam_bool_t user_down;     // controlled IF_DOWN seen, no IF_UP since
+    aicam_bool_t link_lost;     // unexpected LINK_DOWN seen, not yet recovered
+    uint32_t next_retry_ms;     // kernel tick before which no retry fires
+    uint32_t retry_count;
+} comm_link_monitor_t;
+
+static comm_link_monitor_t s_link_monitors[MAX_NETWORK_INTERFACES];
+
+static void comm_link_monitor_reset(void)
+{
+    memset(s_link_monitors, 0, sizeof(s_link_monitors));
+    int i = 0;
+    s_link_monitors[i++].if_name = NETIF_NAME_WIFI_STA;
+#if NETIF_WIFI_HALOW_IS_ENABLE
+    s_link_monitors[i++].if_name = NETIF_NAME_WIFI_HALOW;
+#endif
+#if NETIF_ETH_WAN_IS_ENABLE
+    s_link_monitors[i++].if_name = NETIF_NAME_ETH_WAN;
+#endif
+#if NETIF_4G_CAT1_IS_ENABLE
+    s_link_monitors[i++].if_name = NETIF_NAME_4G_CAT1;
+#endif
+#if NETIF_USB_RNDIS_IS_ENABLE
+    s_link_monitors[i++].if_name = NETIF_NAME_USB_RNDIS;
+#endif
+}
+
+static comm_link_monitor_t *comm_link_monitor_find(const char *if_name)
+{
+    if (if_name == NULL) return NULL;
+    for (int i = 0; i < MAX_NETWORK_INTERFACES; i++) {
+        if (s_link_monitors[i].if_name != NULL &&
+            strcmp(s_link_monitors[i].if_name, if_name) == 0) {
+            return &s_link_monitors[i];
+        }
+    }
+    return NULL;
+}
+
+/* Runs in the reporting driver's context (SDK event thread, W5500 ISR thread,
+ * USB thread...): only flip flags under the service lock and poke the
+ * reconnect task — no netif calls and no waits here (see the callback
+ * contract in netif_manager.h). */
+static void comm_netif_event_cb(const char *if_name, netif_event_id_t event,
+                                const void *data, void *user_ctx)
+{
+    (void)data;
+    (void)user_ctx;
+    aicam_bool_t kick = AICAM_FALSE;
+
+    communication_service_lock();
+    comm_link_monitor_t *m = comm_link_monitor_find(if_name);
+    if (m != NULL) {
+        switch (event) {
+            case NETIF_EVT_IF_UP:
+                /* Connected again (manual up or our own reconnect): re-arm
+                 * auto reconnect for future drops. */
+                m->user_down = AICAM_FALSE;
+                m->link_lost = AICAM_FALSE;
+                m->retry_count = 0;
+                break;
+            case NETIF_EVT_IF_DOWN:
+                /* User-intended shutdown (CLI / web / type switch): stop
+                 * reconnecting, ignore link events until the next IF_UP. */
+                m->user_down = AICAM_TRUE;
+                m->link_lost = AICAM_FALSE;
+                break;
+            case NETIF_EVT_LINK_DOWN:
+                if (!m->user_down) {
+                    m->link_lost = AICAM_TRUE;
+                    m->next_retry_ms = 0;   // first retry immediately
+                    kick = AICAM_TRUE;
+                }
+                break;
+            case NETIF_EVT_LINK_UP:
+                /* Driver self-healed (firmware recovery, USB replug). */
+                m->link_lost = AICAM_FALSE;
+                break;
+            default:
+                break;  // AP station join/leave: informational only
+        }
+    }
+    communication_service_unlock();
+
+    if (kick && g_communication_service.background_events != NULL) {
+        osEventFlagsSet(g_communication_service.background_events, BACKGROUND_EVT_RECONNECT);
+    }
+}
+
+static aicam_result_t comm_reconnect_one(const char *if_name)
+{
+    if (strcmp(if_name, NETIF_NAME_WIFI_STA) == 0) {
+        /* Direct connect (no scan first): after a transient drop the AP is
+         * usually still in range; on failure try_connect walks the rest of
+         * the known networks itself. */
+        return try_connect_known_networks(AICAM_FALSE);
+    }
+#if NETIF_ETH_WAN_IS_ENABLE
+    if (strcmp(if_name, NETIF_NAME_ETH_WAN) == 0) {
+        /* Respect the PoE "auto reconnect" persistent switch. */
+        poe_config_persist_t poe_cfg;
+        if (json_config_get_poe_config(&poe_cfg) == AICAM_OK && !poe_cfg.auto_reconnect) {
+            return AICAM_ERROR_UNAVAILABLE;
+        }
+        return communication_poe_connect();
+    }
+#endif
+#if NETIF_4G_CAT1_IS_ENABLE
+    if (strcmp(if_name, NETIF_NAME_4G_CAT1) == 0) {
+        return communication_cellular_connect();
+    }
+#endif
+#if NETIF_WIFI_HALOW_IS_ENABLE
+    if (strcmp(if_name, NETIF_NAME_WIFI_HALOW) == 0) {
+        /* Idempotent: returns 0 when already up with link, re-joins otherwise. */
+        return nm_ctrl_netif_up(NETIF_NAME_WIFI_HALOW);
+    }
+#endif
+#if NETIF_USB_RNDIS_IS_ENABLE
+    if (strcmp(if_name, NETIF_NAME_USB_RNDIS) == 0) {
+        /* Idempotent: waits for the dongle's UP event inside the driver,
+         * fails fast while unplugged so we retry on the next interval. */
+        return nm_ctrl_netif_up(NETIF_NAME_USB_RNDIS);
+    }
+#endif
+    return AICAM_ERROR_NOT_SUPPORTED;
+}
+
+/* Auto reconnect worker. Attempts run serially and WITHOUT the service lock:
+ * the reconnect actions block for seconds inside driver mutexes and call
+ * public APIs that lock internally where needed. Retrying forever is
+ * intentional — the cable/router may come back hours later; a user-intended
+ * IF_DOWN cancels a pending retry via link_lost/user_down. */
+static void netif_reconnect_task(void *argument)
+{
+    (void)argument;
+    for (;;) {
+        uint32_t ev = osEventFlagsWait(g_communication_service.background_events,
+                                       BACKGROUND_EVT_RECONNECT, osFlagsWaitAny,
+                                       COMM_RECONNECT_POLL_MS);
+        if (!g_communication_service.running ||
+            !g_communication_service.config.enable_auto_reconnect) {
+            continue;
+        }
+        if ((ev & osFlagsError) != 0 && ev != (uint32_t)osFlagsErrorTimeout) {
+            continue;  // flags object not ready yet — nothing to do
+        }
+
+        for (int i = 0; i < MAX_NETWORK_INTERFACES; i++) {
+            comm_link_monitor_t *m = &s_link_monitors[i];
+            if (m->if_name == NULL || m->user_down || !m->link_lost) continue;
+            uint32_t now = osKernelGetTickCount();
+            if (now < m->next_retry_ms) continue;
+
+            LOG_SVC_INFO("Auto reconnect: %s (attempt %u)", m->if_name, m->retry_count + 1);
+            aicam_result_t ret = comm_reconnect_one(m->if_name);
+
+            communication_service_lock();
+            if (ret == AICAM_OK) {
+                /* The up path reports IF_UP which normally clears this — this
+                 * is the belt-and-suspenders for up paths that bypass it. */
+                m->link_lost = AICAM_FALSE;
+                m->retry_count = 0;
+                LOG_SVC_INFO("Auto reconnect: %s recovered", m->if_name);
+            } else if (ret == AICAM_ERROR_NOT_FOUND) {
+                /* Nothing to connect with (e.g. no known WiFi credentials):
+                 * retrying can never succeed — drop out until a fresh event. */
+                m->link_lost = AICAM_FALSE;
+                LOG_SVC_WARN("Auto reconnect: %s gave up (no credentials)", m->if_name);
+            } else if (!m->user_down) {
+                /* Reload the intent flags: an IF_DOWN may have arrived while
+                 * the blocking reconnect attempt was running. */
+                m->retry_count++;
+                m->next_retry_ms = osKernelGetTickCount() +
+                                   g_communication_service.config.reconnect_interval_ms;
+                LOG_SVC_WARN("Auto reconnect: %s failed (%d), next try in %u ms",
+                             m->if_name, ret,
+                             g_communication_service.config.reconnect_interval_ms);
+            }
+            communication_service_unlock();
+        }
+    }
+}
+
 /**
  * @brief Start network scan
  */
@@ -1058,7 +1262,14 @@ aicam_result_t communication_service_init(void *config)
     // Register network interface manager (framework only, fast < 2s)
     netif_manager_register();
     g_communication_service.netif_manager_registered = AICAM_TRUE;
-    
+
+    // Subscribe to netif link events (reported from driver contexts) — feeds
+    // the link-loss auto reconnect task; see comm_netif_event_cb
+    comm_link_monitor_reset();
+    if (nm_subscribe_netif_event(comm_netif_event_cb, NULL) != AICAM_OK) {
+        LOG_SVC_WARN("Failed to subscribe netif events (auto reconnect disabled)");
+    }
+
     // Initialize network interface initialization manager
     aicam_result_t result = netif_init_manager_framework_init();
     if (result != AICAM_OK) {
@@ -1333,10 +1544,18 @@ aicam_result_t communication_service_start(void)
         .stack_mem = startup_decision_task_stack,
         .priority = osPriorityNormal,
     };
+    // Auto reconnect task (netif up paths block for seconds, large stack)
+    const osThreadAttr_t reconnect_task_attr = {
+        .name = "NetifReconnectTask",
+        .stack_size = sizeof(netif_reconnect_task_stack),
+        .stack_mem = netif_reconnect_task_stack,
+        .priority = osPriorityBelowNormal,
+    };
     g_communication_service.background_events = osEventFlagsNew(NULL);
     if (g_communication_service.background_events != NULL) {
         g_communication_service.scan_task_id = osThreadNew(background_scan_task, NULL, &scan_task_attr);
         g_communication_service.decision_task_id = osThreadNew(startup_decision_task, NULL, &decision_task_attr);
+        g_communication_service.reconnect_task_id = osThreadNew(netif_reconnect_task, NULL, &reconnect_task_attr);
     }
 
     g_communication_service.running = AICAM_TRUE;

@@ -100,6 +100,8 @@ void usbh_rndis_run(struct usbh_rndis *rndis_class)
     if (usb_rndis_netif_events != NULL) {
         osEventFlagsSet(usb_rndis_netif_events, USB_RNDIS_EVENT_ACTIVATE);
     }
+    /* Dongle enumerated (USB host thread context, no driver mutex held). */
+    nm_report_netif_event(NETIF_NAME_USB_RNDIS, NETIF_EVT_LINK_UP, NULL);
 }
 
 /* Class disconnect: stop the TX path immediately; the class rx thread
@@ -113,6 +115,8 @@ void usbh_rndis_stop(struct usbh_rndis *rndis_class)
     if (usb_rndis_netif_events != NULL) {
         osEventFlagsSet(usb_rndis_netif_events, USB_RNDIS_EVENT_DOWN);
     }
+    /* Dongle unplugged (USB host thread context). */
+    nm_report_netif_event(NETIF_NAME_USB_RNDIS, NETIF_EVT_LINK_DOWN, NULL);
 }
 
 /* Class rx thread delivers raw ethernet frames (thread context). */
