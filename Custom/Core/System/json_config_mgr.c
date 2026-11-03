@@ -156,7 +156,11 @@
              .fill_light_while_streaming = AICAM_FALSE
          }
      },
-     
+
+     .usb_config = {
+         .device_enable = AICAM_TRUE
+     },
+
      .network_service = {
          .ap_sleep_time = 0,        // Default AP sleep time (0 = no sleep)
          .ssid = "AICAM-AP",        // Default AP SSID
@@ -205,6 +209,13 @@
              .last_status = POE_STATUS_OFFLINE,          // Initial status
              .last_error_time = 0,
              .last_error_msg = ""
+         },
+
+         // NTP time-sync defaults (3 built-in servers + 1 free slot)
+         .ntp = {
+             .enable = AICAM_TRUE,
+             .server_count = 3,
+             .servers = {"time.windows.com", "pool.ntp.org", "time1.google.com", ""}
          }
      },
      
@@ -1182,6 +1193,44 @@
      return AICAM_OK;
  }
 
+/*=================== USB Configuration API Implementation ====================*/
+aicam_result_t json_config_get_usb_config(usb_config_t *usb_config)
+{
+    if (!usb_config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+    if (!g_json_config_ctx.initialized)
+    {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+    *usb_config = g_json_config_ctx.current_config.usb_config;
+    return AICAM_OK;
+}
+
+aicam_result_t json_config_set_usb_config(const usb_config_t *usb_config)
+{
+    if (!usb_config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    if (usb_config != &g_json_config_ctx.current_config.usb_config)
+    {
+        memcpy(&g_json_config_ctx.current_config.usb_config, usb_config, sizeof(usb_config_t));
+    }
+
+    // update to NVS
+    aicam_result_t result = json_config_save_usb_config_to_nvs(usb_config);
+    if (result != AICAM_OK) {
+        LOG_CORE_ERROR("Failed to save USB configuration to NVS");
+        return result;
+    }
+
+    LOG_CORE_INFO("USB configuration updated: device_enable=%u", usb_config->device_enable);
+    return AICAM_OK;
+}
+
 /*=================== ISP Configuration API Implementation ====================*/
 aicam_result_t json_config_get_isp_config(isp_config_t *isp_config)
 {
@@ -1591,6 +1640,57 @@ poe_ip_mode_t json_config_get_poe_ip_mode(void)
         return POE_IP_MODE_DHCP;  // Default to DHCP
     }
     return g_json_config_ctx.current_config.network_service.poe.ip_mode;
+}
+
+aicam_result_t json_config_get_ntp_config(ntp_config_persist_t *ntp_config)
+{
+    if (!ntp_config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    if (!g_json_config_ctx.initialized)
+    {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    *ntp_config = g_json_config_ctx.current_config.network_service.ntp;
+    return AICAM_OK;
+}
+
+aicam_result_t json_config_set_ntp_config(const ntp_config_persist_t *ntp_config)
+{
+    if (!ntp_config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    if (!g_json_config_ctx.initialized)
+    {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (ntp_config->enable && ntp_config->server_count == 0)
+    {
+        return AICAM_ERROR_INVALID_PARAM;  // enabled sync needs at least one server
+    }
+
+    if (ntp_config != &g_json_config_ctx.current_config.network_service.ntp)
+    {
+        memcpy(&g_json_config_ctx.current_config.network_service.ntp, ntp_config, sizeof(ntp_config_persist_t));
+    }
+
+    // Save to NVS
+    aicam_result_t result = json_config_save_ntp_config_to_nvs(ntp_config);
+    if (result != AICAM_OK)
+    {
+        LOG_CORE_ERROR("Failed to save NTP configuration to NVS");
+        return result;
+    }
+
+    LOG_CORE_INFO("NTP configuration updated: enable=%d, servers=%u",
+                  ntp_config->enable, ntp_config->server_count);
+    return AICAM_OK;
 }
 
 aicam_result_t json_config_set_poe_ip_mode(poe_ip_mode_t mode)

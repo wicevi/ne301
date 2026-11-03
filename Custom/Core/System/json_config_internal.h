@@ -117,6 +117,9 @@
  #define NVS_KEY_LIGHT_THRESHOLD         "light_thr"
  #define NVS_KEY_LIGHT_FILL_STREAMING    "light_fill"
 
+// USB device configuration key names
+#define NVS_KEY_USB_DEVICE_ENABLE       "usb_dev_en"
+
 // ISP configuration key names
 #define NVS_KEY_ISP_VALID               "isp_valid"
 // StatRemoval
@@ -231,6 +234,14 @@
 #define NVS_KEY_POE_LAST_DHCP_IP        "poe_last_ip"
 #define NVS_KEY_POE_VALIDATE_GATEWAY    "poe_val_gw"
 #define NVS_KEY_POE_DETECT_CONFLICT     "poe_det_conf"
+
+// NTP time-sync configuration key names
+#define NVS_KEY_NTP_ENABLE              "ntp_en"
+#define NVS_KEY_NTP_SERVER_COUNT        "ntp_cnt"
+#define NVS_KEY_NTP_SERVER_0            "ntp_s0"
+#define NVS_KEY_NTP_SERVER_1            "ntp_s1"
+#define NVS_KEY_NTP_SERVER_2            "ntp_s2"
+#define NVS_KEY_NTP_SERVER_3            "ntp_s3"
 
 // MQTT service configuration key names
 // Basic connection
@@ -402,10 +413,13 @@
 aicam_result_t json_config_save_device_info_config_to_nvs(const device_info_config_t *config);
 aicam_result_t json_config_save_device_service_image_config_to_nvs(const image_config_t *config);
 aicam_result_t json_config_save_device_service_light_config_to_nvs(const light_config_t *config);
+aicam_result_t json_config_save_usb_config_to_nvs(const usb_config_t *config);
 aicam_result_t json_config_save_isp_config_to_nvs(const isp_config_t *config);
 aicam_result_t json_config_save_network_service_config_to_nvs(const network_service_config_t *config);
 aicam_result_t json_config_save_poe_config_to_nvs(const poe_config_persist_t *config);
 aicam_result_t json_config_load_poe_config_from_nvs(poe_config_persist_t *config);
+aicam_result_t json_config_save_ntp_config_to_nvs(const ntp_config_persist_t *config);
+aicam_result_t json_config_load_ntp_config_from_nvs(ntp_config_persist_t *config);
 aicam_result_t json_config_save_mqtt_service_config_to_nvs(const mqtt_service_config_t *config);
 // RTMP config now part of video_stream_mode, use json_config_get/set_video_stream_mode()
 aicam_result_t json_config_save_auth_mgr_config_to_nvs(const auth_mgr_config_t *config);

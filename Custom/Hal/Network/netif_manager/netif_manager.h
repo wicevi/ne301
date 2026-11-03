@@ -304,6 +304,31 @@ typedef enum {
 typedef void (*netif_ap_client_event_cb_t)(netif_ap_client_event_t event,
                                            const uint8_t mac_addr[6]);
 
+/// @brief Network interface event, fanned out by nm_report_netif_event().
+///        IF_* come from controlled nm up/down paths (CLI / web / service),
+///        LINK_* come from the drivers' own link monitoring (cable pulled,
+///        router gone, USB unplug, firmware self-heal).
+typedef enum {
+    NETIF_EVT_IF_UP = 0,                ///< Controlled UP completed (nm up / CFG_EX auto-up, incl. service reconnect)
+    NETIF_EVT_IF_DOWN,                  ///< Controlled DOWN/UNINIT completed (user-intended shutdown)
+    NETIF_EVT_LINK_UP,                  ///< Link recovered autonomously (driver self-heal, USB plug-in)
+    NETIF_EVT_LINK_DOWN,                ///< Link lost unexpectedly (cable pulled, router off, USB unplug)
+    NETIF_EVT_AP_STA_CONNECTED,         ///< AP-mode station associated (data = const uint8_t mac[6])
+    NETIF_EVT_AP_STA_DISCONNECTED,      ///< AP-mode station left (data = const uint8_t mac[6])
+    NETIF_EVT_MAX,
+} netif_event_id_t;
+
+/// @brief Netif event callback. Invoked in the reporting driver's context
+///        (SDK event thread, ISR thread, USB thread...) — keep it short and
+///        non-blocking (update a flag / set an event; no netif calls, no
+///        waits). data is only valid during the call.
+/// @param if_name Interface name ("wl"/"ap"/"hw"/"wn"/"4g"/"ue"/"ud")
+/// @param event Event kind
+/// @param data Event payload (AP_STA_*: const uint8_t mac[6], else NULL)
+/// @param user_ctx Context registered with nm_subscribe_netif_event()
+typedef void (*netif_event_cb_t)(const char *if_name, netif_event_id_t event,
+                                 const void *data, void *user_ctx);
+
 /// @brief Network interface status
 typedef struct {
     const char *if_name;                    // Network interface name
@@ -451,6 +476,25 @@ const char *nm_get_set_default_netif_name(void);
 /// @return Error code
 int nm_ctrl_set_dns_server(int idx, uint8_t *dns_server);
 
+/* NTP server name row size for nm_sntp_apply_config(). Must stay equal to
+ * NTP_SERVER_NAME_MAX_LEN in json_config_mgr.h — a _Static_assert in
+ * netif_manager.c enforces it at compile time. */
+#define NM_SNTP_SERVER_NAME_MAX_LEN     64
+
+/// @brief Apply an NTP configuration to the lwIP SNTP client at runtime:
+///        stop SNTP, re-point the server table (names are copied into a
+///        persistent buffer — lwIP stores pointers, not strings), restart
+///        polling when enabled. An enable/restart fires one sync immediately.
+/// @param servers Server name rows (empty first char = unused slot); NULL only allowed when count is 0
+/// @param count Number of rows (clamped to SNTP_MAX_SERVERS)
+/// @param enable Non-zero to run the SNTP client, 0 to stop it
+/// @return 0 on success, negative on invalid params
+int nm_sntp_apply_config(const char servers[][NM_SNTP_SERVER_NAME_MAX_LEN], uint8_t count, int enable);
+
+/// @brief Whether the lwIP SNTP client is currently running
+/// @return 1 if running, 0 otherwise
+int nm_sntp_is_running(void);
+
 /// @brief Get DNS server (maximum number is DNS_MAX_SERVERS)
 /// @param idx DNS server index
 /// @param dns_server DNS server address
@@ -500,6 +544,28 @@ int nm_unsubscribe_ap_client_event(netif_ap_client_event_cb_t cb);
 /// @param event Association event kind
 /// @param mac_addr Station MAC, 6 bytes
 void nm_report_ap_client_event(netif_ap_client_event_t event, const uint8_t mac_addr[6]);
+
+/// @brief Subscribe to generic netif events (link up/down, controlled
+///        up/down, AP station join/leave). Every registered callback is
+///        invoked for each event; the same callback may not be registered
+///        twice. Callbacks run in the reporting driver's context.
+/// @param cb Callback (non-NULL)
+/// @param user_ctx Opaque context passed back to the callback (may be NULL)
+/// @return AICAM_OK on success, negative aicam_result_t otherwise
+int nm_subscribe_netif_event(netif_event_cb_t cb, void *user_ctx);
+
+/// @brief Remove a netif event subscription
+/// @param cb Previously registered callback
+/// @return AICAM_OK on success, negative aicam_result_t otherwise
+int nm_unsubscribe_netif_event(netif_event_cb_t cb, void *user_ctx);
+
+/// @brief Internal: fan a netif event out to all subscribers. Called by the
+///        netif manager (controlled up/down transitions) and by the drivers
+///        (link monitoring) — not part of the application API.
+/// @param if_name Interface name
+/// @param event Event kind
+/// @param data Event payload (AP_STA_*: const uint8_t mac[6], else NULL)
+void nm_report_netif_event(const char *if_name, netif_event_id_t event, const void *data);
 
 #ifdef __cplusplus
 }

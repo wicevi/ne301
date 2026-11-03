@@ -31,6 +31,13 @@
 #include "wifi.h"
 #include "sl_rsi_ble.h"
 #include "rtmp_push_test.h"
+#include "json_config_mgr.h"
+
+/* nm_sntp_apply_config() takes rows sized NM_SNTP_SERVER_NAME_MAX_LEN; the
+ * persisted config passes its own rows straight through, so both macros must
+ * agree — catch a drift at compile time, not with a torn string at runtime. */
+_Static_assert(NTP_SERVER_NAME_MAX_LEN == NM_SNTP_SERVER_NAME_MAX_LEN,
+               "NTP_SERVER_NAME_MAX_LEN and NM_SNTP_SERVER_NAME_MAX_LEN must match");
 
 static ip_addr_t default_dns_server[DNS_MAX_SERVERS] = {
     IPADDR4_INIT(NETIF_DEFAULT_DNS_SERVER1),
@@ -43,11 +50,86 @@ static const ip_addr_t boot_dns_server[DNS_MAX_SERVERS] = {
     IPADDR4_INIT(NETIF_DEFAULT_DNS_SERVER1),
     IPADDR4_INIT(NETIF_DEFAULT_DNS_SERVER2),
 };
-static const char *default_sntp_server[SNTP_MAX_SERVERS] = {
+/* Runtime NTP server table. lwIP sntp_setservername() stores the pointer
+ * WITHOUT copying the string, so every name handed to it must live here for
+ * the lifetime of the SNTP module — stack or caller buffers are forbidden.
+ * Primed with the compiled defaults; overwritten at boot / via the web API
+ * from the persisted ntp_config_persist_t. */
+static char sntp_server_names[SNTP_MAX_SERVERS][NTP_SERVER_NAME_MAX_LEN] = {
     "time.windows.com",
     "pool.ntp.org",
     "time1.google.com",
+    "",
 };
+
+/* ==================== SNTP runtime control ==================== */
+
+/**
+ * @brief Apply an NTP configuration to the lwIP SNTP client at runtime.
+ *        Stops SNTP, re-points the server table, and (re)starts polling when
+ *        enabled — sntp_init() fires one request immediately, so an "enable"
+ *        or a server change also triggers a fresh sync attempt.
+ * @param servers Array of server name strings (NULL entries / empty strings
+ *                are skipped), may be NULL when count is 0
+ * @param count Number of entries in servers (0..SNTP_MAX_SERVERS)
+ * @param enable AICAM_TRUE to run the SNTP client, AICAM_FALSE to keep it stopped
+ * @return 0 on success (count clamped to SNTP_MAX_SERVERS is not an error)
+ */
+int nm_sntp_apply_config(const char servers[][NM_SNTP_SERVER_NAME_MAX_LEN], uint8_t count, int enable)
+{
+    if (count > SNTP_MAX_SERVERS) count = SNTP_MAX_SERVERS;
+    if (count > 0 && servers == NULL) return -1;
+
+    /* Copy into the persistent table first: setservername() below hands lwIP
+     * pointers into sntp_server_names[]. */
+    for (int i = 0; i < SNTP_MAX_SERVERS; i++) {
+        if (i < count && servers[i][0] != '\0') {
+            strncpy(sntp_server_names[i], servers[i], sizeof(sntp_server_names[i]) - 1);
+            sntp_server_names[i][sizeof(sntp_server_names[i]) - 1] = '\0';
+        } else {
+            sntp_server_names[i][0] = '\0';
+        }
+    }
+
+    /* sntp_stop() is idempotent (safe when not running). Server names survive
+     * a stop inside lwIP, so unused slots must be cleared explicitly. */
+    sntp_stop();
+    if (enable) {
+        for (int i = 0; i < SNTP_MAX_SERVERS; i++) {
+            if (sntp_server_names[i][0] != '\0') {
+                sntp_setservername(i, sntp_server_names[i]);
+            } else {
+                sntp_setservername(i, NULL);
+            }
+        }
+        sntp_init();
+    }
+
+    LOG_DRV_INFO("SNTP %s, %u server(s)", enable ? "started" : "stopped", count);
+    return 0;
+}
+
+/**
+ * @brief Whether the lwIP SNTP client is currently running
+ */
+int nm_sntp_is_running(void)
+{
+    return sntp_enabled() ? 1 : 0;
+}
+
+/* Boot-time / re-apply helper: pull the persisted config and push it into
+ * the SNTP client. Falls back to the compiled defaults when the config
+ * manager is not available yet. */
+static void sntp_apply_persisted_config(void)
+{
+    ntp_config_persist_t ntp_cfg;
+    if (json_config_get_ntp_config(&ntp_cfg) == AICAM_OK && ntp_cfg.server_count > 0) {
+        nm_sntp_apply_config(ntp_cfg.servers, ntp_cfg.server_count, ntp_cfg.enable);
+    } else {
+        /* Defaults: the three compiled-in servers (slots 0..2). */
+        nm_sntp_apply_config(sntp_server_names, 3, AICAM_TRUE);
+    }
+}
 static const char *default_if_name = NETIF_DEFAULT_NETIF_NAME;
 // static device_t *if_manager_dev = NULL;
 const osThreadAttr_t ifTask_attributes = {
@@ -183,6 +265,84 @@ void nm_report_ap_client_event(netif_ap_client_event_t event, const uint8_t mac_
     for (int i = 0; i < NM_AP_CLIENT_EVT_SUBSCRIBER_MAX; i++) {
         if (snapshot[i] != NULL) {
             snapshot[i](event, mac_addr);
+        }
+    }
+}
+
+/* ==================== Generic Netif Event Subscription ==================== */
+
+#define NM_EVT_SUBSCRIBER_MAX  8
+
+typedef struct {
+    netif_event_cb_t cb;
+    void *user_ctx;
+} netif_event_subscriber_t;
+
+static netif_event_subscriber_t netif_event_cbs[NM_EVT_SUBSCRIBER_MAX];
+
+int nm_subscribe_netif_event(netif_event_cb_t cb, void *user_ctx)
+{
+    if (cb == NULL) return AICAM_ERROR_INVALID_PARAM;
+    if (netif_manager_mutex == NULL) return AICAM_ERROR_NOT_INITIALIZED;
+
+    osMutexAcquire(netif_manager_mutex, osWaitForever);
+    for (int i = 0; i < NM_EVT_SUBSCRIBER_MAX; i++) {
+        if (netif_event_cbs[i].cb == cb) {
+            netif_event_cbs[i].user_ctx = user_ctx;  /* refresh ctx */
+            osMutexRelease(netif_manager_mutex);
+            return AICAM_OK;  /* already subscribed */
+        }
+    }
+    for (int i = 0; i < NM_EVT_SUBSCRIBER_MAX; i++) {
+        if (netif_event_cbs[i].cb == NULL) {
+            netif_event_cbs[i].cb = cb;
+            netif_event_cbs[i].user_ctx = user_ctx;
+            osMutexRelease(netif_manager_mutex);
+            return AICAM_OK;
+        }
+    }
+    osMutexRelease(netif_manager_mutex);
+    LOG_DRV_WARN("Netif event subscriber table full (%d)", NM_EVT_SUBSCRIBER_MAX);
+    return AICAM_ERROR_FULL;
+}
+
+int nm_unsubscribe_netif_event(netif_event_cb_t cb, void *user_ctx)
+{
+    (void)user_ctx;  /* matching is by callback only, ctx is irrelevant */
+
+    if (cb == NULL) return AICAM_ERROR_INVALID_PARAM;
+    if (netif_manager_mutex == NULL) return AICAM_ERROR_NOT_INITIALIZED;
+
+    osMutexAcquire(netif_manager_mutex, osWaitForever);
+    for (int i = 0; i < NM_EVT_SUBSCRIBER_MAX; i++) {
+        if (netif_event_cbs[i].cb == cb) {
+            netif_event_cbs[i].cb = NULL;
+            netif_event_cbs[i].user_ctx = NULL;
+            osMutexRelease(netif_manager_mutex);
+            return AICAM_OK;
+        }
+    }
+    osMutexRelease(netif_manager_mutex);
+    return AICAM_ERROR_INVALID_PARAM;  /* not subscribed */
+}
+
+void nm_report_netif_event(const char *if_name, netif_event_id_t event, const void *data)
+{
+    /* Snapshot under the lock, invoke outside it — same rules as the AP client
+     * fan-out above: subscribers may (un)subscribe from their own context and
+     * a callback may fire once more after its unsubscribe returns. */
+    netif_event_subscriber_t snapshot[NM_EVT_SUBSCRIBER_MAX];
+
+    if (if_name == NULL) return;
+    if (netif_manager_mutex == NULL) return;
+
+    osMutexAcquire(netif_manager_mutex, osWaitForever);
+    memcpy(snapshot, netif_event_cbs, sizeof(snapshot));
+    osMutexRelease(netif_manager_mutex);
+
+    for (int i = 0; i < NM_EVT_SUBSCRIBER_MAX; i++) {
+        if (snapshot[i].cb != NULL) {
+            snapshot[i].cb(if_name, event, data, snapshot[i].user_ctx);
         }
     }
 }
@@ -326,7 +486,12 @@ static int netif_manager_cmd(int argc, char* argv[])
     if (argc == 1) {
         LOG_SIMPLE("\r\nDefault netif: %s (%s)", nm_get_default_netif_name(), nm_get_set_default_netif_name());
         LOG_SIMPLE("Dns server list: %d.%d.%d.%d, %d.%d.%d.%d", default_dns_server[0].addr & 0xFF, (default_dns_server[0].addr >> 8) & 0xFF, (default_dns_server[0].addr >> 16) & 0xFF, (default_dns_server[0].addr >> 24) & 0xFF, default_dns_server[1].addr & 0xFF, (default_dns_server[1].addr >> 8) & 0xFF, (default_dns_server[1].addr >> 16) & 0xFF, (default_dns_server[1].addr >> 24) & 0xFF);
-        LOG_SIMPLE("Sntp server list: %s, %s, %s", default_sntp_server[0], default_sntp_server[1], default_sntp_server[2]);
+        LOG_SIMPLE("Sntp: %s, server list: %s", nm_sntp_is_running() ? "running" : "stopped",
+                   sntp_server_names[0][0] ? sntp_server_names[0] : "(none)");
+        for (int i = 1; i < SNTP_MAX_SERVERS; i++) {
+            if (sntp_server_names[i][0]) LOG_SIMPLE(", %s", sntp_server_names[i]);
+        }
+        LOG_SIMPLE("\r\n");
         LOG_SIMPLE("Netif list:\r\n");
         // Print all initialized network interface information, default interface first
         ret = nm_get_netif_list(&if_info_list);
@@ -974,6 +1139,31 @@ int netif_manager_ctrl(const char *if_name, netif_cmd_t cmd, void *param)
     #endif
     }
 
+    /* Controlled up/down transitions → IF_UP / IF_DOWN events (after the
+     * default-route re-pick, outside any driver mutex).
+     *  - An explicit DOWN/UNINIT reports IF_DOWN unconditionally on success:
+     *    it is an intent signal — after a driver-internal down (cable pull
+     *    reports LINK_DOWN and downs the netif itself) the state is already
+     *    DOWN, and the user's later "ifconfig down" must still read as
+     *    "stop trying", not fall through as a no-op.
+     *  - UP and CFG_EX report only on an actual transition, so a repeated up
+     *    or a same-state reconfigure stays silent. STATE never reaches here,
+     *    so the recursion is one level. */
+    if (ret == 0) {
+        netif_state_t new_state = NETIF_STATE_DEINIT;
+        if (cmd == NETIF_CMD_DOWN || cmd == NETIF_CMD_UNINIT) {
+            nm_report_netif_event(if_name, NETIF_EVT_IF_DOWN, NULL);
+        } else if (cmd == NETIF_CMD_UP || cmd == NETIF_CMD_CFG_EX) {
+            if (netif_manager_ctrl(if_name, NETIF_CMD_STATE, &new_state) == 0) {
+                if (new_state == NETIF_STATE_UP && last_state != NETIF_STATE_UP) {
+                    nm_report_netif_event(if_name, NETIF_EVT_IF_UP, NULL);
+                } else if (new_state != NETIF_STATE_UP && last_state == NETIF_STATE_UP) {
+                    nm_report_netif_event(if_name, NETIF_EVT_IF_DOWN, NULL);
+                }
+            }
+        }
+    }
+
     if (cmd == NETIF_CMD_INIT || cmd == NETIF_CMD_UP) {
         end_tick = HAL_GetTick();
         printf("%s %s: %ld / %ld ms\r\n", if_name, (cmd == NETIF_CMD_INIT) ? "init" : "up", end_tick - start_tick, end_tick);
@@ -1031,11 +1221,8 @@ void netif_manager_init(void)
     dns_setserver(0, &default_dns_server[0]);
     dns_setserver(1, &default_dns_server[1]);
     
-    // 7. Set SNTP servers
-    sntp_setservername(0, default_sntp_server[0]);
-    sntp_setservername(1, default_sntp_server[1]);
-    sntp_setservername(2, default_sntp_server[2]);
-    sntp_init();
+    // 7. Start SNTP from the persisted configuration (switch + server list)
+    sntp_apply_persisted_config();
     
     uint32_t elapsed_ms = osKernelGetTickCount() - start_time;
     LOG_DRV_INFO("Netif manager framework initialized in %u ms", elapsed_ms);

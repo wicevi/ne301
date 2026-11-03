@@ -457,6 +457,27 @@ static void parse_network_service(cJSON *json, network_service_config_t *cfg)
         json_get_bool(poe, "detect_ip_conflict", &cfg->poe.detect_ip_conflict);
     }
 
+    /* NTP time-sync */
+    {
+        cJSON *ntp = cJSON_GetObjectItem(json, "ntp");
+        if (cJSON_IsObject(ntp)) {
+            json_get_bool(ntp, "enable", &cfg->ntp.enable);
+            cJSON *srv_arr = cJSON_GetObjectItem(ntp, "servers");
+            if (cJSON_IsArray(srv_arr)) {
+                int cnt = cJSON_GetArraySize(srv_arr);
+                if (cnt > NTP_SERVER_MAX_COUNT) cnt = NTP_SERVER_MAX_COUNT;
+                for (int i = 0; i < cnt; i++) {
+                    cJSON *it = cJSON_GetArrayItem(srv_arr, i);
+                    if (cJSON_IsString(it) && it->valuestring != NULL && it->valuestring[0] != '\0') {
+                        strncpy(cfg->ntp.servers[i], it->valuestring, sizeof(cfg->ntp.servers[i]) - 1);
+                        cfg->ntp.servers[i][sizeof(cfg->ntp.servers[i]) - 1] = '\0';
+                    }
+                }
+                cfg->ntp.server_count = (uint8_t)cnt;
+            }
+        }
+    }
+
     /* Wi-Fi HaLow */
     {
         cJSON *halow = cJSON_GetObjectItem(json, "halow");
@@ -1212,6 +1233,18 @@ static cJSON *serialize_network_service(const network_service_config_t *cfg)
         cJSON_AddItemToObject(json, "halow", halow);
     }
 
+    /* NTP time-sync */
+    {
+        cJSON *ntp = cJSON_CreateObject();
+        cJSON_AddBoolToObject(ntp, "enable", cfg->ntp.enable);
+        cJSON *srv_arr = cJSON_CreateArray();
+        for (int i = 0; i < cfg->ntp.server_count && i < NTP_SERVER_MAX_COUNT; i++) {
+            cJSON_AddItemToArray(srv_arr, cJSON_CreateString(cfg->ntp.servers[i]));
+        }
+        cJSON_AddItemToObject(ntp, "servers", srv_arr);
+        cJSON_AddItemToObject(json, "ntp", ntp);
+    }
+
     return json;
 }
 
@@ -1509,6 +1542,10 @@ aicam_result_t json_config_parse_json_object(const char *json_str, aicam_global_
     if (cJSON_IsObject(dev_svc))
         parse_device_service(dev_svc, &config->device_service);
 
+    cJSON *usb_cfg = cJSON_GetObjectItem(root, "usb_config");
+    if (cJSON_IsObject(usb_cfg))
+        json_get_bool(usb_cfg, "device_enable", &config->usb_config.device_enable);
+
     cJSON *net_svc = cJSON_GetObjectItem(root, "network_service");
     if (cJSON_IsObject(net_svc))
         parse_network_service(net_svc, &config->network_service);
@@ -1566,6 +1603,10 @@ aicam_result_t json_config_serialize_json_object(const aicam_global_config_t *co
     cJSON_AddItemToObject(root, "power_mode_config", serialize_power_mode(&config->power_mode_config));
     cJSON_AddItemToObject(root, "device_info", serialize_device_info(&config->device_info));
     cJSON_AddItemToObject(root, "device_service", serialize_device_service(&config->device_service));
+
+    cJSON *usb_cfg = cJSON_CreateObject();
+    cJSON_AddBoolToObject(usb_cfg, "device_enable", config->usb_config.device_enable);
+    cJSON_AddItemToObject(root, "usb_config", usb_cfg);
     cJSON_AddItemToObject(root, "network_service", serialize_network_service(&config->network_service));
     cJSON_AddItemToObject(root, "mqtt_service", serialize_mqtt_service(&config->mqtt_service));
     cJSON_AddItemToObject(root, "work_mode_config", serialize_work_mode(&config->work_mode_config));
