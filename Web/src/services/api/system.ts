@@ -5,6 +5,16 @@ interface SetSystemTimeReq {
   timezone: string;
 }
 
+/** NTP sync configuration (GET/POST /api/v1/system/ntp/config).
+ *  POST is a partial update: omit "servers" to keep the current list,
+ *  omit "enable" to keep the current switch state. */
+export interface NtpConfig {
+  enable: boolean;
+  servers: string[];
+  /** runtime SNTP client state (GET only) */
+  running?: boolean;
+}
+
 export interface DeviceInfo {
   battery_percent: number;
   camera_module: string;
@@ -74,6 +84,8 @@ export interface BundlePreCheckRes {
 const systemApis = {
   getDeviceInfoReq: (config?: { skipErrorToast?: boolean; signal?: AbortSignal }) => request.get('/api/v1/device/info', config),
   setSystemTimeReq: (data: SetSystemTimeReq) => request.post('/api/v1/system/time', data),
+  getNtpConfigReq: (config?: { skipErrorToast?: boolean; signal?: AbortSignal }) => request.get('/api/v1/system/ntp/config', config),
+  setNtpConfigReq: (data: Partial<NtpConfig>) => request.post('/api/v1/system/ntp/config', data),
   setDeviceNameReq: (data: { device_name: string }) => request.post('/api/v1/device/name', data),
   uploadOTAFileReq: (
     file: Blob,

@@ -18,8 +18,18 @@ export default function App() {
     }, 1000 * 60 * 10);
     return timer;
   }
-  const setSystemTime = () => {
+  const setSystemTime = async () => {
     try {
+      // When NTP sync is enabled on the device, the device keeps its own
+      // clock — pushing browser time here would fight (and often regress)
+      // the NTP-synced time. Only sync from the browser when NTP is off.
+      try {
+        const ntpRes = await systemApis.getNtpConfigReq({ skipErrorToast: true });
+        if (ntpRes?.data?.enable) return;
+      } catch {
+        // NTP config unreachable (old firmware / transient error): fall
+        // through to browser sync, matching the previous behavior.
+      }
       // Get current UTC time in seconds timestamp
       const timestamp = Math.floor(Date.now() / 1000)
       const offsetMinutes = new Date().getTimezoneOffset()
