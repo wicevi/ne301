@@ -790,7 +790,18 @@ void dhcps_start(struct netif *netif)
 
     dhcps_pcb->netif_idx = netif->num + 1;
     ip_set_option(dhcps_pcb, SOF_BROADCAST);
-    udp_bind(dhcps_pcb, &netif->ip_addr, DHCPS_SERVER_PORT);
+    /* The USB RNDIS netif ("ud") runs its own DHCP server on the SAME IP
+     * and port (shared-subnet plan: one web address for hotspot + USB).
+     * udp_bind() rejects a duplicate IP:port unless BOTH pcbs set
+     * SOF_REUSEADDR — incoming traffic is then split by pcb->netif_idx. */
+    ip_set_option(dhcps_pcb, SOF_REUSEADDR);
+    err_t bind_err = udp_bind(dhcps_pcb, &netif->ip_addr, DHCPS_SERVER_PORT);
+    if (bind_err != ERR_OK) {
+        DHCPS_INFO("start: udp_bind failed (%d) — another DHCP server holds this IP:port\r\n", bind_err);
+        udp_remove(dhcps_pcb);
+        dhcps_pcb = NULL;
+        return;
+    }
     udp_recv(dhcps_pcb, handle_dhcp, NULL);
 
     DHCPS_INFO("started on %u.%u.%u.%u/%u.%u.%u.%u, pool .%u-.%u\r\n",
