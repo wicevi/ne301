@@ -12,6 +12,7 @@
 typedef enum {
     CAM_IQ_SCENE_INDOOR = 0,
     CAM_IQ_SCENE_OUTDOOR = 1,
+    CAM_IQ_SCENE_NIGHT = 2,   /* IR board only: OS04C10 IR night profile */
 } cam_iq_scene_t;
 
 /* Define sensor info */
@@ -93,7 +94,10 @@ typedef enum {
     CAM_CMD_UNSHARE_PIPE2_BUFFER,
     CAM_CMD_APPLY_ISP_IQ,  // Hot-swap ISP IQ params on a running pipeline
     CAM_CMD_GET_STATE,     // Get camera/pipe run states (camera_state_t)
+    CAM_CMD_IRCUT_SET,     // IR-CUT filter (IR boards): ubuf = const uint8_t*, 0 = day (color), 1 = night (IR)
+    CAM_CMD_IRCUT_GET,     // IR-CUT filter state: ubuf = uint8_t*, 0 = day, 1 = night, 0xFF = unavailable
 } CAM_CMD_E;
+
 
 typedef enum {
     PIPE_STOP    =  0,
@@ -202,23 +206,19 @@ int camera_unregister(void);
 ISP_HandleTypeDef* camera_get_isp_handle(void);
 
 /**
- * @brief Fill ISP IQ parameters for a built-in scene (indoor vs outdoor stock).
- * @param scene CAM_IQ_SCENE_INDOOR applies the indoor stat region only (OS04C10); outdoor uses the tuned profile verbatim.
+ * @brief Fill ISP IQ parameters for a built-in scene.
+ * @param scene CAM_IQ_SCENE_INDOOR applies the indoor stat region only (OS04C10); outdoor uses the tuned profile verbatim; NIGHT applies the IR night profile (OS04C10, IR board only).
  * @param out_iq Output buffer (must not be NULL).
  */
 void camera_fill_isp_iq_scene(cam_iq_scene_t scene, ISP_IQParamTypeDef *out_iq);
 
 /**
- * @brief Overlay grayscale (BT.601 luma) ISP settings on an IQ profile.
- * @param iq IQ buffer to modify in place.
- * @param grayscale AICAM_TRUE: disable AWB and use luma color matrix; AICAM_FALSE: no change.
+ * @brief Fill ISP IQ parameters for a day/night isp_mode (IR board paths).
+ * @param isp_mode IMAGE_ISP_MODE_NIGHT -> IR night profile; DAY/AUTO (and any
+ *        standard-board mode) -> tuned color profile (CAM_IQ_SCENE_OUTDOOR).
+ * @param out_iq Output buffer (must not be NULL).
  */
-void camera_apply_grayscale_iq(ISP_IQParamTypeDef *iq, aicam_bool_t grayscale);
-
-/**
- * @brief Reserved: PIPE1 stays RGB565; grayscale is ISP-only (see camera_apply_grayscale_iq).
- */
-void camera_configure_pipe1_grayscale(pipe_params_t *pipe1, aicam_bool_t grayscale);
+void camera_fill_isp_iq_for_mode(uint32_t isp_mode, ISP_IQParamTypeDef *out_iq);
 
 /**
  * @brief Apply ISP IQ parameters to running hardware registers (hot-swap).
@@ -227,5 +227,19 @@ void camera_configure_pipe1_grayscale(pipe_params_t *pipe1, aicam_bool_t graysca
  * @return AICAM_OK on success, AICAM_ERROR_INVALID_PARAM if hIsp or iq is NULL.
  */
 int camera_apply_isp_iq_runtime(ISP_HandleTypeDef *hIsp, ISP_IQParamTypeDef *iq);
+
+/* ---- AE fast-convergence support (QS quick snapshot) ---- */
+#define CAMERA_AE_STATE_MAGIC   0x41453737U  /* "AE77" */
+typedef struct {
+    uint32_t magic;        /* CAMERA_AE_STATE_MAGIC */
+    uint32_t exposure_us;  /* sensor exposure, microseconds */
+    uint32_t gain_mdb;     /* sensor gain, millidB */
+} camera_ae_state_record_t;
+
+void camera_ae_get_last(uint32_t *exposure_us, uint32_t *gain_mdb);
+int camera_ae_set_last(uint32_t exposure_us, uint32_t gain_mdb);
+aicam_bool_t camera_ae_last_valid(void);
+int camera_stats_get_luma(uint8_t *luma, uint32_t *frame_id);
+int camera_ae_get_target(uint8_t *target);
 
 #endif
