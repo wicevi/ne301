@@ -15,6 +15,8 @@
  #include "ms_mqtt_client.h"
  #include "netif_manager.h"
 #include "isp_services.h"
+#include "dual_model_config.h"
+#include "face_recognition_config.h"
  
  #ifdef __cplusplus
  extern "C" {
@@ -748,6 +750,8 @@ typedef struct {
     auth_mgr_config_t auth_mgr;
     webhook_config_t webhook_config;
     capture_upload_config_t capture_upload; /* Capture/upload mode, storage, retry, schedule */
+    dual_model_config_t dual_model; /* Generic Model A -> crop -> Model B engine */
+    face_recognition_config_t face_recognition; /* Face recognition demo on the dual-model engine */
     // RTMP config is now in work_mode_config.video_stream_mode
  } aicam_global_config_t;
  
@@ -1065,6 +1069,38 @@ aicam_result_t json_config_set_inference_interval_ms(uint32_t interval_ms);
  */
 uint32_t json_config_get_inference_interval_ms(void);
 
+/* ==================== Dual-Model Configuration API ==================== */
+
+/**
+ * @brief Get the dual-model (Model A -> crop -> Model B) configuration
+ * @param config Output configuration structure
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_get_dual_model_config(dual_model_config_t *config);
+
+/**
+ * @brief Set the dual-model configuration (persisted to NVS)
+ * @param config New configuration (fields must be pre-validated by caller)
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_set_dual_model_config(const dual_model_config_t *config);
+
+/* ==================== Face Recognition Configuration API ==================== */
+
+/**
+ * @brief Get the face recognition demo configuration
+ * @param config Output configuration structure
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_get_face_recognition_config(face_recognition_config_t *config);
+
+/**
+ * @brief Set the face recognition demo configuration (persisted to NVS)
+ * @param config New configuration (fields must be pre-validated by caller)
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_set_face_recognition_config(const face_recognition_config_t *config);
+
 
 /**
  * @brief Get mqtt service configuration
@@ -1173,12 +1209,6 @@ aicam_result_t json_config_get_poe_config(poe_config_persist_t *poe_config);
  */
 aicam_result_t json_config_set_poe_config(const poe_config_persist_t *poe_config);
 
-/**
- * @brief Get PoE IP mode
- * @return poe_ip_mode_t IP mode
- */
-poe_ip_mode_t json_config_get_poe_ip_mode(void);
-
 /* ==================== NTP Configuration API ==================== */
 
 /**
@@ -1195,6 +1225,12 @@ aicam_result_t json_config_get_ntp_config(ntp_config_persist_t *ntp_config);
  * @return aicam_result_t Operation result
  */
 aicam_result_t json_config_set_ntp_config(const ntp_config_persist_t *ntp_config);
+
+/**
+ * @brief Get PoE IP mode
+ * @return poe_ip_mode_t IP mode
+ */
+poe_ip_mode_t json_config_get_poe_ip_mode(void);
 
 /**
  * @brief Set PoE IP mode

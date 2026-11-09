@@ -77,6 +77,22 @@ typedef void (*video_ai_result_callback_t)(const nn_result_t *result,
                                            void *user_data);
 
 /**
+ * @brief Inference frame hook
+ * @details Like video_ai_result_callback_t, but additionally receives the
+ *          raw pipe2 RGB888 buffer and runs BEFORE the buffer is returned to
+ *          the camera — the callee may read pixels (crop/warp for a secondary
+ *          model) and run further NPU work (serialized through the global NPU
+ *          mutex in nn.c). Keep the work bounded: the pipe2 buffer pool is
+ *          only three deep and no new primary inference happens until this
+ *          returns. Invoked on the AI node's processing thread.
+ */
+typedef void (*video_ai_frame_hook_t)(const nn_result_t *result,
+                                      const uint8_t *pipe2_buffer,
+                                      uint32_t pipe2_size,
+                                      uint32_t frame_id,
+                                      void *user_data);
+
+/**
  * @brief AI node private data
  */
 typedef struct {
@@ -88,7 +104,20 @@ typedef struct {
     uint32_t last_inference_tick;         // Tick of the last inference attempt (pacing)
     video_ai_result_callback_t result_callback; // Post-inference result callback
     void *result_callback_user_data;      // Opaque pointer for result_callback
+    /* Frame hook: runs between a successful primary inference and the pipe2
+     * buffer return, with raw pixel access (e.g. face-recognition embedding
+     * on crops of the frame the detection came from). */
+    video_ai_frame_hook_t frame_hook;     // Raw-frame consumer (NULL = none)
+    void *frame_hook_user_data;           // Opaque pointer for frame_hook
     uint8_t *current_buffer;              // Current frame buffer
+    /* Letterbox staging buffer (model_w x model_h RGB888): PIPE2 delivers
+     * the aspect-true full-frame rows (model_w x eff_h) and the pad rows
+     * top/bottom are filled here before every inference. NULL when the
+     * model geometry fills PIPE2 exactly (no letterbox needed). */
+    uint8_t *lb_buffer;                   // Letterbox staging buffer
+    uint32_t lb_eff_h;                    // Valid rows in the PIPE2 frame
+    uint32_t lb_pad_top;                  // Pad rows above the valid rows
+    uint32_t lb_size;                     // Full model input buffer size
     aicam_bool_t is_initialized;          // Initialization status
     aicam_bool_t is_running;              // Running status
     aicam_bool_t draw_service_initialized; // Drawing service initialization status
@@ -226,6 +255,33 @@ aicam_result_t video_ai_node_get_best_nn_result(video_node_t *node, nn_result_t 
 aicam_result_t video_ai_node_set_result_callback(video_node_t *node,
                                                  video_ai_result_callback_t callback,
                                                  void *user_data);
+
+/**
+ * @brief Register a frame hook with raw pipe2 pixel access
+ * @details The hook runs on the AI node thread after each successful primary
+ *          inference, before the pipe2 buffer is recycled. Only one hook slot
+ *          exists (services that need fan-out should install their own
+ *          dispatcher). Passing NULL unregisters.
+ * @param node AI node handle
+ * @param hook Hook function (NULL to unregister)
+ * @param user_data Opaque pointer passed to the hook
+ * @return Operation result
+ */
+aicam_result_t video_ai_node_set_frame_hook(video_node_t *node,
+                                            video_ai_frame_hook_t hook,
+                                            void *user_data);
+
+/**
+ * @brief Get the pipe2 input geometry (the primary model's input size)
+ * @details The frame hook receives pixels in this geometry; crop/warp code
+ *          needs it to interpret coordinates.
+ * @param node AI node handle
+ * @param width Input width out (0 when no model loaded)
+ * @param height Input height out (0 when no model loaded)
+ * @return Operation result
+ */
+aicam_result_t video_ai_node_get_input_geometry(video_node_t *node,
+                                                uint32_t *width, uint32_t *height);
 
 /* ==================== Control Commands ==================== */
 

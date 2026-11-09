@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import H264Player from '@/lib/MSE/h264Player';
 import Loading from '@/components/loading';
 import PlayerPanel from './player-panel';
-import deviceTool from '@/services/api/deviceTool';
+import { previewStreamStart, previewStreamStop } from '@/utils/previewStream';
 import { toast } from 'sonner';
 import { useLingui } from '@lingui/react';
 import { setItem } from '@/utils/storage';
@@ -38,7 +38,8 @@ export default function Player({ videoUrl, videoRendererInstance }: PlayerProps)
   const [isControlPanel, setIsControlPanel] = useState(false);
   const [latency, setLatency] = useState(0);
   const [bandwidth, setBandwidth] = useState(0);
-  const { startVideoStreamReq, stopVideoStreamReq } = deviceTool;
+  // Stream start/stop go through the shared lifecycle manager (debounced
+  // stop + serial queue) - a page-switch race used to kill the fresh stream.
   const [sysTime, setSysTime] = useState('');
 
   useEffect(() => {
@@ -58,7 +59,7 @@ export default function Player({ videoUrl, videoRendererInstance }: PlayerProps)
     const initializePlayer = async () => {
       // Show loading during the initial connection phase
       setLoading(true);
-      await startVideoStreamReq();
+      await previewStreamStart();
       if (cancelled || !videoUrl) return;
       const video = videoRef.current; // HTMLVideoElement | null
       if (!video) return;
@@ -72,7 +73,7 @@ export default function Player({ videoUrl, videoRendererInstance }: PlayerProps)
       cancelled = true;
       videoRendererInstance.current?.destroy();
       videoRendererInstance.current = null;
-      stopVideoStreamReq();
+      previewStreamStop();
     };
   }, [videoUrl]);
   // Add real-time time updates

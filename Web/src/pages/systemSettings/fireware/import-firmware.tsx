@@ -43,6 +43,7 @@ export default function ImportFirmware({
   const [appFile, setAppFile] = useState<File | null>(null);
   const [webFile, setWebFile] = useState<File | null>(null);
   const [aiModelFile, setAiModelFile] = useState<File | null>(null);
+  const [aiModelBFile, setAiModelBFile] = useState<File | null>(null);
   const [deviceFile, setDeviceFile] = useState<File | null>(null);
   const [isAdvancedMenuOpen, setIsAdvancedMenuOpen] = useState(false);
   const navigate = useNavigate();
@@ -53,10 +54,11 @@ export default function ImportFirmware({
     app: false,
     web: false,
     ai: false,
+    ai_b: false,
     // fsbl: false,
     device: false,
   });
-  type UploadCategory = keyof Pick<typeof uploadLoadings, 'app' | 'web' | 'ai'>;
+  type UploadCategory = keyof Pick<typeof uploadLoadings, 'app' | 'web' | 'ai' | 'ai_b'>;
   const uploadQueueRef = useRef<Promise<void>>(Promise.resolve());
   // Partition-table drift confirm (precheck flags it): shared dialog; the
   // "go bundle" choice closes this dialog and jumps to the bundle page.
@@ -160,6 +162,8 @@ export default function ImportFirmware({
         setWebFile(file);
       } else if (type === 'ai') {
         setAiModelFile(file);
+      } else if (type === 'ai_b') {
+        setAiModelBFile(file);
       }
       return true;
     } catch {
@@ -187,7 +191,7 @@ export default function ImportFirmware({
   };
   const handleUpdate = async () => {
     try {
-      if (!appFile && !webFile && !aiModelFile && !deviceFile) {
+      if (!appFile && !webFile && !aiModelFile && !aiModelBFile && !deviceFile) {
         toast.error(
           i18n._('sys.system_management.please_select_firmware_file')
         );
@@ -339,6 +343,25 @@ export default function ImportFirmware({
                     multiple={false}
                     onFileChange={onAIFileChange}
                     loading={uploadLoadings.ai}
+                  />
+                  <Upload
+                    className="h-50 w-full"
+                    type="customZone"
+                    slot={customUpload({
+                      placeholder: i18n._(
+                        'sys.system_management.ai_model_b_file'
+                      ),
+                      fileName: aiModelBFile?.name || '',
+                      type: 'ai_b',
+                    })}
+                    accept={acceptFileType}
+                    maxFiles={1}
+                    maxSize={1024 * 1024 * 10}
+                    multiple={false}
+                    onFileChange={(file: File) => {
+                      enqueueUpload(type => uploadOTAs(file, type), 'ai_b');
+                    }}
+                    loading={uploadLoadings.ai_b}
                   />
                   <Upload
                     className="h-50 w-full"

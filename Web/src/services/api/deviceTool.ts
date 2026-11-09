@@ -8,6 +8,33 @@ export interface AiParams {
   nms_threshold: number;
   confidence_threshold: number;
 }
+
+/** Model B (two-stage engine) runtime status — /api/v1/dual-model/status */
+export interface DualModelStatus {
+  enabled: boolean;
+  model_b_loaded: boolean;
+  model_b_name: string;
+  model_b_input_width: number;
+  model_b_input_height: number;
+  model_b_postprocess: string;
+  model_b_addr: number;
+  /** why the last load attempt failed ("" when loaded / never tried) */
+  model_b_error?: string;
+  disabled_by_errors: boolean;
+}
+
+/** Dual-model engine config (partial on POST) — /api/v1/dual-model/config */
+export interface DualModelConfig {
+  enabled: boolean;
+  target_conf_threshold: number;
+  target_class: string;
+  crop_expand_pm: number;
+  crop_min_size: number;
+  max_targets: number;
+  interval_ms: number;
+  pad_value: number;
+  expected_postprocess: string;
+}
 export interface VideoStreamPushReq {
   enabled: boolean;
   server_url?: string;
@@ -117,6 +144,14 @@ const deviceTool = {
   // AI parameters
   getAiParamsReq: () => request.get('/api/v1/ai/params'),
   setAiParamsReq: (data: AiParams) => request.post('/api/v1/ai/params', data),
+
+  // Dual-model engine (Model B): status / config / hot reload after flashing
+  getDualModelStatusReq: (config?: { skipErrorToast?: boolean }) => request.get('/api/v1/dual-model/status', config),
+  getDualModelConfigReq: (config?: { skipErrorToast?: boolean }) => request.get('/api/v1/dual-model/config', config),
+  setDualModelConfigReq: (data: Partial<DualModelConfig>) => request.post('/api/v1/dual-model/config', data),
+  reloadModelBReq: (config?: { skipErrorToast?: boolean }) => request.post('/api/v1/dual-model/reload', {}, config),
+  /** Erase the Model B slot (single-model deployment); device hot-unloads B. */
+  eraseModelBReq: (config?: { skipErrorToast?: boolean }) => request.post('/api/v1/dual-model/erase', {}, config),
 
   // Photo capture
   photoCaptureReq: (data: PhotoCaptureReq) => request.post('/api/v1/device/capture', data),

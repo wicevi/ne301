@@ -18,6 +18,8 @@
 #include "mem_map.h"
 #include "json_config_mgr.h"
 #include "video_camera_node.h"
+#include "video_dual_model.h"
+#include "face_recognition.h"
 #include "device_service.h"
 #include "camera.h"
 #include "Services/Video/video_stream_hub.h"
@@ -433,7 +435,26 @@ aicam_result_t ai_pipeline_init(ai_service_config_t *config)
     
     g_ai_service.camera_pipeline_initialized = AICAM_TRUE;
     g_ai_service.ai_pipeline_initialized = AICAM_TRUE;
-    
+
+    /* Generic dual-model engine (Model A -> crop -> Model B) and the face
+     * recognition demo riding on it. The engine hooks the AI node's frame
+     * path (re-registered on every pipeline init - idempotent); Model B
+     * loads from the non-active AI slot only when enabled, and a missing
+     * package degrades gracefully (Model A results unaffected). */
+    result = video_dual_model_init();
+    if (result == AICAM_OK) {
+        video_ai_node_set_frame_hook(g_ai_service.ai_node,
+                                     video_dual_model_on_frame, NULL);
+        dual_model_config_t dm_config;
+        if (video_dual_model_get_config(&dm_config) == AICAM_OK &&
+            dm_config.enabled) {
+            video_dual_model_load_model();
+        }
+        face_recognition_init();
+    } else {
+        LOG_SVC_WARN("Dual-model engine unavailable: %d", result);
+    }
+
     LOG_SVC_INFO("AI pipelines initialized successfully");
     LOG_SVC_INFO("Camera Pipeline: Camera -> Encoder");
     LOG_SVC_INFO("AI Pipeline: AI (standalone)");
@@ -677,9 +698,14 @@ static aicam_result_t ai_service_draw_callback(uint8_t *frame_buffer,
     // Get latest NN result from AI service
     nn_result_t nn_result;
     memset(&nn_result, 0, sizeof(nn_result_t));
-    
+
     aicam_result_t ai_ret = ai_service_get_nn_result(&nn_result, frame_id);
-    if (ai_ret == AICAM_OK && (nn_result.od.nb_detect > 0 || nn_result.mpe.nb_detect > 0)) {
+    /* When the face-recognition demo owns the overlay it draws its own
+     * (tracked, identity-labelled) boxes - drawing the raw Model A
+     * detections too would put two boxes on every face. */
+    aicam_bool_t fr_owns_overlay = face_recognition_owns_overlay();
+    if (!fr_owns_overlay &&
+        ai_ret == AICAM_OK && (nn_result.od.nb_detect > 0 || nn_result.mpe.nb_detect > 0)) {
         
         // Initialize AI draw service if not already done
         if (!ai_draw_is_initialized()) {
@@ -700,16 +726,17 @@ static aicam_result_t ai_service_draw_callback(uint8_t *frame_buffer,
         // Draw AI results on the frame buffer
         if (ai_draw_is_initialized()) {
             aicam_result_t draw_ret = ai_draw_results(frame_buffer, width, height, &nn_result);
-            if (draw_ret == AICAM_OK) {
-                return AICAM_OK;
-            } else {
+            if (draw_ret != AICAM_OK) {
                 LOG_SVC_WARN("Failed to draw AI results on camera frame: %d", draw_ret);
-                return draw_ret;
             }
         }
     } else if (ai_ret != AICAM_OK && ai_ret != AICAM_ERROR_NOT_INITIALIZED) {
         LOG_SVC_WARN("Failed to get NN result for camera drawing: %d", ai_ret);
     }
+
+    // Face recognition demo overlay: boxes + identity labels. Runs even
+    // without fresh Model A detections so held tracks stay visible.
+    face_recognition_draw_overlay(frame_buffer, width, height);
     
     // No detections or AI not ready - this is normal
     return AICAM_OK;

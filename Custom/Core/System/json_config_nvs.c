@@ -83,6 +83,126 @@ aicam_result_t json_config_save_ai_debug_config_to_nvs(const ai_debug_config_t *
     return result;
 }
 
+// save dual-model (Model A -> crop -> Model B) configuration to NVS
+aicam_result_t json_config_save_dual_model_to_nvs(const dual_model_config_t *config)
+{
+    if (!config)
+    {
+        LOG_CORE_ERROR("Invalid dual model configuration");
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+    aicam_result_t result = AICAM_OK;
+
+    result = json_config_nvs_write_bool(NVS_KEY_DM_ENABLED, config->enabled);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dm enabled to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_DM_TARGET_CONF, config->target_conf_threshold);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dm target_conf_threshold to NVS");
+
+    result = json_config_nvs_write_string(NVS_KEY_DM_TARGET_CLASS, config->target_class);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dm target_class to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_DM_CROP_EXPAND, config->crop_expand_pm);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dm crop_expand_pm to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_DM_CROP_MIN_SIZE, config->crop_min_size);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dm crop_min_size to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_DM_MAX_TARGETS, config->max_targets);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dm max_targets to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_DM_INTERVAL_MS, config->interval_ms);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dm interval_ms to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_DM_PAD_VALUE, config->pad_value);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dm pad_value to NVS");
+
+    result = json_config_nvs_write_string(NVS_KEY_DM_EXP_POSTPROCESS, config->expected_postprocess);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dm expected_postprocess to NVS");
+
+    LOG_CORE_INFO("Dual model configuration saved to NVS successfully");
+    return result;
+}
+
+// save face recognition demo configuration to NVS
+aicam_result_t json_config_save_face_recognition_to_nvs(const face_recognition_config_t *config)
+{
+    if (!config)
+    {
+        LOG_CORE_ERROR("Invalid face recognition configuration");
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+    aicam_result_t result = AICAM_OK;
+
+    result = json_config_nvs_write_bool(NVS_KEY_FR_ENABLED, config->enabled);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr enabled to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_MATCH_THRESHOLD, config->match_threshold);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr match_threshold to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_CONFIRM_VOTES, config->confirm_votes);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr confirm_votes to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_IOU_THRESHOLD, config->track_iou_threshold);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr track_iou_threshold to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_MAX_MISSED, config->track_max_missed);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr track_max_missed to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_HOLD_MS, config->face_hold_ms);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr face_hold_ms to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_ENROLL_SAMPLES, config->enroll_samples);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr enroll_samples to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_ENROLL_TIMEOUT, config->enroll_timeout_ms);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr enroll_timeout_ms to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_ENROLL_MIN_SIM, config->enroll_min_similarity);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr enroll_min_similarity to NVS");
+
+    result = json_config_nvs_write_bool(NVS_KEY_FR_SHOW_BOX, config->show_box);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr show_box to NVS");
+
+    result = json_config_nvs_write_bool(NVS_KEY_FR_SHOW_NAME, config->show_name);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr show_name to NVS");
+
+    result = json_config_nvs_write_bool(NVS_KEY_FR_SHOW_SIMILARITY, config->show_similarity);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr show_similarity to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_POSE_MAX_YAW, config->pose_max_yaw);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr pose_max_yaw to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_FR_POSE_MAX_ROLL, config->pose_max_roll);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save fr pose_max_roll to NVS");
+
+    LOG_CORE_INFO("Face recognition configuration saved to NVS successfully");
+    return result;
+}
+
 // save work mode configuration to NVS
 aicam_result_t json_config_save_work_mode_config_to_nvs(const work_mode_config_t *config)
 {
@@ -1709,6 +1829,16 @@ aicam_result_t json_config_save_to_nvs(const aicam_global_config_t *config)
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save ai debug configuration to NVS");
 
+    // Save dual model configuration
+    result = json_config_save_dual_model_to_nvs(&config->dual_model);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save dual model configuration to NVS");
+
+    // Save face recognition configuration
+    result = json_config_save_face_recognition_to_nvs(&config->face_recognition);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save face recognition configuration to NVS");
+
     // Save work mode configuration
     result = json_config_save_work_mode_config_to_nvs(&config->work_mode_config);
     if (result != AICAM_OK)
@@ -1894,6 +2024,148 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
         config->ai_debug.inference_interval_ms = temp_uint32;
     else
         json_config_nvs_write_uint32(NVS_KEY_INFER_INTERVAL, config->ai_debug.inference_interval_ms);
+
+    // Load dual model configuration (write defaults back when missing)
+    result = json_config_nvs_read_bool(NVS_KEY_DM_ENABLED, &temp_bool);
+    if (result == AICAM_OK)
+        config->dual_model.enabled = temp_bool;
+    else
+        json_config_nvs_write_bool(NVS_KEY_DM_ENABLED, config->dual_model.enabled);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_DM_TARGET_CONF, &temp_uint32);
+    if (result == AICAM_OK)
+        config->dual_model.target_conf_threshold = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_DM_TARGET_CONF, config->dual_model.target_conf_threshold);
+
+    {
+        char temp_class[DM_CLASS_FILTER_MAX];
+        memset(temp_class, 0, sizeof(temp_class));
+        result = json_config_nvs_read_string(NVS_KEY_DM_TARGET_CLASS, temp_class, sizeof(temp_class) - 1);
+        if (result == AICAM_OK)
+            memcpy(config->dual_model.target_class, temp_class, sizeof(config->dual_model.target_class));
+        else
+            json_config_nvs_write_string(NVS_KEY_DM_TARGET_CLASS, config->dual_model.target_class);
+    }
+
+    result = json_config_nvs_read_uint32(NVS_KEY_DM_CROP_EXPAND, &temp_uint32);
+    if (result == AICAM_OK)
+        config->dual_model.crop_expand_pm = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_DM_CROP_EXPAND, config->dual_model.crop_expand_pm);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_DM_CROP_MIN_SIZE, &temp_uint32);
+    if (result == AICAM_OK)
+        config->dual_model.crop_min_size = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_DM_CROP_MIN_SIZE, config->dual_model.crop_min_size);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_DM_MAX_TARGETS, &temp_uint32);
+    if (result == AICAM_OK)
+        config->dual_model.max_targets = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_DM_MAX_TARGETS, config->dual_model.max_targets);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_DM_INTERVAL_MS, &temp_uint32);
+    if (result == AICAM_OK)
+        config->dual_model.interval_ms = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_DM_INTERVAL_MS, config->dual_model.interval_ms);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_DM_PAD_VALUE, &temp_uint32);
+    if (result == AICAM_OK)
+        config->dual_model.pad_value = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_DM_PAD_VALUE, config->dual_model.pad_value);
+
+    json_config_nvs_read_string(NVS_KEY_DM_EXP_POSTPROCESS,
+                                config->dual_model.expected_postprocess,
+                                sizeof(config->dual_model.expected_postprocess));
+
+    // Load face recognition demo configuration (write defaults back when missing)
+    result = json_config_nvs_read_bool(NVS_KEY_FR_ENABLED, &temp_bool);
+    if (result == AICAM_OK)
+        config->face_recognition.enabled = temp_bool;
+    else
+        json_config_nvs_write_bool(NVS_KEY_FR_ENABLED, config->face_recognition.enabled);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_MATCH_THRESHOLD, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.match_threshold = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_MATCH_THRESHOLD, config->face_recognition.match_threshold);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_CONFIRM_VOTES, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.confirm_votes = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_CONFIRM_VOTES, config->face_recognition.confirm_votes);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_IOU_THRESHOLD, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.track_iou_threshold = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_IOU_THRESHOLD, config->face_recognition.track_iou_threshold);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_MAX_MISSED, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.track_max_missed = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_MAX_MISSED, config->face_recognition.track_max_missed);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_HOLD_MS, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.face_hold_ms = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_HOLD_MS, config->face_recognition.face_hold_ms);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_ENROLL_SAMPLES, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.enroll_samples = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_ENROLL_SAMPLES, config->face_recognition.enroll_samples);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_ENROLL_TIMEOUT, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.enroll_timeout_ms = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_ENROLL_TIMEOUT, config->face_recognition.enroll_timeout_ms);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_ENROLL_MIN_SIM, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.enroll_min_similarity = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_ENROLL_MIN_SIM, config->face_recognition.enroll_min_similarity);
+
+    result = json_config_nvs_read_bool(NVS_KEY_FR_SHOW_BOX, &temp_bool);
+    if (result == AICAM_OK)
+        config->face_recognition.show_box = temp_bool;
+    else
+        json_config_nvs_write_bool(NVS_KEY_FR_SHOW_BOX, config->face_recognition.show_box);
+
+    result = json_config_nvs_read_bool(NVS_KEY_FR_SHOW_NAME, &temp_bool);
+    if (result == AICAM_OK)
+        config->face_recognition.show_name = temp_bool;
+    else
+        json_config_nvs_write_bool(NVS_KEY_FR_SHOW_NAME, config->face_recognition.show_name);
+
+    result = json_config_nvs_read_bool(NVS_KEY_FR_SHOW_SIMILARITY, &temp_bool);
+    if (result == AICAM_OK)
+        config->face_recognition.show_similarity = temp_bool;
+    else
+        json_config_nvs_write_bool(NVS_KEY_FR_SHOW_SIMILARITY, config->face_recognition.show_similarity);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_POSE_MAX_YAW, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.pose_max_yaw = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_POSE_MAX_YAW, config->face_recognition.pose_max_yaw);
+
+    result = json_config_nvs_read_uint32(NVS_KEY_FR_POSE_MAX_ROLL, &temp_uint32);
+    if (result == AICAM_OK)
+        config->face_recognition.pose_max_roll = temp_uint32;
+    else
+        json_config_nvs_write_uint32(NVS_KEY_FR_POSE_MAX_ROLL, config->face_recognition.pose_max_roll);
 
     // Load power mode configuration
     result = json_config_nvs_read_uint32(NVS_KEY_POWER_CURRENT_MODE, &temp_uint32);

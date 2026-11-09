@@ -228,4 +228,36 @@ void camera_configure_pipe1_grayscale(pipe_params_t *pipe1, aicam_bool_t graysca
  */
 int camera_apply_isp_iq_runtime(ISP_HandleTypeDef *hIsp, ISP_IQParamTypeDef *iq);
 
+/**
+ * @brief Where PIPE2's field of view sits inside PIPE1's, as a rect in
+ *        PIPE1-normalized space (x, y, w, h in 0..1).
+ * @details PIPE2 (the NN input) crops an aspect-true centered sensor region
+ *          with the MODEL's aspect ratio - typically narrower than the 16:9
+ *          encode frame. Consumers that draw NN-normalized coordinates onto
+ *          the PIPE1 frame (ai_draw_service, face overlay) must map through
+ *          this rect first. Identity (0,0,1,1) before the camera is up or
+ *          when PIPE2 covers the full frame.
+ * @return 0 on success (identity is also success), -1 on invalid params.
+ */
+int camera_get_pipe2_view_rect(float *x, float *y, float *w, float *h);
+
+/**
+ * @brief Configure PIPE2 for letterboxed NN input (full field of view).
+ * @details PIPE2 outputs the FULL sensor frame scaled to the model WIDTH
+ *          (aspect-true, e.g. 320x180 for a 16:9 sensor and a 320x320
+ *          model). The AI node pads the remaining model rows (see
+ *          camera_get_pipe2_letterbox_geo). Re-run before camera start;
+ *          call after SET_PIPE2_PARAM so format/bpp stay caller-owned.
+ * @return 0 on success, -1 before the sensor is probed.
+ */
+int camera_set_pipe2_letterbox(uint32_t model_w, uint32_t model_h);
+
+/**
+ * @brief Query the letterbox geometry the AI node must apply when copying
+ *        PIPE2 frames into the model input buffer.
+ * @return 0 on success, -1 when letterboxing was never configured.
+ */
+int camera_get_pipe2_letterbox_geo(uint32_t *model_w, uint32_t *model_h,
+                                   uint32_t *eff_h, uint32_t *pad_top);
+
 #endif

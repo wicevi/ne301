@@ -63,6 +63,33 @@
  #define NVS_KEY_NMS_THRESHOLD       "nms_thresh"
  #define NVS_KEY_OVERLAY_RESULTS     "overlay_results"
  #define NVS_KEY_INFER_INTERVAL      "ai_infer_iv"
+
+ // Dual-model (Model A -> crop -> Model B) engine key names
+ #define NVS_KEY_DM_ENABLED          "dm_enabled"
+ #define NVS_KEY_DM_TARGET_CONF      "dm_tgt_conf"
+ #define NVS_KEY_DM_TARGET_CLASS     "dm_tgt_class"
+ #define NVS_KEY_DM_CROP_EXPAND      "dm_crop_expand"
+ #define NVS_KEY_DM_CROP_MIN_SIZE    "dm_crop_min"
+ #define NVS_KEY_DM_MAX_TARGETS      "dm_max_tgt"
+ #define NVS_KEY_DM_INTERVAL_MS      "dm_interval"
+ #define NVS_KEY_DM_PAD_VALUE        "dm_pad"
+ #define NVS_KEY_DM_EXP_POSTPROCESS  "dm_exp_pp"
+
+ // Face recognition demo key names
+ #define NVS_KEY_FR_ENABLED          "fr_enabled"
+ #define NVS_KEY_FR_MATCH_THRESHOLD  "fr_match_thr"
+ #define NVS_KEY_FR_CONFIRM_VOTES    "fr_confirm_votes"
+ #define NVS_KEY_FR_IOU_THRESHOLD    "fr_iou_thr"
+ #define NVS_KEY_FR_MAX_MISSED       "fr_max_miss"
+ #define NVS_KEY_FR_HOLD_MS          "fr_hold_ms"
+ #define NVS_KEY_FR_ENROLL_SAMPLES   "fr_enroll_n"
+ #define NVS_KEY_FR_ENROLL_TIMEOUT   "fr_enroll_to"
+ #define NVS_KEY_FR_ENROLL_MIN_SIM   "fr_enroll_minsim"
+ #define NVS_KEY_FR_SHOW_BOX         "fr_show_box"
+ #define NVS_KEY_FR_SHOW_NAME        "fr_show_name"
+ #define NVS_KEY_FR_SHOW_SIMILARITY  "fr_show_sim"
+ #define NVS_KEY_FR_POSE_MAX_YAW     "fr_pose_yaw"
+ #define NVS_KEY_FR_POSE_MAX_ROLL    "fr_pose_roll"
  
  // Power mode configuration key names
  #define NVS_KEY_POWER_CURRENT_MODE  "power_cur_mode"
@@ -408,6 +435,8 @@
  /* --- From json_config_nvs.c --- */
  aicam_result_t json_config_save_log_config_to_nvs(const log_config_t *config);
  aicam_result_t json_config_save_ai_debug_config_to_nvs(const ai_debug_config_t *config);
+ aicam_result_t json_config_save_dual_model_to_nvs(const dual_model_config_t *config);
+ aicam_result_t json_config_save_face_recognition_to_nvs(const face_recognition_config_t *config);
  aicam_result_t json_config_save_work_mode_config_to_nvs(const work_mode_config_t *config);
  aicam_result_t json_config_save_power_mode_config_to_nvs(const power_mode_config_t *config);
 aicam_result_t json_config_save_device_info_config_to_nvs(const device_info_config_t *config);

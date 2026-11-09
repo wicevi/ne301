@@ -127,6 +127,42 @@ static void parse_ai_debug(cJSON *json, ai_debug_config_t *cfg)
     json_get_uint32(json, "inference_interval_ms", &cfg->inference_interval_ms);
 }
 
+static void parse_dual_model(cJSON *json, dual_model_config_t *cfg)
+{
+    if (!json) {
+        return;
+    }
+    json_get_bool(json, "enabled", &cfg->enabled);
+    json_get_uint32(json, "target_conf_threshold", &cfg->target_conf_threshold);
+    json_get_string(json, "target_class", cfg->target_class, sizeof(cfg->target_class) - 1);
+    json_get_uint32(json, "crop_expand_pm", &cfg->crop_expand_pm);
+    json_get_uint32(json, "crop_min_size", &cfg->crop_min_size);
+    json_get_uint32(json, "max_targets", &cfg->max_targets);
+    json_get_uint32(json, "interval_ms", &cfg->interval_ms);
+    json_get_uint32(json, "pad_value", &cfg->pad_value);
+}
+
+static void parse_face_recognition(cJSON *json, face_recognition_config_t *cfg)
+{
+    if (!json) {
+        return;
+    }
+    json_get_bool(json, "enabled", &cfg->enabled);
+    json_get_uint32(json, "match_threshold", &cfg->match_threshold);
+    json_get_uint32(json, "confirm_votes", &cfg->confirm_votes);
+    json_get_uint32(json, "track_iou_threshold", &cfg->track_iou_threshold);
+    json_get_uint32(json, "track_max_missed", &cfg->track_max_missed);
+    json_get_uint32(json, "face_hold_ms", &cfg->face_hold_ms);
+    json_get_uint32(json, "enroll_samples", &cfg->enroll_samples);
+    json_get_uint32(json, "enroll_timeout_ms", &cfg->enroll_timeout_ms);
+    json_get_uint32(json, "enroll_min_similarity", &cfg->enroll_min_similarity);
+    json_get_uint32(json, "pose_max_yaw", &cfg->pose_max_yaw);
+    json_get_uint32(json, "pose_max_roll", &cfg->pose_max_roll);
+    json_get_bool(json, "show_box", &cfg->show_box);
+    json_get_bool(json, "show_name", &cfg->show_name);
+    json_get_bool(json, "show_similarity", &cfg->show_similarity);
+}
+
 static void parse_power_mode(cJSON *json, power_mode_config_t *cfg)
 {
     /* current_mode IS persisted config: the switch API saves it to NVS and
@@ -931,6 +967,40 @@ static cJSON *serialize_ai_debug(const ai_debug_config_t *cfg)
     return json;
 }
 
+static cJSON *serialize_dual_model(const dual_model_config_t *cfg)
+{
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddBoolToObject(json, "enabled", cfg->enabled);
+    cJSON_AddNumberToObject(json, "target_conf_threshold", cfg->target_conf_threshold);
+    cJSON_AddStringToObject(json, "target_class", cfg->target_class);
+    cJSON_AddNumberToObject(json, "crop_expand_pm", cfg->crop_expand_pm);
+    cJSON_AddNumberToObject(json, "crop_min_size", cfg->crop_min_size);
+    cJSON_AddNumberToObject(json, "max_targets", cfg->max_targets);
+    cJSON_AddNumberToObject(json, "interval_ms", cfg->interval_ms);
+    cJSON_AddNumberToObject(json, "pad_value", cfg->pad_value);
+    return json;
+}
+
+static cJSON *serialize_face_recognition(const face_recognition_config_t *cfg)
+{
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddBoolToObject(json, "enabled", cfg->enabled);
+    cJSON_AddNumberToObject(json, "match_threshold", cfg->match_threshold);
+    cJSON_AddNumberToObject(json, "confirm_votes", cfg->confirm_votes);
+    cJSON_AddNumberToObject(json, "track_iou_threshold", cfg->track_iou_threshold);
+    cJSON_AddNumberToObject(json, "track_max_missed", cfg->track_max_missed);
+    cJSON_AddNumberToObject(json, "face_hold_ms", cfg->face_hold_ms);
+    cJSON_AddNumberToObject(json, "enroll_samples", cfg->enroll_samples);
+    cJSON_AddNumberToObject(json, "enroll_timeout_ms", cfg->enroll_timeout_ms);
+    cJSON_AddNumberToObject(json, "enroll_min_similarity", cfg->enroll_min_similarity);
+    cJSON_AddNumberToObject(json, "pose_max_yaw", cfg->pose_max_yaw);
+    cJSON_AddNumberToObject(json, "pose_max_roll", cfg->pose_max_roll);
+    cJSON_AddBoolToObject(json, "show_box", cfg->show_box);
+    cJSON_AddBoolToObject(json, "show_name", cfg->show_name);
+    cJSON_AddBoolToObject(json, "show_similarity", cfg->show_similarity);
+    return json;
+}
+
 static cJSON *serialize_power_mode(const power_mode_config_t *cfg)
 {
     cJSON *json = cJSON_CreateObject();
@@ -1532,6 +1602,14 @@ aicam_result_t json_config_parse_json_object(const char *json_str, aicam_global_
     if (cJSON_IsObject(ai_cfg))
         parse_ai_debug(ai_cfg, &config->ai_debug);
 
+    cJSON *dm_cfg = cJSON_GetObjectItem(root, "dual_model");
+    if (cJSON_IsObject(dm_cfg))
+        parse_dual_model(dm_cfg, &config->dual_model);
+
+    cJSON *fr_cfg = cJSON_GetObjectItem(root, "face_recognition");
+    if (cJSON_IsObject(fr_cfg))
+        parse_face_recognition(fr_cfg, &config->face_recognition);
+
     cJSON *pwr_cfg = cJSON_GetObjectItem(root, "power_mode_config");
     if (cJSON_IsObject(pwr_cfg))
         parse_power_mode(pwr_cfg, &config->power_mode_config);
@@ -1600,6 +1678,8 @@ aicam_result_t json_config_serialize_json_object(const aicam_global_config_t *co
     // Add nested objects
     cJSON_AddItemToObject(root, "log_config", serialize_log_config(&config->log_config));
     cJSON_AddItemToObject(root, "ai_debug", serialize_ai_debug(&config->ai_debug));
+    cJSON_AddItemToObject(root, "dual_model", serialize_dual_model(&config->dual_model));
+    cJSON_AddItemToObject(root, "face_recognition", serialize_face_recognition(&config->face_recognition));
     cJSON_AddItemToObject(root, "power_mode_config", serialize_power_mode(&config->power_mode_config));
     cJSON_AddItemToObject(root, "device_info", serialize_device_info(&config->device_info));
     cJSON_AddItemToObject(root, "device_service", serialize_device_service(&config->device_service));

@@ -385,6 +385,123 @@ static void CAM_InitCropConfig(CMW_Manual_roi_area_t *roi, camera_t *camera)
     roi->offset_y = (camera->sensor_param.height - roi->height + 1) / 2;
 }
 
+/* PIPE2 feeds the NN with the model's input geometry (often square, e.g.
+ * YuNet 320x320) while the sensor is 16:9. Two bad options were rejected:
+ * stretching the full frame (deformed faces -> skewed boxes, poor accuracy)
+ * and cropping a centered square (loses the frame edges). Instead PIPE2
+ * outputs the FULL sensor frame scaled to the model WIDTH (aspect-true,
+ * e.g. 320x180 for a 16:9 sensor) and the AI node letterboxes it into the
+ * model input (pad rows top/bottom). The view-rect math below folds the
+ * letterbox inverse into a plain rect affine, so drawing code maps
+ * NN-normalized coords with the same (x,y,w,h) rect as before. */
+static void CAM_InitCropConfigPipe2(CMW_Manual_roi_area_t *roi, camera_t *camera)
+{
+    /* Full-frame ROI: PIPE2 height is already the aspect-true height set by
+     * camera_set_pipe2_letterbox(), so an identical H/V downscale ratio
+     * keeps the geometry unstretched. */
+    roi->width = camera->sensor_param.width;
+    roi->height = camera->sensor_param.height;
+    roi->offset_x = 0;
+    roi->offset_y = 0;
+}
+
+/* Letterbox geometry for the NN input: camera_set_pipe2_letterbox() derives
+ * the aspect-true PIPE2 output height from the sensor ratio and remembers
+ * the pad rows; the AI node copies PIPE2 into the model buffer with those
+ * pads and camera_get_pipe2_view_rect() maps coordinates back out. */
+static struct {
+    uint32_t model_w;      /* NN input width (PIPE2 output width) */
+    uint32_t model_h;      /* NN input height (letterboxed) */
+    uint32_t eff_h;        /* valid rows (aspect-true sensor height) */
+    uint32_t pad_top;      /* grey pad rows above the valid rows */
+    uint8_t active;
+} g_pipe2_letterbox = {0};
+
+int camera_set_pipe2_letterbox(uint32_t model_w, uint32_t model_h)
+{
+    if (model_w == 0 || model_h == 0 ||
+        g_camera.sensor_param.width == 0 || g_camera.sensor_param.height == 0) {
+        return -1;
+    }
+    /* Full-frame scale to the model width; cap at the model height (for a
+     * model ASPECT WIDER than the sensor the frame fills the width and the
+     * leftover model rows stay padded). */
+    uint32_t eff_h = (uint32_t)(((uint64_t)model_w * g_camera.sensor_param.height +
+                                 g_camera.sensor_param.width - 1) /
+                                g_camera.sensor_param.width);
+    if (eff_h > model_h) {
+        eff_h = model_h;
+    }
+    g_pipe2_letterbox.model_w = model_w;
+    g_pipe2_letterbox.model_h = model_h;
+    g_pipe2_letterbox.eff_h = eff_h;
+    g_pipe2_letterbox.pad_top = (model_h - eff_h) / 2;
+    g_pipe2_letterbox.active = 1;
+
+    /* Resize PIPE2 to the aspect-true geometry (takes effect on next start). */
+    g_camera.pipe2_param.width = model_w;
+    g_camera.pipe2_param.height = eff_h;
+    return 0;
+}
+
+int camera_get_pipe2_letterbox_geo(uint32_t *model_w, uint32_t *model_h,
+                                   uint32_t *eff_h, uint32_t *pad_top)
+{
+    if (!g_pipe2_letterbox.active) {
+        return -1;
+    }
+    if (model_w) *model_w = g_pipe2_letterbox.model_w;
+    if (model_h) *model_h = g_pipe2_letterbox.model_h;
+    if (eff_h) *eff_h = g_pipe2_letterbox.eff_h;
+    if (pad_top) *pad_top = g_pipe2_letterbox.pad_top;
+    return 0;
+}
+
+/* Where the NN's (letterboxed) field of view sits inside PIPE1's, as a rect
+ * in PIPE1-normalized space. Folds two affines into one:
+ *   NN (nx,ny) -> sensor-normalized: x = nx; y = (ny*model_h - pad)/eff_h
+ *   sensor-normalized -> PIPE1-normalized: through PIPE1's own ROI rect.
+ * Identity (0,0,1,1) before the camera is up. */
+int camera_get_pipe2_view_rect(float *x, float *y, float *w, float *h)
+{
+    CMW_Manual_roi_area_t roi1;
+
+    if (x == NULL || y == NULL || w == NULL || h == NULL) {
+        return -1;
+    }
+    *x = 0.0f; *y = 0.0f; *w = 1.0f; *h = 1.0f;
+    if (g_camera.sensor_param.width == 0 || g_camera.sensor_param.height == 0 ||
+        g_camera.pipe1_param.width == 0 || g_camera.pipe1_param.height == 0) {
+        return 0;
+    }
+
+    CAM_InitCropConfig(&roi1, &g_camera);
+    /* sensor -> PIPE1 rect (may exceed 0..1 when PIPE2 sees MORE than
+     * PIPE1; consumers clamp) */
+    float sx0 = -(float)roi1.offset_x / (float)roi1.width;
+    float sw = (float)g_camera.sensor_param.width / (float)roi1.width;
+    float sy0 = -(float)roi1.offset_y / (float)roi1.height;
+    float sh = (float)g_camera.sensor_param.height / (float)roi1.height;
+
+    if (!g_pipe2_letterbox.active || g_pipe2_letterbox.eff_h == 0) {
+        /* No letterbox info: assume PIPE2 output maps 1:1 onto its rect. */
+        *x = sx0; *y = sy0; *w = sw; *h = sh;
+        return 0;
+    }
+
+    /* Fold the letterbox inverse into the y affine:
+     * eff_y = (ny*model_h - pad)/eff_h; fy = sy0 + eff_y*sh
+     *       = (sy0 - pad/eff_h*sh) + ny*(model_h/eff_h*sh) */
+    float pad = (float)g_pipe2_letterbox.pad_top;
+    float eff = (float)g_pipe2_letterbox.eff_h;
+    float mh = (float)g_pipe2_letterbox.model_h;
+    *x = sx0;
+    *w = sw;
+    *y = sy0 - (pad / eff) * sh;
+    *h = (mh / eff) * sh;
+    return 0;
+}
+
 HAL_StatusTypeDef MX_DCMIPP_ClockConfig(DCMIPP_HandleTypeDef *hdcmipp)
 {
     RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
@@ -442,7 +559,7 @@ static int DCMIPP_Pipe2Init(camera_t *camera)
     Passing 0 would DisableGammaConversion here and desync Pipe2 after
     model reload, because camera_start no longer re-runs ISP_Start. */
     dcmipp_conf.enable_gamma_conversion = -1;
-    CAM_InitCropConfig(&dcmipp_conf.manual_conf, camera);
+    CAM_InitCropConfigPipe2(&dcmipp_conf.manual_conf, camera);
     ret = CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE2, &dcmipp_conf, &hw_pitch);
     if(ret != HAL_OK || hw_pitch != dcmipp_conf.output_width * dcmipp_conf.output_bpp){
         return CMW_ERROR_WRONG_PARAM;

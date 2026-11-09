@@ -1,0 +1,20 @@
+{
+  "version": "1.0.0",
+  "model_info": {
+    "name": "mobilefacenet_int8_faces Face Embedding Model",
+    "description": "PeleAB MobileFaceNet 128d face embedding for N6",
+    "type": "FACE_EMBEDDING"
+  },
+  "input_spec": {
+    "width": 112, "height": 112, "channels": 3,
+    "data_type": "uint8", "color_format": "RGB888",
+    "normalization": {"enabled": false}
+  },
+  "output_spec": {
+    "num_outputs": 1,
+    "outputs": [{"name": "embedding", "batch": 1, "height": 1, "width": 128, "channels": 1, "data_type": "int8", "scale": 0.0, "zero_point": -128}]
+  },
+  "postprocess_type": "pp_face_embed",
+  "confidence_threshold": 0.0, "nms_threshold": 0.0,
+  "embedding_dim": 128, "embedding_l2_normalize": true, "embedding_output_index": 0
+}

@@ -477,6 +477,41 @@ aicam_result_t video_ai_node_set_result_callback(video_node_t *node,
     return AICAM_OK;
 }
 
+aicam_result_t video_ai_node_set_frame_hook(video_node_t *node,
+                                            video_ai_frame_hook_t hook,
+                                            void *user_data)
+{
+    if (!node) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    video_ai_node_data_t *data = (video_ai_node_data_t*)video_node_get_private_data(node);
+    if (!data) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    data->frame_hook = hook;
+    data->frame_hook_user_data = user_data;
+    return AICAM_OK;
+}
+
+aicam_result_t video_ai_node_get_input_geometry(video_node_t *node,
+                                                uint32_t *width, uint32_t *height)
+{
+    if (!node || !width || !height) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    video_ai_node_data_t *data = (video_ai_node_data_t*)video_node_get_private_data(node);
+    if (!data) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    *width = data->model_info.input_width;
+    *height = data->model_info.input_height;
+    return AICAM_OK;
+}
+
 /* ==================== Internal Functions ==================== */
 
 static aicam_result_t video_ai_start_device(video_ai_node_data_t *data) {
@@ -652,16 +687,38 @@ static aicam_result_t video_ai_process_frame(video_ai_node_data_t *data,
     nn_result_t nn_result;
     memset(&nn_result, 0, sizeof(nn_result_t));
 
+    /* Letterbox: copy the aspect-true PIPE2 rows (model_w x eff_h) into the
+     * model-sized buffer, grey pads above/below. Inference and the raw-frame
+     * hook then work in NN coordinate space with the FULL field of view. */
+    uint8_t *pipe2_raw_buffer = input_frame_buffer;
+    uint32_t nn_input_size = camera_buffer_with_frame_id.size;
+    if (data->lb_buffer && data->lb_eff_h != 0) {
+        uint32_t row_bytes = data->model_info.input_width * 3u;
+        uint8_t *dst = data->lb_buffer + data->lb_pad_top * row_bytes;
+        memcpy(dst, input_frame_buffer, row_bytes * data->lb_eff_h);
+        input_frame_buffer = data->lb_buffer;
+        nn_input_size = data->lb_size;
+    }
 
     // Call NN module to process frame
     uint32_t infer_start_tick = osKernelGetTickCount();
-    int nn_ret = nn_inference_frame(input_frame_buffer, camera_buffer_with_frame_id.size, &nn_result);
+    int nn_ret = nn_inference_frame(input_frame_buffer, nn_input_size, &nn_result);
     uint32_t inference_time_ms = osKernelGetTickCount() - infer_start_tick;
     // Anchor pacing to the attempt so inference errors keep the configured cadence
     data->last_inference_tick = infer_start_tick;
 
-    // return pipe2 buffer
-    device_ioctl(camera_dev, CAM_CMD_RETURN_PIPE2_BUFFER, input_frame_buffer, 0);
+    // Raw-frame consumer (e.g. face-recognition embedding on crops): runs
+    // while the pipe2 buffer and the postprocess output buffers are still
+    // valid, before the buffer is recycled. NPU work inside the hook is
+    // serialized with the primary model through the global NPU mutex in nn.c.
+    if (nn_ret == 0 && data->frame_hook) {
+        data->frame_hook(&nn_result, input_frame_buffer,
+                         nn_input_size, frame_id,
+                         data->frame_hook_user_data);
+    }
+
+    // return pipe2 buffer (the RAW pipe2 pointer, not the letterbox staging copy)
+    device_ioctl(camera_dev, CAM_CMD_RETURN_PIPE2_BUFFER, pipe2_raw_buffer, 0);
 
     // Save result to cache if inference was successful
     if (nn_ret == 0)
@@ -802,10 +859,54 @@ static aicam_result_t video_ai_node_init_callback(video_node_t *node) {
         LOG_CORE_ERROR("Camera device not found");
         return AICAM_ERROR;
     }
+    /* Letterbox setup: PIPE2 outputs the full frame at the model WIDTH with
+     * an aspect-true height (eff_h <= model_h); the AI node pads the model
+     * input to model_h every frame. Keeps the full field of view without
+     * feeding deformed (stretched) faces to the NN. */
+    {
+        uint32_t model_w = data->model_info.input_width;
+        uint32_t model_h = data->model_info.input_height;
+        if (data->lb_buffer) {
+            hal_mem_free(data->lb_buffer); /* stale from a previous model */
+            data->lb_buffer = NULL;
+        }
+        data->lb_eff_h = 0;
+        data->lb_pad_top = 0;
+        data->lb_size = 0;
+        if (model_w && model_h &&
+            camera_set_pipe2_letterbox(model_w, model_h) == 0) {
+            uint32_t eff_h = 0, pad_top = 0;
+            camera_get_pipe2_letterbox_geo(NULL, NULL, &eff_h, &pad_top);
+            data->lb_eff_h = eff_h;
+            data->lb_pad_top = pad_top;
+            data->lb_size = model_w * model_h * 3u;
+            if (eff_h < model_h) {
+                /* 300KB-class staging buffer: PSRAM (MEM_LARGE), DMA not needed. */
+                data->lb_buffer = hal_mem_alloc(data->lb_size, MEM_LARGE);
+                if (data->lb_buffer) {
+                    /* Pre-fill everything once; per frame only the valid
+                     * band is copied, the pad rows stay as filled here. */
+                    memset(data->lb_buffer, 127, data->lb_size);
+                } else {
+                    LOG_CORE_ERROR("AI letterbox buffer alloc failed (%u B) - falling back to model-height PIPE2",
+                                   (unsigned)data->lb_size);
+                    data->lb_eff_h = model_h;
+                    data->lb_pad_top = 0;
+                }
+            }
+            LOG_CORE_INFO("AI input letterbox: model %ux%u, pipe2 %ux%u, pad_top %u%s",
+                          (unsigned)model_w, (unsigned)model_h,
+                          (unsigned)model_w, (unsigned)data->lb_eff_h,
+                          (unsigned)data->lb_pad_top,
+                          data->lb_buffer ? "" : " (OFF)");
+        }
+    }
+
     pipe_params_t pipe_param = {0};
     if(data->config.width != 0 && data->config.height != 0) {
         pipe_param.width = data->model_info.input_width;
-        pipe_param.height = data->model_info.input_height;
+        pipe_param.height = (data->lb_eff_h != 0) ? data->lb_eff_h
+                                                  : data->model_info.input_height;
     } else {
         pipe_param.width = data->config.width;
         pipe_param.height = data->config.height;

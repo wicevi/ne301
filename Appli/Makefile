@@ -102,8 +102,11 @@ C_SOURCES += ../Custom/Core/System/wake_scheduler.c
 
 # Custom - Core/Video
 C_SOURCES += ../Custom/Core/Video/ai_draw_service.c
+C_SOURCES += ../Custom/Core/Video/face_db.c
+C_SOURCES += ../Custom/Core/Video/face_recognition.c
 C_SOURCES += ../Custom/Core/Video/video_ai_node.c
 C_SOURCES += ../Custom/Core/Video/video_camera_node.c
+C_SOURCES += ../Custom/Core/Video/video_dual_model.c
 C_SOURCES += ../Custom/Core/Video/video_encoder_node.c
 C_SOURCES += ../Custom/Core/Video/video_frame_mgr.c
 C_SOURCES += ../Custom/Core/Video/video_pipeline.c
@@ -221,6 +224,8 @@ C_SOURCES += ../Custom/Services/Web/web_server.c
 C_SOURCES += ../Custom/Services/Web/web_service.c
 C_SOURCES += ../Custom/Services/Web/websocket_stream_server.c
 C_SOURCES += ../Custom/Services/Web/api/api_ai_management_module.c
+C_SOURCES += ../Custom/Services/Web/api/api_dual_model_module.c
+C_SOURCES += ../Custom/Services/Web/api/api_face_recognition_module.c
 C_SOURCES += ../Custom/Services/Web/api/api_auth_module.c
 C_SOURCES += ../Custom/Services/Web/api/api_device_module.c
 C_SOURCES += ../Custom/Services/Web/api/api_file_module.c

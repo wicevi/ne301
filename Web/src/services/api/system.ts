@@ -45,7 +45,9 @@ interface ExportFirmwareReq {
   firmware_type: string;
   filename: string;
 }
-export type FirmwareType = 'app' | 'web' | 'ai' | 'fsbl' | 'wifi';
+/** 'ai' = Model A (active/primary AI slot), 'ai_b' = Model B (secondary AI
+ *  slot, e.g. the face-embedding network of the dual-model engine) */
+export type FirmwareType = 'app' | 'web' | 'ai' | 'ai_b' | 'fsbl' | 'wifi';
 
 /** One firmware sub-package inside an OTA bundle, as planned by the device.
  *  Every entry burns unless the user skips it — skipping is offered for

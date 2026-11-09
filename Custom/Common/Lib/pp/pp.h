@@ -44,6 +44,7 @@ typedef enum {
 	PP_TYPE_SPE,
 	PP_TYPE_ISEG,
 	PP_TYPE_SSEG,
+	PP_TYPE_EMBEDDING,
 } pp_type_t;
 
 /* OD postprocess output */
@@ -123,12 +124,23 @@ typedef struct {
 
 /* SSEG (Semantic Segmentation) postprocess output */
 typedef struct {
-	uint8_t *class_map;  // class map array (width * height)
+	uint8_t *class_map;  /* class map array (width * height) */
 	uint32_t width;
 	uint32_t height;
 	uint32_t num_classes;
-	char **class_names;  // array of C strings (may be NULL entries)
+	char **class_names;  /* class names array */
 }pp_sseg_out_t;
+
+/* EMBEDDING postprocess output (feature vector for matching, e.g. face
+ * recognition templates): the vector is dequantized from the model's first
+ * output and optionally L2-normalized so cosine similarity reduces to a
+ * dot product. Points into per-instance pp memory: valid until the next
+ * inference of the same NN instance. */
+typedef struct {
+	float *vec;          /* feature vector (dim entries) */
+	uint32_t dim;        /* vector dimensionality */
+	uint32_t normalized; /* 1 when L2-normalized by the pp */
+}pp_embed_out_t;
 
 /* Postprocess result */
 typedef struct {
@@ -141,6 +153,7 @@ typedef struct {
 		pp_spe_out_t spe;
 		pp_iseg_out_t iseg;
 		pp_sseg_out_t sseg;
+		pp_embed_out_t embed;
 	};
 }pp_result_t;
 

@@ -20,7 +20,7 @@ import ToolGuide from './tool-guide';
 import TriggerConfig from './trigger-config';
 import { getItem } from '@/utils/storage';
 
-import deviceTool, { type AiParams, type VideoStreamPushReq } from '@/services/api/deviceTool';
+import deviceTool, { type AiParams, type VideoStreamPushReq, type DualModelStatus } from '@/services/api/deviceTool';
 import hardwareManagement from '@/services/api/hardware-management';
 import systemApis from '@/services/api/system';
 
@@ -29,7 +29,9 @@ import { useAiStatusStore } from '@/store/aiStatus';
 import Slider from '@/components/slider';
 import { Label } from '@/components/ui/label';
 import { getWebSocketUrl, sliceFile } from '@/utils';
+import { previewStreamStopNow } from '@/utils/previewStream';
 import WifiReloadMask from '@/components/wifi-reload-mask';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/dialog';
 import H264Player from '@/lib/MSE/h264Player';
 import RtmpConfig from './rtmp-config';
 import { toast } from 'sonner';
@@ -60,7 +62,6 @@ export default function DeviceTool() {
     configVideoStreamPushReq,
     getAiParamsReq,
     setAiParamsReq,
-    stopVideoStreamReq,
     toggleAiReq,
   } = deviceTool;
   const { getSysClkConfigReq, setSysClkConfigReq } = hardwareManagement;
@@ -117,6 +118,10 @@ export default function DeviceTool() {
     nms_threshold: 0,
     confidence_threshold: 0,
   });
+  // Model B (two-stage engine): status + target-filter threshold
+  const [modelB, setModelB] = useState<DualModelStatus | null>(null);
+  const [dmTargetConf, setDmTargetConf] = useState(60);
+  const [modelBUploadLoading, setModelBUploadLoading] = useState(false);
   // Trigger method
 
   const acceptFileType = {
@@ -142,6 +147,21 @@ export default function DeviceTool() {
     } catch (error) {
       console.error('getAiParams', error);
       throw error;
+    }
+  };
+  const getModelBStatus = async () => {
+    try {
+      const [statusRes, configRes] = await Promise.all([
+        deviceTool.getDualModelStatusReq({ skipErrorToast: true }),
+        deviceTool.getDualModelConfigReq({ skipErrorToast: true }),
+      ]);
+      setModelB(statusRes.data);
+      if (typeof configRes.data?.target_conf_threshold === 'number') {
+        setDmTargetConf(configRes.data.target_conf_threshold);
+      }
+    } catch (error) {
+      // Older firmware without the dual-model engine: keep Model B hidden.
+      console.error('getModelBStatus', error);
     }
   };
   // const initTriggerConfig = async () => {
@@ -205,6 +225,7 @@ export default function DeviceTool() {
         // initTriggerConfig(),
         initPowerMode(),
         getAiParams(),
+        getModelBStatus(),
         initSysClk(),
       ])
     } catch (error) {
@@ -241,7 +262,7 @@ export default function DeviceTool() {
   const handleUploadChange = async (file: File) => {
     try {
       setModelUploadLoading(true);
-      await stopVideoStreamReq();
+      await previewStreamStopNow();
       const contentPreview = await sliceFile(file, 2048);
       if (!contentPreview.size) {
         throw new Error(i18n._('sys.system_management.invalid_firmware_file') || 'Invalid firmware file');
@@ -254,7 +275,7 @@ export default function DeviceTool() {
       throw error;
     } finally {
       try {
-        await stopVideoStreamReq();
+        await previewStreamStopNow();
         await new Promise((resolve) => { setTimeout(resolve, 1000); });
         // Remount player for a clean MSE / Worker / WebSocket lifecycle
         setPlayerEpoch((epoch) => epoch + 1);
@@ -273,6 +294,56 @@ export default function DeviceTool() {
       {i18n._('common.upload')}
     </>
   );
+
+  /** Upload Model B: burn to the Model B slot ('ai_b' never flips the active
+   *  model) then hot-reload the two-stage engine. */
+  const handleModelBUpload = async (file: File) => {
+    try {
+      setModelBUploadLoading(true);
+      await previewStreamStopNow();
+      const contentPreview = await sliceFile(file, 2048);
+      if (!contentPreview.size) {
+        throw new Error(i18n._('sys.system_management.invalid_firmware_file') || 'Invalid firmware file');
+      }
+      await preCheckReq(contentPreview, 'ai_b');
+      await uploadOTAFileReq(file, 'ai_b');
+      await deviceTool.reloadModelBReq();
+    } catch (error) {
+      console.error('handleModelBUpload', error);
+      throw error;
+    } finally {
+      try {
+        await previewStreamStopNow();
+        await new Promise((resolve) => { setTimeout(resolve, 1000); });
+        setPlayerEpoch((epoch) => epoch + 1);
+        await getModelBStatus();
+      } catch (restartError) {
+        console.error('preview restart after model B upload', restartError);
+      }
+      setModelBUploadLoading(false);
+    }
+  };
+
+  const postDmTargetConf = async (value: number) => {
+    try {
+      await deviceTool.setDualModelConfigReq({ target_conf_threshold: value });
+    } catch (error) {
+      console.error('postDmTargetConf', error);
+    }
+  };
+
+  /** Remove the Model B package (single-model deployment) with a confirm. */
+  const [isEraseModelBDialogOpen, setIsEraseModelBDialogOpen] = useState(false);
+  const eraseModelB = async () => {
+    setIsEraseModelBDialogOpen(false);
+    try {
+      await deviceTool.eraseModelBReq();
+      await getModelBStatus();
+      toast.success(i18n._('sys.device_tool.model_b_erased'));
+    } catch (error) {
+      console.error('eraseModelB', error);
+    }
+  };
 
   // Feature guide
   const [showToolGuide, setShowToolGuide] = useState(
@@ -327,20 +398,21 @@ export default function DeviceTool() {
                     <Card className="bg-gray-50 mb-4">
                       <CardContent className="">
                         <div className="w-full h-full ">
-                          <div
-                            ref={currentModelRef}
-                            className="flex items-center justify-between flex-wrap gap-2"
-                          >
-                            <Label className="text-sm">
-                              {i18n._('sys.device_tool.model')}
-                            </Label>
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <p className="text-sm text-text-secondary mr-1">
-                                {aiStatus === 'loaded' ? aiModelName : i18n._('sys.model_verification.please_upload_model')}
-                              </p>
+                          <div ref={currentModelRef} className="flex flex-col gap-2">
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex flex-col gap-0.5">
+                                <Label className="text-sm">
+                                  {i18n._('sys.device_tool.model_a')}
+                                </Label>
+                                <p className="text-xs text-text-secondary">
+                                  {aiStatus === 'loaded' ? aiModelName : i18n._('sys.model_verification.please_upload_model')}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-end gap-2 flex-wrap">
                               <Upload
                                 slot={uploadSlot}
-                                className="flex flex-1 h-full justify-start"
+                                className="flex h-full justify-start"
                                 type="button"
                                 accept={acceptFileType}
                                 maxFiles={1}
@@ -349,14 +421,96 @@ export default function DeviceTool() {
                                 multiple={false}
                                 onFileChange={handleUploadChange}
                               />
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={modelUploadLoading}
+                                onClick={async () => {
+                                  try {
+                                    await reloadModelReq();
+                                    await getAiStatus();
+                                    toast.success(i18n._('sys.device_tool.model_a_reload_ok'));
+                                  } catch (error) {
+                                    console.error('reloadModelA', error);
+                                  }
+                                }}
+                              >
+                                <SvgIcon className="w-4 h-4 mr-1" icon="reload" />
+                                {i18n._('sys.device_tool.model_b_reload')}
+                              </Button>
                             </div>
                           </div>
+                          {modelB && (
+                            <>
+                              <Separator className="my-2" />
+                              <div className="flex flex-col gap-2">
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                  <div className="flex flex-col gap-0.5">
+                                    <Label className="text-sm">
+                                      {i18n._('sys.device_tool.model_b')}
+                                    </Label>
+                                    {modelB.model_b_loaded ? (
+                                      <p className="text-xs text-text-secondary">
+                                        {modelB.model_b_name} · {modelB.model_b_input_width}x{modelB.model_b_input_height} · {modelB.model_b_postprocess}
+                                      </p>
+                                    ) : (
+                                      <p className={`text-xs ${modelB.model_b_error ? 'text-orange-500' : 'text-text-secondary'}`}>
+                                        {modelB.model_b_error
+                                          ? `${i18n._('sys.device_tool.model_b_load_failed')}: ${modelB.model_b_error}`
+                                          : i18n._('sys.device_tool.model_b_missing')}
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="flex items-center justify-end gap-2 flex-wrap">
+                                  <Upload
+                                    slot={uploadSlot}
+                                    className="flex h-full justify-start"
+                                    type="button"
+                                    accept={acceptFileType}
+                                    maxFiles={1}
+                                    maxSize={1024 * 1024 * 10}
+                                    minSize={0}
+                                    multiple={false}
+                                    onFileChange={handleModelBUpload}
+                                  />
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    disabled={modelBUploadLoading}
+                                    onClick={async () => {
+                                      try {
+                                        await deviceTool.reloadModelBReq();
+                                        await getModelBStatus();
+                                        toast.success(i18n._('sys.device_tool.model_b_reload_ok'));
+                                      } catch (error) {
+                                        console.error('reloadModelB', error);
+                                      }
+                                    }}
+                                  >
+                                    <SvgIcon className="w-4 h-4 mr-1" icon="reload" />
+                                    {i18n._('sys.device_tool.model_b_reload')}
+                                  </Button>
+                                  {modelB.model_b_loaded && (
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => setIsEraseModelBDialogOpen(true)}
+                                    >
+                                      <SvgIcon className="w-4 h-4 mr-1" icon="close" />
+                                      {i18n._('sys.device_tool.model_b_erase')}
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                            </>
+                          )}
                           {aiStatus === 'loaded' && (
                             <>
                               <Separator className="my-2" />
                               <div className="flex items-center justify-between">
                                 <p className="text-sm font-semibold text-text-primary">
-                                  {i18n._('sys.device_tool.params')}
+                                  {i18n._('sys.device_tool.model_a_params')}
                                 </p>
                               </div>
                               <div className="flex flex-col items-center gap-4 p-2 border border-gray-200 border-solid rounded-md mt-2">
@@ -409,6 +563,44 @@ export default function DeviceTool() {
                                   </div>
                                 </div>
                               </div>
+                              {/* Model B target filter: which Model A detections
+                                  are fed to the second-stage network */}
+                              {modelB?.model_b_loaded && (
+                                <>
+                                  <p className="text-sm font-semibold text-text-primary mt-3">
+                                    {i18n._('sys.device_tool.model_b_params')}
+                                  </p>
+                                  <div className="flex flex-col items-center gap-4 p-2 border border-gray-200 border-solid rounded-md mt-2">
+                                    <div className="w-full flex items-center justify-between gap-4">
+                                      <Label>{i18n._('sys.device_tool.target_conf_threshold')}</Label>
+                                      <div className="flex items-center gap-2 flex-1">
+                                        <Slider
+                                          className="flex-1 min-w-16"
+                                          value={dmTargetConf}
+                                          max={99}
+                                          step={1}
+                                          min={1}
+                                          onChange={value => setDmTargetConf(value)}
+                                          onChangeEnd={value => postDmTargetConf(value)}
+                                        />
+                                        <Input
+                                          className="w-16"
+                                          type="number"
+                                          min={1}
+                                          max={99}
+                                          step={1}
+                                          value={dmTargetConf}
+                                          onChange={(e) => {
+                                            const v = parseInt((e.target as HTMLInputElement).value || '1', 10);
+                                            setDmTargetConf(Number.isNaN(v) ? 1 : Math.min(99, Math.max(1, v)));
+                                          }}
+                                          onBlur={(e) => postDmTargetConf(parseInt((e.target as HTMLInputElement).value || '1', 10))}
+                                        />
+                                      </div>
+                                    </div>
+                                  </div>
+                                </>
+                              )}
                             </>
                           )}
                           <Separator className="my-2" />
@@ -575,6 +767,19 @@ export default function DeviceTool() {
             </div>
           </CardContent>
         </Card>
+        {/* Confirm erasing the Model B package (single-model deployment) */}
+        <Dialog open={isEraseModelBDialogOpen} onOpenChange={setIsEraseModelBDialogOpen}>
+          <DialogContent className="mx-8">
+            <DialogHeader>
+              <DialogTitle>{i18n._('sys.device_tool.model_b_erase_title')}</DialogTitle>
+              <div className="text-sm text-text-primary my-4">{i18n._('sys.device_tool.model_b_erase_body')}</div>
+            </DialogHeader>
+            <DialogFooter>
+              <Button className="md:w-auto w-1/2" variant="outline" onClick={() => setIsEraseModelBDialogOpen(false)}>{i18n._('common.cancel')}</Button>
+              <Button className="md:w-auto w-1/2" variant="primary" onClick={eraseModelB}>{i18n._('sys.device_tool.model_b_erase_confirm')}</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );

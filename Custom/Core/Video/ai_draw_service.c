@@ -12,10 +12,44 @@
 #include <string.h>
 #include <stdio.h>
 #include "pixel_format_map.h"
+#include "camera.h"
 
 /* ==================== Global Variables ==================== */
 
 static ai_draw_service_t g_ai_draw_service = {0};
+
+/* ==================== PIPE2 view-rect remap ==================== */
+
+/* NN coordinates are normalized to the PIPE2 (model input) field of view,
+ * which — since PIPE2 crops an aspect-true centered sensor region — covers
+ * only PART of the PIPE1 encode frame. Map NN space onto the full frame
+ * before drawing, or boxes land stretched and misplaced. Callers pass a
+ * local nn_result copy, so the remap below is in-place and safe. */
+static void ai_draw_view_rect(float *vx, float *vy, float *vw, float *vh)
+{
+    camera_get_pipe2_view_rect(vx, vy, vw, vh);
+}
+
+/* Box: NN-normalized (x,y,w,h) -> frame-normalized. */
+static void ai_draw_remap_box(float vx, float vy, float vw, float vh,
+                              float *x, float *y, float *w, float *h)
+{
+    float nx = vx + (*x) * vw;
+    float ny = vy + (*y) * vh;
+    *w *= vw;
+    *h *= vh;
+    *x = nx;
+    *y = ny;
+}
+
+/* Point: NN-normalized (x,y) -> frame-normalized. */
+static void ai_draw_remap_point(float vx, float vy, float vw, float vh,
+                                float *x, float *y)
+{
+    float nx = vx + (*x) * vw;
+    *y = vy + (*y) * vh;
+    *x = nx;
+}
 
 /* ==================== Internal Function Declarations ==================== */
 
@@ -208,16 +242,21 @@ aicam_result_t ai_draw_od_results(uint8_t *fb,
     g_ai_draw_service.od_draw_conf.p_dst = fb;
     g_ai_draw_service.od_draw_conf.image_width = fb_width;
     g_ai_draw_service.od_draw_conf.image_height = fb_height;
-    
-    // Draw each detection
+
+    // Draw each detection (local copy: remap PIPE2 view -> frame coords
+    // without touching the caller's result data)
+    float vx, vy, vw, vh;
+    ai_draw_view_rect(&vx, &vy, &vw, &vh);
     for (int i = 0; i < od_result->nb_detect; i++) {
-        aicam_result_t result = od_draw_result(&g_ai_draw_service.od_draw_conf, (od_detect_t *)&od_result->detects[i]);
+        od_detect_t det = od_result->detects[i];
+        ai_draw_remap_box(vx, vy, vw, vh, &det.x, &det.y, &det.width, &det.height);
+        aicam_result_t result = od_draw_result(&g_ai_draw_service.od_draw_conf, &det);
         if (result != 0) {
             LOG_SVC_ERROR("Failed to draw OD detection %d: %d", i, result);
             return AICAM_ERROR;
         }
     }
-    
+
     return AICAM_OK;
 }
 
@@ -240,16 +279,23 @@ aicam_result_t ai_draw_mpe_results(uint8_t *fb,
     g_ai_draw_service.mpe_draw_conf.p_dst = fb;
     g_ai_draw_service.mpe_draw_conf.image_width = fb_width;
     g_ai_draw_service.mpe_draw_conf.image_height = fb_height;
-    
-    // Draw each detection
+
+    // Draw each detection (local copy + PIPE2-view remap, box AND keypoints)
+    float vx, vy, vw, vh;
+    ai_draw_view_rect(&vx, &vy, &vw, &vh);
     for (int i = 0; i < mpe_result->nb_detect; i++) {
-        aicam_result_t result = mpe_draw_result(&g_ai_draw_service.mpe_draw_conf, &mpe_result->detects[i]);
+        mpe_detect_t det = mpe_result->detects[i];
+        ai_draw_remap_box(vx, vy, vw, vh, &det.x, &det.y, &det.width, &det.height);
+        for (uint32_t k = 0; k < det.nb_keypoints && k < 33; k++) {
+            ai_draw_remap_point(vx, vy, vw, vh, &det.keypoints[k].x, &det.keypoints[k].y);
+        }
+        aicam_result_t result = mpe_draw_result(&g_ai_draw_service.mpe_draw_conf, &det);
         if (result != 0) {
             LOG_SVC_ERROR("Failed to draw MPE detection %d: %d", i, result);
             return AICAM_ERROR;
         }
     }
-    
+
     return AICAM_OK;
 }
 
@@ -273,11 +319,28 @@ aicam_result_t ai_draw_spe_results(uint8_t *fb,
     g_ai_draw_service.spe_draw_conf.image_width = fb_width;
     g_ai_draw_service.spe_draw_conf.image_height = fb_height;
 
-    // Draw the single pose instance
-    aicam_result_t result = spe_draw_result(&g_ai_draw_service.spe_draw_conf, spe_result);
-    if (result != 0) {
-        LOG_SVC_ERROR("Failed to draw SPE result: %d", result);
-        return AICAM_ERROR;
+    // Draw the single pose instance (shallow copy of the out struct with a
+    // remapped local keypoint array: the caller's data stays untouched)
+    {
+        pp_spe_out_t spe_local = *spe_result;
+        keypoint_t kps[33];
+        uint32_t n = spe_local.nb_keypoints;
+        if (n > 33) n = 33;
+        if (spe_local.keypoints && n > 0) {
+            memcpy(kps, spe_local.keypoints, n * sizeof(keypoint_t));
+            float vx, vy, vw, vh;
+            ai_draw_view_rect(&vx, &vy, &vw, &vh);
+            for (uint32_t k = 0; k < n; k++) {
+                ai_draw_remap_point(vx, vy, vw, vh, &kps[k].x, &kps[k].y);
+            }
+            spe_local.keypoints = kps;
+            spe_local.nb_keypoints = n;
+        }
+        aicam_result_t result = spe_draw_result(&g_ai_draw_service.spe_draw_conf, &spe_local);
+        if (result != 0) {
+            LOG_SVC_ERROR("Failed to draw SPE result: %d", result);
+            return AICAM_ERROR;
+        }
     }
 
     return AICAM_OK;
@@ -614,9 +677,13 @@ aicam_result_t ai_draw_iseg_results(uint8_t *fb,
     g_ai_draw_service.iseg_draw_conf.image_width = fb_width;
     g_ai_draw_service.iseg_draw_conf.image_height = fb_height;
 
+    float vx, vy, vw, vh;
+    ai_draw_view_rect(&vx, &vy, &vw, &vh);
     for (int i = 0; i < iseg_result->nb_detect; i++) {
+        iseg_detect_t det = iseg_result->detects[i]; /* local copy + PIPE2-view remap */
+        ai_draw_remap_box(vx, vy, vw, vh, &det.x, &det.y, &det.width, &det.height);
         aicam_result_t result = iseg_draw_result(&g_ai_draw_service.iseg_draw_conf,
-                                                  (iseg_detect_t *)&iseg_result->detects[i], i);
+                                                  &det, i);
         if (result != 0) {
             LOG_SVC_ERROR("Failed to draw ISEG detection %d: %d", i, result);
             return AICAM_ERROR;

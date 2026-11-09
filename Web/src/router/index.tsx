@@ -5,6 +5,7 @@ import Layout from "@/layout";
 import Home from "@/pages/home";
 import NotFound from "@/pages/notFound";
 import ModelVerification from "@/pages/modelVerification";
+import FaceRecognition from "@/pages/faceRecognition";
 import ApplicationManagement from "@/pages/applicationManagement";
 import HardwareManagement from "@/pages/hardwareManagement";
 import CaptureSettings from "@/pages/captureSettings";
@@ -30,6 +31,11 @@ const baseRoutes = [
   {
     path: "/model-verification",
     element: <ModelVerification />,
+  },
+
+  {
+    path: "/face-recognition",
+    element: <FaceRecognition />,
   },
 
   {

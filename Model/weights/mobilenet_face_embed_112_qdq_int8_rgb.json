@@ -1,0 +1,45 @@
+{
+  "version": "1.0.0",
+  "model_info": {
+    "name": "mobilenet_face_embed_112_qdq_int8_rgb Face Embedding Model (ONNX QDQ Int8, RGB input)",
+    "version": "1.0.0",
+    "description": "MobileFaceNet-class face embedding (512-d, L2-normalized by pp_face_embed) for the NE302 dual-model engine: Model A (face detection) crops faces, this Model B extracts templates matched locally against the on-device face database. Normalization (x-127.5)/127.5 is embedded in the graph; input is raw RGB888 uint8. Prepared by Script/prepare_face_embed_model.py.",
+    "type": "FACE_EMBEDDING",
+    "framework": "ONNX",
+    "author": "insightface (w600k_mbf) via NE302 preparation script",
+    "source": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip"
+  },
+  "input_spec": {
+    "width": 112,
+    "height": 112,
+    "channels": 3,
+    "data_type": "uint8",
+    "color_format": "RGB888",
+    "normalization": {
+      "enabled": false,
+      "scale": 1.0,
+      "offset": 0.0
+    }
+  },
+  "output_spec": {
+    "num_outputs": 1,
+    "outputs": [
+      {
+        "name": "embedding",
+        "batch": 1,
+        "height": 1,
+        "width": 512,
+        "channels": 1,
+        "data_type": "int8",
+        "scale": 0.0,
+        "zero_point": -128
+      }
+    ]
+  },
+  "postprocess_type": "pp_face_embed",
+  "confidence_threshold": 0.0,
+  "nms_threshold": 0.0,
+  "embedding_dim": 512,
+  "embedding_l2_normalize": true,
+  "embedding_output_index": 0
+}

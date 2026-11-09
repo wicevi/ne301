@@ -99,6 +99,7 @@ typedef struct {
     size_t total_received;          // total bytes received
     size_t content_length;          // HTTP Content-Length
     FirmwareType fw_type_param;     // firmware type specified in the URL
+    uint8_t model_b_upload;         // 'ai_b' upload: skip the activation flip on finish
 
     size_t header_received;         // number of bytes received for the header
     aicam_bool_t header_processed;  // whether the header has been processed
@@ -169,8 +170,13 @@ static FirmwareType parse_firmware_type(const char* type_str) {
     } else if (strcmp(type_str, "web") == 0) {
         return FIRMWARE_WEB;
     } else if (strcmp(type_str, "ai_default") == 0) {
+        /* Model A (primary) model: always AI_1 */
         return FIRMWARE_AI_1;
     } else if (strcmp(type_str, "ai") == 0) {
+        return FIRMWARE_AI_2;
+    } else if (strcmp(type_str, "ai_b") == 0 || strcmp(type_str, "ai_face") == 0) {
+        /* Model B (secondary/recognition) model: AI_2 ("ai_face" kept as an
+         * alias from the face-recognition demo) */
         return FIRMWARE_AI_2;
     } else if (strcmp(type_str, "wifi") == 0) {
         return FIRMWARE_WIFI;
@@ -179,6 +185,42 @@ static FirmwareType parse_firmware_type(const char* type_str) {
     } else {
         return FIRMWARE_APP; // Default
     }
+}
+
+/* Dual-model OTA semantics: 'ai' (Model A) and 'ai_b'/'ai_face' (Model B)
+ * name LOGICAL slots, not physical partitions — both burn the currently
+ * INACTIVE AI partition (mirrors the loader in video_ai_node/video_dual_model):
+ *  - 'ai'    : burn the inactive slot; the finish step flips ai_1_active so
+ *              the fresh package becomes the active Model A (classic A/B
+ *              partition upgrade — the previous Model A content ends up in
+ *              the Model B slot, harmless: the Model B load contract check
+ *              rejects packages whose postprocess does not match).
+ *  - 'ai_b'  : burn the inactive slot (= the Model B slot) and keep
+ *              ai_1_active untouched — replaces ONLY Model B; pair with
+ *              POST /dual-model/reload to take effect without a reboot.
+ *  - 'ai_default' keeps its legacy meaning (always AI_1, activation flips).
+ * Returns the physical FirmwareType to burn; *is_model_b set for 'ai_b'.
+ */
+static FirmwareType resolve_ai_upload_type(const char *type_str, FirmwareType parsed, uint8_t *is_model_b)
+{
+    if (parsed != FIRMWARE_AI_1 && parsed != FIRMWARE_AI_2) {
+        return parsed;
+    }
+    if (is_model_b) {
+        *is_model_b = 0;
+    }
+    if (strcmp(type_str, "ai") == 0) {
+        /* Burn the inactive slot; the finish step flips activation. */
+        return json_config_get_ai_1_active() ? FIRMWARE_AI_1 : FIRMWARE_AI_2;
+    }
+    if (strcmp(type_str, "ai_b") == 0 || strcmp(type_str, "ai_face") == 0) {
+        /* Burn the Model B (inactive) slot WITHOUT touching activation. */
+        if (is_model_b) {
+            *is_model_b = 1;
+        }
+        return json_config_get_ai_1_active() ? FIRMWARE_AI_1 : FIRMWARE_AI_2;
+    }
+    return parsed;
 }
 
 /* ==================== OTA Bundle Helpers ==================== */
@@ -393,7 +435,11 @@ static int process_ota_header(ota_upload_ctx_t *ctx) {
     }
 
     LOG_SVC_INFO("Firmware type from header: %d, param: %d", fw_type_from_header, ctx->fw_type_param);
-    if (fw_type_from_header != ctx->fw_type_param) {
+    /* AI model packages burn to the slot chosen by the request param
+     * (AI_1 = model A / AI_2 = model B), so either slot param is valid. */
+    if (fw_type_from_header != ctx->fw_type_param &&
+        !(header->fw_type == OTA_FW_TYPE_AI_MODEL &&
+          (ctx->fw_type_param == FIRMWARE_AI_1 || ctx->fw_type_param == FIRMWARE_AI_2))) {
         LOG_SVC_ERROR("Firmware type mismatch: header=%d, param=%d", fw_type_from_header, ctx->fw_type_param);
         return -1;
     }
@@ -569,8 +615,12 @@ static aicam_result_t ota_precheck_header(const uint8_t *header_data, size_t dat
         default: fw_type_from_header = FIRMWARE_APP; break;
     }
     
-    if (fw_type_from_header != fw_type_param) {
-        LOG_SVC_ERROR("Pre-check failed: Firmware type mismatch (header=%d, param=%d)", 
+    /* AI model packages burn to the slot chosen by the request param
+     * (AI_1 = model A / AI_2 = model B), so either slot param is valid. */
+    if (fw_type_from_header != fw_type_param &&
+        !(header->fw_type == OTA_FW_TYPE_AI_MODEL &&
+          (fw_type_param == FIRMWARE_AI_1 || fw_type_param == FIRMWARE_AI_2))) {
+        LOG_SVC_ERROR("Pre-check failed: Firmware type mismatch (header=%d, param=%d)",
                      fw_type_from_header, fw_type_param);
         return AICAM_ERROR_INVALID_PARAM;
     }
@@ -674,6 +724,9 @@ aicam_result_t ota_precheck_handler(http_handler_context_t *ctx)
     }
     
     FirmwareType fw_type = parse_firmware_type(fw_type_str);
+    /* Keep precheck's physical-slot view consistent with the upload path
+     * ('ai'/'ai_b' resolve to the inactive AI partition at request time). */
+    fw_type = resolve_ai_upload_type(fw_type_str, fw_type, NULL);
     
     // Determine required Content-Length based on firmware type
     aicam_bool_t is_ai_model = (fw_type == FIRMWARE_AI_2 || fw_type == FIRMWARE_AI_1);
@@ -1327,7 +1380,12 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
         ctx->magic = OTA_UPLOAD_CTX_MAGIC;
 
         ctx->content_length = total_len;
-        ctx->fw_type_param = parse_firmware_type(fw_type_str);
+        /* 'ai'/'ai_b' are logical slots: remap to the physical partition
+         * (inactive AI slot) at upload start, and remember Model B uploads
+         * so the finish step does not flip the activation flag. */
+        ctx->fw_type_param = resolve_ai_upload_type(fw_type_str,
+                                                    parse_firmware_type(fw_type_str),
+                                                    &ctx->model_b_upload);
 
         /* Bundle direct-address mode (?direct=1&addr=0x...): only valid under
          * an armed bundle session. Fail fast, before any service is stopped
@@ -1606,11 +1664,17 @@ void ota_upload_stream_processor(struct mg_connection *c, int ev, void *ev_data)
                 goto cleanup;
             }
 
-            // Update json config. Direct mode burned the model to the bundle's
-            // AI_1 slot and the rebuilt SystemState boots slot A (AI_1), so the
-            // NVS flag must say AI_1 active (FALSE) instead of AI_2 (TRUE).
-            if (ctx->fw_type_param == FIRMWARE_AI_1 || ctx->fw_type_param == FIRMWARE_AI_2) {
-                json_config_set_ai_1_active(ctx->direct_mode ? AICAM_FALSE : AICAM_TRUE);
+            // Update json config: point the ACTIVE flag at the slot that was
+            // just burned so the fresh package becomes Model A. Direct mode
+            // burned the model to the bundle's AI_1 slot and the rebuilt
+            // SystemState boots slot A (AI_1), so the flag must say AI_1
+            // active (FALSE). Model B uploads ('ai_b') burned the inactive
+            // slot on purpose and must NOT touch activation — flipping it
+            // would swap Model A out from under the running pipeline.
+            if ((ctx->fw_type_param == FIRMWARE_AI_1 || ctx->fw_type_param == FIRMWARE_AI_2) &&
+                !ctx->model_b_upload) {
+                json_config_set_ai_1_active(ctx->direct_mode ? AICAM_FALSE
+                                          : (ctx->fw_type_param == FIRMWARE_AI_2) ? AICAM_TRUE : AICAM_FALSE);
             }
 
             // Web firmware lives in a single-slot partition at WEB_BASE, so the

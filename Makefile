@@ -278,6 +278,16 @@ pkg: $(foreach proj, fsbl app web model wifi,pkg-$(proj))
 # slots); the device validates the table (fixed partitions must not move) and
 # rebuilds OTA info after the burn. BUNDLE_EXTRA_FLAGS: e.g. --exclude fsbl.
 BUNDLE_EXTRA_FLAGS ?=
+# The bundle excludes the AI model by default: the model package in build/ is
+# whatever MODEL_NAME was last compiled (usually Model A only) and burning it
+# via a full bundle would silently replace the deployed model. Opt back in
+# with `make pkg-bundle WITH_MODEL=1`; models ship separately (web OTA
+# ai / ai_b uploads with hot reload).
+ifeq ($(WITH_MODEL),1)
+BUNDLE_MODEL_FLAGS ?=
+else
+BUNDLE_MODEL_FLAGS ?= --exclude=model
+endif
 
 .PHONY: pkg-bundle
 pkg-bundle: pkg
@@ -287,7 +297,7 @@ pkg-bundle: pkg
 	@python $(PKG_SCRIPT_DIR)/ota_bundle_packer.py $(BUILD_DIR) \
 	    -o $(BUILD_DIR)/ne301_Full_v$(APP_VERSION_STR)_bundle.bin \
 	    --board-flash $(BOARD_FLASH_SIZE) \
-	    $(BUNDLE_EXTRA_FLAGS) -m $(DEVICE_MODEL)
+	    $(BUNDLE_MODEL_FLAGS) $(BUNDLE_EXTRA_FLAGS) -m $(DEVICE_MODEL)
 	@python $(PKG_SCRIPT_DIR)/verify_ota_package.py $(BUILD_DIR)/ne301_Full_v$(APP_VERSION_STR)_bundle.bin > /dev/null
 	@echo "Bundle created: $(BUILD_DIR)/ne301_Full_v$(APP_VERSION_STR)_bundle.bin"
 
@@ -354,6 +364,10 @@ $(eval $(call flash_project,fsbl,sign-fsbl,$(FLASH_ADDR_FSBL),$(FSBL_NAME)_signe
 $(eval $(call flash_project,app,pkg-app,$(FLASH_ADDR_APP),$(call pkg_filename,$(APP_NAME)_signed,$(APP_VERSION_STR))))
 $(eval $(call flash_project,web,pkg-web,$(FLASH_ADDR_WEB),$(call pkg_filename,$(WEB_NAME),$(WEB_VERSION_STR))))
 $(eval $(call flash_project,model,pkg-model,$(FLASH_ADDR_MODEL),$(call pkg_filename,$(MODEL_NAME),$(MODEL_VERSION_STR))))
+# Model B slot (AI_2): flashes the SAME package file as flash-model — which
+# network lands there depends on the MODEL_NAME last built, e.g.
+#   make model MODEL_NAME=mobilenet_face_embed_112_qdq_int8_rgb && make pkg-model flash-model-b
+$(eval $(call flash_project,model-b,pkg-model,$(FLASH_ADDR_AI_2_BASE),$(call pkg_filename,$(MODEL_NAME),$(MODEL_VERSION_STR))))
 
 # Flash WiFi firmware: programs the flash image (flash_header_t + .rps) to WIFI_FW_BASE.
 $(eval $(call flash_project,wifi,wifi-image,$(FLASH_ADDR_WIFI),$(WIFI_NAME)_flash.bin))
@@ -363,8 +377,18 @@ $(eval $(call flash_project,wifi,wifi-image,$(FLASH_ADDR_WIFI),$(WIFI_NAME)_flas
 flash-wakecore: wakecore
 	@$(MAKE) -C $(WAKECORE_DIR) flash
 
+# Full flash: models are NOT reflashed by default — the A/B AI slots are
+# managed via web OTA (ai / ai_b upload + hot reload), and a full flash would
+# clobber them with whatever MODEL_NAME was last built locally. Flash models
+# explicitly (flash-model = AI_1, flash-model-b = AI_2) or opt back in with
+# `make flash WITH_MODEL=1`.
+FLASH_PROJECTS = fsbl app web wifi
+ifeq ($(WITH_MODEL),1)
+FLASH_PROJECTS += model
+endif
+
 .PHONY: flash
-flash: $(foreach proj,fsbl app web model wifi,flash-$(proj)) erase-ota
+flash: $(foreach proj,$(FLASH_PROJECTS),flash-$(proj)) erase-ota
 	@echo "========================================="
 	@echo "Flash all to device Complete!"
 	@echo "========================================="

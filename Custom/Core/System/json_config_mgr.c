@@ -42,6 +42,37 @@
          .overlay_results = AICAM_TRUE,
          .inference_interval_ms = 0
      },
+
+     .dual_model = {
+         .enabled = AICAM_TRUE,
+         .target_conf_threshold = 60,
+         .target_class = "",
+         .crop_expand_pm = 200,
+         .crop_min_size = 24,
+         .max_targets = 2,
+         .interval_ms = 200,
+         .pad_value = 127,
+         /* Load contract for the face-recognition demo; a plate application
+          * changes this to its own pp type. */
+         .expected_postprocess = "pp_face_embed"
+     },
+
+     .face_recognition = {
+         .enabled = AICAM_TRUE,
+         .match_threshold = 60,
+         .confirm_votes = 3,
+         .track_iou_threshold = 30,
+         .track_max_missed = 3,
+         .face_hold_ms = 300,
+         .enroll_samples = 5,
+         .enroll_timeout_ms = 60000,
+         .enroll_min_similarity = 30,
+         .pose_max_yaw = 60,
+         .pose_max_roll = 40,
+         .show_box = AICAM_TRUE,
+         .show_name = AICAM_TRUE,
+         .show_similarity = AICAM_TRUE
+     },
      
      .power_mode_config = {
          .current_mode = POWER_MODE_LOW_POWER,
@@ -160,7 +191,7 @@
      .usb_config = {
          .device_enable = AICAM_TRUE
      },
-
+     
      .network_service = {
          .ap_sleep_time = 0,        // Default AP sleep time (0 = no sleep)
          .ssid = "AICAM-AP",        // Default AP SSID
@@ -218,7 +249,7 @@
              .servers = {"time.windows.com", "pool.ntp.org", "time1.google.com", ""}
          }
      },
-     
+
     .mqtt_service = {
         .base_config = {
             // Basic connection
@@ -907,6 +938,78 @@
  uint32_t json_config_get_inference_interval_ms(void)
  {
      return g_json_config_ctx.current_config.ai_debug.inference_interval_ms;
+ }
+
+ /*=================== Dual-Model Configuration API Implementation ====================*/
+ aicam_result_t json_config_get_dual_model_config(dual_model_config_t *config)
+ {
+     if (!config)
+     {
+         return AICAM_ERROR_INVALID_PARAM;
+     }
+
+     if (!g_json_config_ctx.initialized)
+     {
+         return AICAM_ERROR_NOT_INITIALIZED;
+     }
+
+     *config = g_json_config_ctx.current_config.dual_model;
+     return AICAM_OK;
+ }
+
+ aicam_result_t json_config_set_dual_model_config(const dual_model_config_t *config)
+ {
+     if (!config)
+     {
+         return AICAM_ERROR_INVALID_PARAM;
+     }
+
+     if (!g_json_config_ctx.initialized)
+     {
+         return AICAM_ERROR_NOT_INITIALIZED;
+     }
+
+     memcpy(&g_json_config_ctx.current_config.dual_model, config,
+            sizeof(dual_model_config_t));
+
+     json_config_save_dual_model_to_nvs(&g_json_config_ctx.current_config.dual_model);
+     return AICAM_OK;
+ }
+
+ /*=================== Face Recognition Configuration API Implementation ====================*/
+ aicam_result_t json_config_get_face_recognition_config(face_recognition_config_t *config)
+ {
+     if (!config)
+     {
+         return AICAM_ERROR_INVALID_PARAM;
+     }
+
+     if (!g_json_config_ctx.initialized)
+     {
+         return AICAM_ERROR_NOT_INITIALIZED;
+     }
+
+     *config = g_json_config_ctx.current_config.face_recognition;
+     return AICAM_OK;
+ }
+
+ aicam_result_t json_config_set_face_recognition_config(const face_recognition_config_t *config)
+ {
+     if (!config)
+     {
+         return AICAM_ERROR_INVALID_PARAM;
+     }
+
+     if (!g_json_config_ctx.initialized)
+     {
+         return AICAM_ERROR_NOT_INITIALIZED;
+     }
+
+     memcpy(&g_json_config_ctx.current_config.face_recognition, config,
+            sizeof(face_recognition_config_t));
+
+     json_config_save_face_recognition_to_nvs(&g_json_config_ctx.current_config.face_recognition);
+     return AICAM_OK;
  }
 
  /*=================== Work Mode Configuration API Implementation ====================*/
