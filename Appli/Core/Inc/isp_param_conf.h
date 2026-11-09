@@ -262,7 +262,7 @@ static const ISP_IQParamTypeDef ISP_IQParamCacheInit_OS04C10 = {
         .gain = 0,
     },
     .sensorExposureStatic = {
-        .exposure = 10000,
+        .exposure = 9492,
     },
     .AECAlgo = {
         .enable = 1,
@@ -284,8 +284,8 @@ static const ISP_IQParamTypeDef ISP_IQParamCacheInit_OS04C10 = {
     },
     .blackLevelStatic = {
         .enable = 1,
-        .BLCR = 16,
-        .BLCG = 16,
+        .BLCR = 15,
+        .BLCG = 15,
         .BLCB = 15,
     },
     .demosaicing = {
@@ -298,32 +298,32 @@ static const ISP_IQParamTypeDef ISP_IQParamCacheInit_OS04C10 = {
     },
     .ispGainStatic = {
         .enable = 1,
-        .ispGainR = 218750000,
-        .ispGainG = 94531250,
-        .ispGainB = 144531250,
+        .ispGainR = 217187500,
+        .ispGainG = 95312500,
+        .ispGainB = 150781250,
     },
     .colorConvStatic = {
         .enable = 1,
-        .coeff = { { 188671875, -42578125, -45703125, }, { -68750000, 309765625, -141015625, }, { -52734375, -30468750, 183203125, }, }
+        .coeff = { { 184765625, -38671875, -46093750, }, { -67578125, 299218750, -131640625, }, { -50000000, -32812500, 183203125, }, }
     },
     .AWBAlgo = {
-        .enable = 0,
-        .label = { "D65", "Free Slot", "Free Slot", "Free Slot", "Free Slot", },
-        .referenceColorTemp = { 6500, 0, 0, 0, 0, },
-        .ispGainR = { 220000000, 0, 0, 0, 0, },
-        .ispGainG = { 95000000, 0, 0, 0, 0, },
-        .ispGainB = { 145000000, 0, 0, 0, 0, },
+        .enable = 1,
+        .label = { "A", "TL84", "D65", "Free Slot", "Free Slot", },
+        .referenceColorTemp = { 2856, 4000, 6500, 0, 0, },
+        .ispGainR = { 131000000, 191000000, 220000000, 0, 0, },
+        .ispGainG = { 100000000, 100000000, 95000000, 0, 0, },
+        .ispGainB = { 258000000, 218000000, 145000000, 0, 0, },
         .coeff = {
+            { { 134330000, 63410000, -97740000, }, { -79720000, 217090000, -37370000, }, { -42280000, -91300000, 233580000, }, },
+            { { 143810000, 5360000, -49170000, }, { -51210000, 177150000, -25940000, }, { -19520000, -61510000, 181040000, }, },
             { { 188720000, -42860000, -45860000, }, { -69110000, 310130000, -141020000, }, { -52880000, -30590000, 183470000, }, },
-            { { 0, 0, 0, }, { 0, 0, 0, }, { 0, 0, 0, }, },
-            { { 0, 0, 0, }, { 0, 0, 0, }, { 0, 0, 0, }, },
             { { 0, 0, 0, }, { 0, 0, 0, }, { 0, 0, 0, }, },
             { { 0, 0, 0, }, { 0, 0, 0, }, { 0, 0, 0, }, },
         },
         .referenceRGB = {
-            { 41, 72, 55},
-            { 0, 0, 0},
-            { 0, 0, 0},
+            { 60, 71, 36},
+            { 46, 75, 42},
+            { 41, 74, 55},
             { 0, 0, 0},
             { 0, 0, 0},
         },
@@ -364,6 +364,117 @@ static const ISP_IQParamTypeDef ISP_IQParamCacheInit_OS04C10 = {
         .LL_Expo2 = 115259,
         .LL_Lum2 = 65,
         .calibFactor = 0.577f,
+    },
+};
+
+/* DCMIPP ISP configuration for OS04C10 night IR mode. */
+static const ISP_IQParamTypeDef ISP_IQParamCacheInit_OS04C10_NIGHT = {
+    .sensorGainStatic = {
+        .gain = 0,
+    },
+    .sensorExposureStatic = {
+        .exposure = 6331,
+    },
+    .AECAlgo = {
+        .enable = 1,
+        .exposureCompensation = EXPOSURE_TARGET_MINUS_0_5_EV,
+        .antiFlickerFreq = ANTIFLICKER_NONE,
+    },
+    .statRemoval = {
+        .enable = 0,
+        .nbHeadLines = 0,
+        .nbValidLines = 0,
+    },
+    .badPixelStatic = {
+        .enable = 0,
+        .strength = 0,
+    },
+    .badPixelAlgo = {
+        .enable = 0,
+        .threshold = 8,
+    },
+    .blackLevelStatic = {
+        .enable = 1,
+        .BLCR = 16,
+        .BLCG = 16,
+        .BLCB = 16,
+    },
+    .demosaicing = {
+        .enable = 1,
+        .type = ISP_DEMOS_TYPE_RGGB,
+        .peak = 2,
+        .lineV = 4,
+        .lineH = 4,
+        .edge = 6,
+    },
+    .ispGainStatic = {
+        .enable = 1,
+        .ispGainR = 100000000,
+        .ispGainG = 100000000,
+        .ispGainB = 100000000,
+    },
+    .colorConvStatic = {
+        .enable = 1,
+        .coeff = { { 29687500, 58593750, 11328125, }, { 29687500, 58593750, 11328125, }, { 29687500, 58593750, 11328125, }, }
+    },
+    .AWBAlgo = {
+        .enable = 0,
+        .label = { "Profile-tmm", "Free Slot", "Free Slot", "Free Slot", "Free Slot", },
+        .referenceColorTemp = { 2000, 0, 0, 0, 0, },
+        .ispGainR = { 100000000, 0, 0, 0, 0, },
+        .ispGainG = { 100000000, 0, 0, 0, 0, },
+        .ispGainB = { 100000000, 0, 0, 0, 0, },
+        .coeff = {
+            { { 29900000, 58700000, 11400000, }, { 29900000, 58700000, 11400000, }, { 29900000, 58700000, 11400000, }, },
+            { { 0, 0, 0, }, { 0, 0, 0, }, { 0, 0, 0, }, },
+            { { 0, 0, 0, }, { 0, 0, 0, }, { 0, 0, 0, }, },
+            { { 0, 0, 0, }, { 0, 0, 0, }, { 0, 0, 0, }, },
+            { { 0, 0, 0, }, { 0, 0, 0, }, { 0, 0, 0, }, },
+        },
+        .referenceRGB = {
+            { 10, 1, 1},
+            { 0, 0, 0},
+            { 0, 0, 0},
+            { 0, 0, 0},
+            { 0, 0, 0},
+        },
+    },
+    .contrast = {
+        .enable = 1,
+        .coeff.LUM_0 = 145,
+        .coeff.LUM_32 = 124,
+        .coeff.LUM_64 = 303,
+        .coeff.LUM_96 = 257,
+        .coeff.LUM_128 = 232,
+        .coeff.LUM_160 = 239,
+        .coeff.LUM_192 = 132,
+        .coeff.LUM_224 = 161,
+        .coeff.LUM_256 = 191,
+    },
+    .statAreaStatic = {
+        .X0 = 474,
+        .Y0 = 620,
+        .XSize = 1824,
+        .YSize = 895,
+    },
+    .gamma = {
+        .enable = 1,
+    },
+    .sensorDelay = {
+        .delay = 3,
+    },
+    .luxRef = {
+        .HL_LuxRef = 972,
+        .HL_Expo1 = 26866,
+        .HL_Lum1 = 34,
+        .HL_Expo2 = 59156,
+        .HL_Lum2 = 98,
+        .LL_LuxRef = 261,
+        .LL_Expo1 = 78883,
+        .LL_Lum1 = 28,
+        .LL_Expo2 = 180712,
+        .LL_Lum2 = 64,
+        .calibFactor = 0.708f,
     },
 };
 
