@@ -323,6 +323,14 @@ static void parse_network_service(cJSON *json, network_service_config_t *cfg)
         if (ap_sleep == 0 || ap_sleep == 600 || ap_sleep == 1200 || ap_sleep == 1800)
             cfg->ap_sleep_time = ap_sleep;
     }
+    /* AP channel: 0 (auto) or 1-13. Out-of-range values (legacy export, hand
+     * edit) keep the device's own setting instead of failing the import. */
+    {
+        uint32_t ap_channel = cfg->ap_channel;
+        json_get_uint32(json, "ap_channel", &ap_channel);
+        if (ap_channel <= 13)
+            cfg->ap_channel = (uint8_t)ap_channel;
+    }
     json_get_string(json, "ssid", cfg->ssid, sizeof(cfg->ssid));
     json_get_string(json, "password", cfg->password, sizeof(cfg->password));
     /* Region: store the canonical lowercase table entry. The boot apply matches
@@ -1084,6 +1092,7 @@ static cJSON *serialize_network_service(const network_service_config_t *cfg)
 {
     cJSON *json = cJSON_CreateObject();
     cJSON_AddNumberToObject(json, "ap_sleep_time", cfg->ap_sleep_time);
+    cJSON_AddNumberToObject(json, "ap_channel", cfg->ap_channel);
     cJSON_AddStringToObject(json, "ssid", cfg->ssid);
     cJSON_AddStringToObject(json, "password", cfg->password);
     cJSON_AddStringToObject(json, "wifi_country_code", cfg->wifi_country_code);

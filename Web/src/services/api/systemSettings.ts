@@ -12,6 +12,7 @@ interface SetWifiConfigReq {
     ssid: string;
     password: string;
     ap_sleep_time: number;
+    ap_channel?: number;
 }
 interface DeleteWifiReq {
     ssid: string;

@@ -238,6 +238,7 @@ typedef struct {
  */
 typedef struct {
     uint32_t ap_sleep_time;                 // AP sleep time in seconds
+    uint8_t ap_channel;                     // AP channel (0: auto, 1-13: fixed; only effective while wl is not connected)
     char ssid[32];                          // AP SSID
     char password[64];                      // AP password
     char wifi_country_code[NETIF_WIFI_COUNTRY_CODE_LEN]; // Legacy WiFi region (e.g. "us","cn"); applied at next boot

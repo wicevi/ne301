@@ -178,6 +178,7 @@
      
      .network_service = {
          .ap_sleep_time = 0,        // Default AP sleep time (0 = no sleep)
+         .ap_channel = 0,           // Default AP channel (0 = auto)
          .ssid = "AICAM-AP",        // Default AP SSID
          .password = "",            // Default AP password
          .wifi_country_code = "",   // Default: empty -> firmware default region (US)

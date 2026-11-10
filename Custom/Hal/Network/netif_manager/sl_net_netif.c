@@ -519,6 +519,18 @@ static sl_net_wifi_psk_credential_entry_t wifi_client_credential = {    .type   
 static sl_net_wifi_psk_credential_entry_t wifi_ap_credential = {    .type        = SL_NET_WIFI_PSK,
                                                                     .data_length = sizeof(NETIF_WIFI_AP_DEFAULT_PW) - 1,
                                                                     .data        = NETIF_WIFI_AP_DEFAULT_PW };
+/// @brief User-configured AP channel (0 = SL_WIFI_AUTO_CHANNEL, 1-13 = fixed).
+///        In concurrent mode the firmware forces the AP onto the STA channel
+///        whenever wl is connected, so this only drives the AP while the STA
+///        link is down. Kept separate from wifi_ap_profile.config.channel
+///        because that field is overwritten with the live (STA-following)
+///        channel at runtime and must not be treated as the user intent.
+static uint8_t sl_net_ap_user_channel = SL_WIFI_AUTO_CHANNEL;
+/// @brief Set while sl_net_client_netif_up_ex() restarts the AP onto the scan
+///        target channel before joining: wifi_ap_profile.config.channel then
+///        already carries the intended channel, so sl_net_wifi_ap_up() must
+///        NOT override it with sl_net_ap_user_channel.
+static uint8_t sl_net_ap_channel_preset = 0;
 /// @brief Default client network interface
 struct netif client_netif = {
     .name = {NETIF_NAME_WIFI_STA[0], NETIF_NAME_WIFI_STA[1]},
@@ -1509,9 +1521,14 @@ static int sl_net_client_netif_up_ex(void)
         sl_net_ap_netif_down();
         if (channel != 0) {
             wifi_ap_profile.config.channel.channel = channel;
+            /* The preset channel must survive sl_net_wifi_ap_up() (it would
+             * otherwise restore sl_net_ap_user_channel while wl is still down)
+             * so the concurrent AP lands on the router's channel before join. */
+            sl_net_ap_channel_preset = 1;
             do {
                 tmp_ret = sl_net_ap_netif_up();
             } while (tmp_ret != 0 && try_times++ < 3);
+            sl_net_ap_channel_preset = 0;
         }
         ret = sl_net_client_netif_up();
         if (channel == 0) {
@@ -1991,6 +2008,20 @@ sl_status_t sl_net_wifi_ap_up(sl_net_interface_t interface, sl_net_profile_id_t 
         else if (channel.channel != 0) {
             LOG_DRV_DEBUG("AP channel: %d -> %d\r\n", wifi_ap_profile.config.channel.channel, channel.channel);
             wifi_ap_profile.config.channel.channel = channel.channel;
+        }
+    } else {
+        /* wl not connected: fall back to the user-configured channel so a live
+         * STA-following value left in the profile (or a stale config write)
+         * cannot pin the standalone AP. 0 keeps SL_WIFI_AUTO_CHANNEL. Skipped
+         * when the caller preset the profile channel (client up_ex switches
+         * the AP onto the router's channel BEFORE joining wl). */
+        if (!sl_net_ap_channel_preset) {
+            uint8_t max_ch = sl_net_wifi_max_ap_channel();
+            /* Clamp for region switches after the value was saved (e.g. 13
+             * stored under cn, active region now us): the firmware would
+             * reject start_ap on an out-of-region channel. */
+            wifi_ap_profile.config.channel.channel =
+                (sl_net_ap_user_channel > max_ch) ? max_ch : sl_net_ap_user_channel;
         }
     }
 
@@ -2518,6 +2549,10 @@ int sl_net_ap_netif_config(netif_config_t *netif_cfg)
     // }
     // wifi_ap_profile.config.encryption = (sl_wifi_encryption_t)netif_cfg->wireless_cfg.encryption;
     wifi_ap_profile.config.encryption = WIRELESS_DEFAULT_ENCRYPTION;
+    /* wireless_cfg.channel carries the user intent (0 = auto): remember it in
+     * sl_net_ap_user_channel so the standalone AP (wl idle) keeps using it
+     * even after the profile field gets overwritten with a live channel. */
+    sl_net_ap_user_channel = netif_cfg->wireless_cfg.channel;
     wifi_ap_profile.config.channel.channel = netif_cfg->wireless_cfg.channel;
     
     if (netif_cfg->ip_mode == NETIF_IP_MODE_STATIC) wifi_ap_profile.ip.mode = SL_IP_MANAGEMENT_STATIC_IP;
@@ -2876,6 +2911,14 @@ int sl_net_wifi_get_region_code_by_index(uint32_t idx, char *buf, size_t len)
     strncpy(buf, s_wifi_region_table[idx].str, len - 1);
     buf[len - 1] = '\0';
     return SL_STATUS_OK;
+}
+
+/// @brief Highest 2.4 GHz channel number the active region allows for the AP.
+///        US (FCC) permits 1-11; eu/jp/kr/cn permit 1-13. Channel 14 is JP-only
+///        and not exposed. Used to validate the user channel configuration.
+uint8_t sl_net_wifi_max_ap_channel(void)
+{
+    return (device_configuration.region_code == SL_WIFI_REGION_US) ? 11 : 13;
 }
 
 /****************************************************************************************/

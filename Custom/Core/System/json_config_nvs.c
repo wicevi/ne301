@@ -976,6 +976,10 @@ aicam_result_t json_config_save_network_service_config_to_nvs(const network_serv
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save AP sleep time to NVS");
 
+    result = json_config_nvs_write_uint8(NVS_KEY_NETWORK_AP_CHANNEL, config->ap_channel);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save AP channel to NVS");
+
     result = json_config_nvs_write_string(NVS_KEY_NETWORK_SSID, config->ssid);
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save network SSID to NVS");
@@ -2433,6 +2437,12 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
         config->network_service.ap_sleep_time = temp_uint32;
     else
         json_config_nvs_write_uint32(NVS_KEY_NETWORK_AP_SLEEP_TIME, config->network_service.ap_sleep_time);
+
+    result = json_config_nvs_read_uint8(NVS_KEY_NETWORK_AP_CHANNEL, &temp_uint8);
+    if (result == AICAM_OK)
+        config->network_service.ap_channel = temp_uint8;
+    else
+        json_config_nvs_write_uint8(NVS_KEY_NETWORK_AP_CHANNEL, config->network_service.ap_channel);
 
     result = json_config_nvs_read_string(NVS_KEY_NETWORK_SSID, config->network_service.ssid, sizeof(config->network_service.ssid));
     if (result != AICAM_OK)

@@ -100,6 +100,8 @@ int sl_net_wifi_region_canonicalize(const char *country_code, char *buf, size_t 
 int sl_net_wifi_get_region_code(char *buf, size_t len);
 uint32_t sl_net_wifi_get_supported_region_count(void);
 int sl_net_wifi_get_region_code_by_index(uint32_t idx, char *buf, size_t len);
+/// @brief Highest 2.4 GHz AP channel the active region allows (US: 11, others: 13).
+uint8_t sl_net_wifi_max_ap_channel(void);
 
 /************************************** NWP Debug (RAM Dump) **********************************************/
 /// @brief Trigger an NWP RAM dump. The content streams out of the Si91x NWP UART pin

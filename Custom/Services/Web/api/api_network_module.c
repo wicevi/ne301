@@ -677,6 +677,13 @@ aicam_result_t network_wifi_ap_handler(http_handler_context_t *ctx) {
         cJSON_AddStringToObject(response_json, "ssid", network_service_config.ssid);
         cJSON_AddStringToObject(response_json, "password", network_service_config.password);
         cJSON_AddNumberToObject(response_json, "ap_sleep_time", network_service_config.ap_sleep_time);
+        /* User-configured AP channel (0 = auto). While wl is connected the AP
+         * runs on the router's channel ("channel" above), and the channel
+         * setting cannot be modified. */
+        cJSON_AddNumberToObject(response_json, "ap_channel", network_service_config.ap_channel);
+        cJSON_AddNumberToObject(response_json, "ap_channel_max", sl_net_wifi_max_ap_channel());
+        cJSON_AddBoolToObject(response_json, "channel_editable",
+                              !communication_is_interface_connected(NETIF_NAME_WIFI_STA));
     }
     
     // Security type from config
@@ -736,6 +743,10 @@ aicam_result_t network_wifi_config_handler(http_handler_context_t *ctx) {
     const char* if_name = NULL;
     aicam_bool_t ssid_changed = AICAM_FALSE;
     aicam_bool_t password_changed = AICAM_FALSE;
+    /* Local copies: request_json is deleted before the response is built, so
+     * pointers into it (interface_str/ssid) must not be reused afterwards. */
+    char interface_buf[8] = {0};
+    char ssid_buf[32] = {0};
 
     if (strcmp(interface_str, NETIF_NAME_WIFI_AP) == 0) {
         if_name = NETIF_NAME_WIFI_AP;
@@ -745,19 +756,21 @@ aicam_result_t network_wifi_config_handler(http_handler_context_t *ctx) {
         cJSON_Delete(request_json);
         return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Invalid interface type (use 'ap' or 'wl')");
     }
-    
+    strncpy(interface_buf, interface_str, sizeof(interface_buf) - 1);
+
     // Extract SSID
     cJSON* ssid_item = cJSON_GetObjectItem(request_json, "ssid");
     if (!ssid_item || !cJSON_IsString(ssid_item)) {
         cJSON_Delete(request_json);
         return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Missing or invalid 'ssid' field");
     }
-    
+
     const char* ssid = cJSON_GetStringValue(ssid_item);
-    if (strlen(ssid) == 0 || strlen(ssid) >= 32) {
+    if (strlen(ssid) == 0 || strlen(ssid) >= sizeof(ssid_buf)) {
         cJSON_Delete(request_json);
         return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "SSID must be 1-31 characters");
     }
+    strncpy(ssid_buf, ssid, sizeof(ssid_buf) - 1);
     if (strcmp(network_service_config.ssid, ssid) != 0) {
         ssid_changed = AICAM_TRUE;
         strncpy(network_service_config.ssid, ssid, sizeof(network_service_config.ssid) - 1);
@@ -805,6 +818,38 @@ aicam_result_t network_wifi_config_handler(http_handler_context_t *ctx) {
         }
     }
 
+    // Extract AP channel (optional, only for AP mode): 0 = auto, 1-13 = fixed.
+    // Only changeable while wl is NOT connected — in concurrent mode the AP
+    // then must (and does) follow the channel of the router wl is joined to.
+    uint32_t ap_channel = network_service_config.ap_channel;
+    aicam_bool_t channel_changed = AICAM_FALSE;
+    if (strcmp(interface_str, "ap") == 0) {
+        cJSON* channel_item = cJSON_GetObjectItem(request_json, "ap_channel");
+        if (channel_item) {
+            if (!cJSON_IsNumber(channel_item)) {
+                cJSON_Delete(request_json);
+                return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                                          "Invalid 'ap_channel' field (expected number)");
+            }
+            ap_channel = (uint32_t)cJSON_GetNumberValue(channel_item);
+            if (ap_channel > sl_net_wifi_max_ap_channel()) {
+                cJSON_Delete(request_json);
+                return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                                          "AP channel must be 0 (auto) or 1-13 depending on the region");
+            }
+            if (ap_channel != network_service_config.ap_channel) {
+                if (communication_is_interface_connected(NETIF_NAME_WIFI_STA)) {
+                    cJSON_Delete(request_json);
+                    return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                                              "AP channel can only be changed while the WiFi client (wl) is not connected; "
+                                              "while connected the AP follows the router's channel");
+                }
+                network_service_config.ap_channel = (uint8_t)ap_channel;
+                channel_changed = AICAM_TRUE;
+            }
+        }
+    }
+
     // Extract bssid (optional)
     const char* bssid = "";
     cJSON* bssid_item = cJSON_GetObjectItem(request_json, "bssid");
@@ -843,11 +888,17 @@ aicam_result_t network_wifi_config_handler(http_handler_context_t *ctx) {
         }
     }
 
+    /* AP only: pass the persisted user intent for the channel. The value from
+     * get_interface_config is the LIVE channel (possibly the STA-following
+     * one), which would otherwise be written back as the user configuration. */
+    if (strcmp(if_name, NETIF_NAME_WIFI_AP) == 0) {
+        config.wireless_cfg.channel = network_service_config.ap_channel;
+    }
 
-    
-    
+
+
     // Apply configuration through communication service layer
-    if (strcmp(if_name, NETIF_NAME_WIFI_AP) == 0 && !ssid_changed && !password_changed) {
+    if (strcmp(if_name, NETIF_NAME_WIFI_AP) == 0 && !ssid_changed && !password_changed && !channel_changed) {
         LOG_SVC_INFO("AP mode and ssid not changed, skip configuration");
     }
     else {
@@ -879,12 +930,15 @@ aicam_result_t network_wifi_config_handler(http_handler_context_t *ctx) {
     }
     
     cJSON_AddStringToObject(response_json, "message", "WiFi configuration updated successfully");
-    cJSON_AddStringToObject(response_json, "interface", interface_str);
-    cJSON_AddStringToObject(response_json, "ssid", ssid);
+    cJSON_AddStringToObject(response_json, "interface", interface_buf);
+    cJSON_AddStringToObject(response_json, "ssid", ssid_buf);
 
     
     if (strcmp(interface_str, "ap") == 0 && ap_sleep_time > 0) {
         cJSON_AddNumberToObject(response_json, "ap_sleep_time", ap_sleep_time);
+    }
+    if (strcmp(interface_str, "ap") == 0) {
+        cJSON_AddNumberToObject(response_json, "ap_channel", network_service_config.ap_channel);
     }
     
     char* json_string = cJSON_Print(response_json);

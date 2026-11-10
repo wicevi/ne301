@@ -209,12 +209,17 @@ switch (current_comm_type) {
     "channel": 6,
     "ip_address": "192.168.4.1",
     "mac_address": "AA:BB:CC:DD:EE:FF",
-    "ap_sleep_time": 1800
+    "ap_sleep_time": 1800,
+    "ap_channel": 0,
+    "ap_channel_max": 13,
+    "channel_editable": true
   }
 }
 ```
 
 > **说明**：本固件版本热点不再支持设置密码——始终以开放方式运行（WiFi 芯片固件限制：AP 设置密码后，STA 无法连接网络）。`password_set` 仅反映配置中是否存有密码，不会生效。`ap_sleep_time` 仅接受固定档位 0（永不）/ 600 / 1200 / 1800 秒。
+>
+> **信道**：`channel` 为当前实际工作信道；`ap_channel` 为配置的信道（0=自动，1-13=固定）。并发模式下，`wl` 已连接路由器时 AP 自动运行在与路由器相同的信道上（此时 `channel_editable` 为 `false`），配置的信道仅在 `wl` 未连接时生效。`ap_channel_max` 为当前国家码允许的最高可选信道：`us` 为 11，`eu` / `jp` / `kr` / `cn` 为 13。
 
 ---
 
@@ -241,6 +246,7 @@ switch (current_comm_type) {
 | password | string | 否 | STA：密码 (8-63字符，开放网络留空)。AP：接受并存储但**不生效**——本固件版本热点始终以开放方式运行 |
 | bssid | string | 否 | 目标BSSID |
 | ap_sleep_time | number | 否 | 热点空闲休眠时间（仅AP模式）：仅允许 0（永不）/ 600 / 1200 / 1800 秒，其它值被拒绝 |
+| ap_channel | number | 否 | 热点信道（仅AP模式）：0=自动，1-13=固定（`us` 国家码下最高 11）。仅当 `wl` **未**连接路由器时允许修改——已连接时 AP 自动跟随路由器信道，修改会被拒绝；修改后 AP 立即重启到新信道 |
 
 ---
 

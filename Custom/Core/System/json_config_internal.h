@@ -196,6 +196,7 @@
 
 // Network service configuration key names
 #define NVS_KEY_NETWORK_AP_SLEEP_TIME   "net_ap_sleep"
+#define NVS_KEY_NETWORK_AP_CHANNEL      "net_ap_ch"
 #define NVS_KEY_NETWORK_SSID            "net_ssid"
 #define NVS_KEY_NETWORK_PASSWORD        "net_password"
 #define NVS_KEY_NETWORK_KNOWN_COUNT     "net_known_cnt"

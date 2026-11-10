@@ -211,12 +211,17 @@ switch (current_comm_type) {
     "channel": 6,
     "ip_address": "192.168.4.1",
     "mac_address": "AA:BB:CC:DD:EE:FF",
-    "ap_sleep_time": 1800
+    "ap_sleep_time": 1800,
+    "ap_channel": 0,
+    "ap_channel_max": 13,
+    "channel_editable": true
   }
 }
 ```
 
 > **Note**: the AP no longer supports a password in this firmware version — it always runs open (a WiFi-chip firmware limitation: with a password set on the AP, the STA can no longer connect to networks). `password_set` only reports whether a password is stored in the configuration; it is not applied. `ap_sleep_time` accepts the fixed choices 0 (never) / 600 / 1200 / 1800 seconds.
+>
+> **Channels**: `channel` is the live operating channel; `ap_channel` is the configured channel (0 = auto, 1-13 = fixed). In concurrent mode the AP automatically runs on the same channel as the router whenever `wl` is connected (`channel_editable: false`); the configured channel only applies while `wl` is not connected. `ap_channel_max` is the highest selectable channel for the active region: 11 for `us`, 13 for `eu` / `jp` / `kr` / `cn`.
 
 ---
 
@@ -243,6 +248,7 @@ switch (current_comm_type) {
 | password | string | no | STA: password (8-63 chars; omit for open networks). AP: accepted and stored but **not applied** — the hotspot always runs open in this firmware version |
 | bssid | string | no | target BSSID |
 | ap_sleep_time | number | no | hotspot idle sleep time (AP mode only): only 0 (never) / 600 / 1200 / 1800 seconds; other values are rejected |
+| ap_channel | number | no | hotspot channel (AP mode only): 0 = auto, 1-13 = fixed (max 11 with the `us` region). Only accepted while `wl` is **not** connected — while connected the AP follows the router's channel and a changed value is rejected; the AP restarts on the new channel immediately |
 
 ---
 

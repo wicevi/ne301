@@ -66,7 +66,8 @@ sl_net_wifi_ap_profile_t wifi_ap_profile = {
     .ssid.value           = "",                          /* empty: auto-generated at AP start
                                                              as "NE301_XXYYZZ" from the device MAC */
     .ssid.length          = 0,
-    .channel.channel      = SL_WIFI_AUTO_CHANNEL,        /* AP follows the STA channel (concurrent) */
+    .channel.channel      = SL_WIFI_AUTO_CHANNEL,        /* default; see §3 "AP channel policy"
+                                                             for the runtime selection rules    */
     .channel.band         = SL_WIFI_AUTO_BAND,
     .channel.bandwidth    = SL_WIFI_AUTO_BANDWIDTH,
     .security             = SL_WIFI_OPEN,                /* open network (WPA/WPA2-mixed is used
@@ -125,5 +126,31 @@ sl_net_wifi_psk_credential_entry_t wifi_ap_credential = {
   ```
 
 - The AP address is always static; the DHCP server for AP clients runs on the host (not the NWP firmware).
-- In concurrent mode the AP channel must match the STA channel; keep `SL_WIFI_AUTO_CHANNEL` and set the channel from `sl_wifi_get_channel()` of the STA link when it is connected.
+- In concurrent mode the AP channel must match the STA channel whenever the STA
+  link is up: `sl_net_wifi_ap_up()` then copies `sl_wifi_get_channel()` of the
+  STA link into the profile before `sl_wifi_start_ap()` (and
+  `sl_net_client_netif_up_ex()` pre-switches a running AP onto the target
+  router's channel before joining, guarded by `sl_net_ap_channel_preset` so the
+  user-configured value is not restored mid-switch).
+
+## 4. AP channel policy (user-configurable)
+
+Besides following the STA, the AP supports a persisted user channel
+(`network_service_config_t.ap_channel`, NVS key `net_ap_ch`, 0 = auto, 1-13 =
+fixed, mirrored into `sl_net_ap_user_channel` via `sl_net_ap_netif_config()`):
+
+- **wl idle** — `sl_net_wifi_ap_up()` applies the user channel (clamped to the
+  active region max via `sl_net_wifi_max_ap_channel()`: 11 for US, 13 for
+  eu/jp/kr/cn; the clamp covers a region switch after the value was saved, so
+  `sl_wifi_start_ap()` is never handed an out-of-region channel). 0 keeps
+  `SL_WIFI_AUTO_CHANNEL` and lets the firmware pick.
+- **wl connected** — the AP always runs on the router's channel; the web API
+  rejects channel changes while `wl` is connected
+  (`communication_is_interface_connected("wl")`).
+- The live channel keeps being written back into
+  `wifi_ap_profile.config.channel.channel` by `sl_net_ap_netif_info()`, which is
+  why the user intent lives in the separate `sl_net_ap_user_channel` variable.
+- Disconnecting wl does NOT restart the AP (it stays on the router's channel to
+  avoid dropping web sessions); the user channel takes effect at the next AP
+  restart.
 - The `ip.v4.*.value` fields are stored in little-endian byte order (the hex literals above are the byte-swapped dotted-quad values shown in the comments).

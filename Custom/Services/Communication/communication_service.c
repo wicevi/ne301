@@ -6289,11 +6289,25 @@ static void on_wifi_ap_ready(const char *if_name, aicam_result_t result)
                     } else {
                         LOG_SVC_INFO("Network service configuration set successfully");
                     }
+                    /* Default SSID skips the full reconfigure below, but the
+                     * persisted AP channel still has to reach the driver —
+                     * otherwise sl_net_ap_user_channel keeps its auto default
+                     * and a configured channel would be lost on this boot. */
+                    ap_config.wireless_cfg.channel = network_config->ap_channel;
+                    aicam_result_t ch_result = nm_set_netif_cfg(NETIF_NAME_WIFI_AP, &ap_config);
+                    if (ch_result != AICAM_OK) {
+                        LOG_SVC_WARN("Failed to apply AP channel %u: %d", (unsigned)network_config->ap_channel, ch_result);
+                    }
                 }
             } else {
                 strncpy(ap_config.wireless_cfg.ssid, network_config->ssid, sizeof(ap_config.wireless_cfg.ssid) - 1);
                 strncpy(ap_config.wireless_cfg.pw, network_config->password, sizeof(ap_config.wireless_cfg.pw) - 1);
                 ap_config.wireless_cfg.security = (strlen(network_config->password) > 0) ? WIRELESS_WPA_WPA2_MIXED : WIRELESS_OPEN;
+                /* wireless_cfg.channel from get_config is the LIVE channel (may
+                 * be a stale STA-following value); override with the persisted
+                 * user intent (0 = auto) so the AP boots on the configured
+                 * channel whenever wl is not connected. */
+                ap_config.wireless_cfg.channel = network_config->ap_channel;
 
                 aicam_result_t result = nm_set_netif_cfg(NETIF_NAME_WIFI_AP, &ap_config);
                 if (result != AICAM_OK) {

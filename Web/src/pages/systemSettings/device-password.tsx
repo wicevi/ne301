@@ -29,8 +29,13 @@ export default function DevicePassword({ setCurrentPage }: { setCurrentPage: (pa
     const [wifiParams, setWifiParams] = useState({
         ssid: '',
         password: '',
-        ap_sleep_time: '600'
+        ap_sleep_time: '600',
+        ap_channel: '0'
     });
+    // Highest selectable AP channel (11 for US region, 13 otherwise) and
+    // whether the channel is editable (only while wl is not connected).
+    const [apChannelMax, setApChannelMax] = useState(13);
+    const [apChannelEditable, setApChannelEditable] = useState(true);
 
     // const [isWifiPasswordVisible, setIsWifiPasswordVisible] = useState(false);
     const [loginPassword, setLoginPassword] = useState('');
@@ -69,8 +74,15 @@ export default function DevicePassword({ setCurrentPage }: { setCurrentPage: (pa
             setWifiParams({
                 ssid: String(res.data?.ssid ?? ''),
                 password: String(res.data?.password ?? ''),
-                ap_sleep_time: String(Number(res.data?.ap_sleep_time ?? 0) / 60)
+                ap_sleep_time: String(Number(res.data?.ap_sleep_time ?? 0) / 60),
+                ap_channel: String(Number(res.data?.ap_channel ?? 0))
             });
+            const channelMax = Number(res.data?.ap_channel_max ?? 13);
+            setApChannelMax(channelMax > 0 ? channelMax : 13);
+            setApChannelEditable(res.data?.channel_editable !== false);
+            // A configured channel above the current region limit (region switched
+            // after it was saved) falls back to auto in the UI.
+            setWifiParams((prev) => (Number(prev.ap_channel) > channelMax ? { ...prev, ap_channel: '0' } : prev));
             // setOldWifiPassword(res.data.network_service?.password ?? '');
             const currentPassword = await getOldLoginPassword();
             setLoginPassword(currentPassword ?? '');
@@ -222,7 +234,8 @@ export default function DevicePassword({ setCurrentPage }: { setCurrentPage: (pa
                 ssid: wifiParams.ssid,
                 password: wifiParams.password,
                 interface: 'ap',
-                ap_sleep_time: Number(wifiParams.ap_sleep_time) * 60
+                ap_sleep_time: Number(wifiParams.ap_sleep_time) * 60,
+                ap_channel: Number(wifiParams.ap_channel)
             });
             const result = await retryFetch(initWifiConfig, 3000, 3);
             if (result) {
@@ -325,6 +338,36 @@ export default function DevicePassword({ setCurrentPage }: { setCurrentPage: (pa
                                 )}
                             </div>
                         </div> */}
+                        <Separator />
+                        <div className="flex justify-between">
+                            <Label className="text-sm text-text-primary shrink-0">{i18n._('sys.system_management.wifi_channel')}</Label>
+                            <div className="flex flex-col gap-1 items-end">
+                                <Select
+                                  value={wifiParams.ap_channel}
+                                  onValueChange={(value) => setWifiParams({ ...wifiParams, ap_channel: value })}
+                                  disabled={!apChannelEditable}
+                                >
+                                    <SelectTrigger
+                                      value={wifiParams.ap_channel}
+                                      className="bg-transparent border-0 !shadow-none !outline-none
+                 focus:!outline-none focus:!ring-0 focus:!ring-offset-0 focus:!shadow-none focus:!border-transparent
+                 focus-visible:!outline-none focus-visible:!ring-0 focus-visible:!ring-offset-0
+                 text-right"
+                                    >
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="0">{i18n._('sys.system_management.wifi_channel_auto')}</SelectItem>
+                                        {Array.from({ length: apChannelMax }, (_, i) => i + 1).map((ch) => (
+                                            <SelectItem key={ch} value={String(ch)}>{ch}</SelectItem>
+                                        ))}
+                                    </SelectContent>
+                                </Select>
+                                {!apChannelEditable && (
+                                    <p className="text-xs text-text-secondary text-right">{i18n._('sys.system_management.wifi_channel_follow_hint')}</p>
+                                )}
+                            </div>
+                        </div>
                         <Separator />
                         <div className="flex justify-between">
                             <Label className="text-sm text-text-primary shrink-0">{i18n._('sys.system_management.sleep_time')}</Label>
