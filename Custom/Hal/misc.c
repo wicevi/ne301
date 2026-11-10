@@ -412,13 +412,14 @@ static void flash_lock(bool lock)
 static int flash_init(void *priv)
 {
     misc_t *flash = (misc_t *)priv;
+    /* Both board variants share the MX_TIM3_Init PWM timing (PSC=15,
+     * ARR=1599): the production IR board's light-board driver is the same
+     * family as the standard board's, and the 4% minimum-duty compensation
+     * in TIM_set_duty was tuned at this frequency. The faster ir_ver
+     * period (PSC=0, ARR=199, 128x the frequency) made low-duty pulses
+     * shorter than the driver's response time — the LED stayed dark up to
+     * ~25% duty and then popped on (field feedback). */
     MX_TIM3_Init();
-    /* IR board: the light-board LED is an IR LED driven best at 8 MHz /
-     * 200 steps (PSC=0, ARR=199, ir_ver tuning). Standard board keeps the
-     * white-LED PWM from MX_TIM3_Init (1 MHz / 1600 steps) untouched. */
-    if (board_is_ir() == AICAM_TRUE) {
-        TIM3_config_ir_period();
-    }
 
     flash->config = (void *)&flash_cfg;
     flash->mtx_id = osMutexNew(NULL);

@@ -972,37 +972,41 @@ static aicam_result_t work_mode_triggers_set_handler(http_handler_context_t* ctx
             }
         }
         
-        // Parse PIR sensor configuration parameters
+        // Parse PIR sensor configuration parameters.
+        // Validate on the raw number BEFORE the uint8_t cast: casting first
+        // wraps out-of-range values (e.g. 300 -> 44) into the legal window
+        // and silently accepts them. Out-of-range fields are ignored, same
+        // as the other optional fields in this handler.
         cJSON* sensitivity_item = cJSON_GetObjectItem(pir_trigger, "sensitivity_level");
         if (sensitivity_item && cJSON_IsNumber(sensitivity_item)) {
-            uint8_t sensitivity = (uint8_t)cJSON_GetNumberValue(sensitivity_item);
+            double sensitivity = cJSON_GetNumberValue(sensitivity_item);
             if (sensitivity >= 10 && sensitivity <= 255) {
-                config.pir_trigger.sensitivity_level = sensitivity;
+                config.pir_trigger.sensitivity_level = (uint8_t)sensitivity;
             }
         }
-        
+
         cJSON* ignore_time_item = cJSON_GetObjectItem(pir_trigger, "ignore_time_s");
         if (ignore_time_item && cJSON_IsNumber(ignore_time_item)) {
-            uint8_t ignore_time = (uint8_t)cJSON_GetNumberValue(ignore_time_item);
-            if (ignore_time <= 15) {
-                config.pir_trigger.ignore_time_s = ignore_time;
+            double ignore_time = cJSON_GetNumberValue(ignore_time_item);
+            if (ignore_time >= 0 && ignore_time <= 15) {
+                config.pir_trigger.ignore_time_s = (uint8_t)ignore_time;
             }
         }
-        
+
         cJSON* pulse_count_item = cJSON_GetObjectItem(pir_trigger, "pulse_count");
         if (pulse_count_item && cJSON_IsNumber(pulse_count_item)) {
-            uint8_t pulse_count = (uint8_t)cJSON_GetNumberValue(pulse_count_item);
+            double pulse_count = cJSON_GetNumberValue(pulse_count_item);
             // Frontend sends 1-4, we store as register value 0-3
             if (pulse_count >= 1 && pulse_count <= 4) {
-                config.pir_trigger.pulse_count = pulse_count - 1;
+                config.pir_trigger.pulse_count = (uint8_t)pulse_count - 1;
             }
         }
-        
+
         cJSON* window_time_item = cJSON_GetObjectItem(pir_trigger, "window_time_s");
         if (window_time_item && cJSON_IsNumber(window_time_item)) {
-            uint8_t window_time = (uint8_t)cJSON_GetNumberValue(window_time_item);
-            if (window_time <= 3) {
-                config.pir_trigger.window_time_s = window_time;
+            double window_time = cJSON_GetNumberValue(window_time_item);
+            if (window_time >= 0 && window_time <= 3) {
+                config.pir_trigger.window_time_s = (uint8_t)window_time;
             }
         }
 

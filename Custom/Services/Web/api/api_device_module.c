@@ -1151,12 +1151,16 @@ aicam_result_t system_time_handler(http_handler_context_t *ctx) {
         timestamp = time(NULL);
     }
     
-    // Extract timezone (optional)
-    int timezone_offset_hours = 0;
+    // Extract timezone (optional). Absent field PRESERVES the stored
+    // timezone (rtc_set_timeStamp) — a default of 0 here used to override
+    // it unconditionally on every timestamp-only sync.
     cJSON* timezone_item = cJSON_GetObjectItem(request_json, "timezone");
+    bool timezone_present = false;
+    int timezone_offset_hours = 0;
     if (timezone_item && cJSON_IsString(timezone_item)) {
         const char* timezone_str = cJSON_GetStringValue(timezone_item);
-        
+        timezone_present = true;
+
         // Simple timezone parsing - support common timezones
         if (strcmp(timezone_str, "Asia/Shanghai") == 0 || strcmp(timezone_str, "Asia/Beijing") == 0) {
             timezone_offset_hours = 8; // UTC+8
@@ -1181,13 +1185,13 @@ aicam_result_t system_time_handler(http_handler_context_t *ctx) {
             }
         } else {
             cJSON_Delete(request_json);
-            return api_response_error(ctx, API_ERROR_INVALID_REQUEST, 
+            return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
                 "Unsupported timezone. Supported: Asia/Shanghai, America/New_York, America/Los_Angeles, Europe/London, Europe/Paris, Asia/Tokyo, UTC±N");
         }
     }
-    
+
     cJSON_Delete(request_json);
-    
+
     // Set system time using RTC
     /* rtc_setup_by_timestamp() skips sub-2s steps (the web frontend auto-syncs
      * browser time on every page load) and re-arms the RTC alarm internally
@@ -1196,7 +1200,12 @@ aicam_result_t system_time_handler(http_handler_context_t *ctx) {
      * config), so a step needs no explicit reset: a backward step leaves the
      * marker ahead of the clock, which due_events() detects and clears by
      * itself. */
-    (void)rtc_setup_by_timestamp(timestamp, timezone_offset_hours);
+    if (timezone_present) {
+        (void)rtc_setup_by_timestamp(timestamp, timezone_offset_hours);
+    } else {
+        (void)rtc_set_timeStamp(timestamp); /* keep the stored timezone */
+        timezone_offset_hours = rtc_get_timezone();
+    }
 
     // Get the actual set time for response
     uint64_t current_timestamp = rtc_get_timeStamp();
