@@ -17,7 +17,14 @@
 #include "cJSON.h"
 /* ==================== AI model related definition ==================== */
 #define NN_MAX_INPUT_BUFFER 3
-#define NN_MAX_OUTPUT_BUFFER 5
+/* Must cover the largest model output-tensor count in use: the Yunet face
+ * detector exposes 12 (3 scales x {cls,obj,bbox,kps}). The historical cap
+ * of 5 silently truncated the enumeration, so pp_fd_yunet_ui's
+ * assert(nb_input == 12) fired on the FIRST face inference — inside
+ * model_run's npu_mutex — wedging every later AI run while the watchdog
+ * feeder (independent thread) kept feeding: a "frozen but never resets"
+ * soak hang. 16 matches the face-detection-demo branch. */
+#define NN_MAX_OUTPUT_BUFFER 16
 
 #define NN_MAX_INSTANCES 2
 
