@@ -1307,9 +1307,8 @@ static void day_night_init(void)
     g_device_service.day_night_control = DAY_NIGHT_CONTROL_AUTO;
     g_device_service.day_night_initialized = AICAM_TRUE;
 
-    if (g_device_service.day_night_config.ir_brightness == 0U) {
-        g_device_service.day_night_config.ir_brightness = 50U;
-    }
+    /* ir_brightness == 0 is a deliberate "IR off in night mode" choice
+     * (dn_ir_light_set turns the PWM off) — do NOT clamp it to a default. */
 
     g_device_service.day_night_task_id = osThreadNew(dayNightTask, NULL, &dnTask_attributes);
     LOG_SVC_INFO("Day/Night initialized (mode=%u, source=%u)",
@@ -1448,7 +1447,7 @@ void device_service_day_night_capture_light(aicam_bool_t *on, uint8_t *brightnes
         uint32_t m = g_device_service.camera_config.image_config.isp_mode;
         if (m == IMAGE_ISP_MODE_NIGHT) {
             enable = AICAM_TRUE;
-            bri = (g_device_service.day_night_config.ir_brightness == 0U) ? 50U : g_device_service.day_night_config.ir_brightness;
+            bri = g_device_service.day_night_config.ir_brightness;
         }
     } else if (osMutexAcquire(g_device_service.day_night_mtx, osWaitForever) == osOK) {
         if (g_device_service.day_night_effective_mode == IMAGE_ISP_MODE_NIGHT) {
@@ -1551,7 +1550,7 @@ uint32_t device_service_day_night_capture_prepare(const day_night_config_t *fast
         log_isp_mode = g_device_service.camera_config.image_config.isp_mode;
         log_source = g_device_service.day_night_config.auto_source;
     } else {
-        if (fast_cfg && fast_cfg->ir_brightness != 0U) {
+        if (fast_cfg) {
             bri = fast_cfg->ir_brightness;
         }
         log_isp_mode = fast_isp_mode;
