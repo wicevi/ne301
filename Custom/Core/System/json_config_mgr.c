@@ -177,7 +177,9 @@
      },
 
      .usb_config = {
-         .device_enable = AICAM_TRUE,
+         /* NE301 defaults to USB OFF for power saving (NE302 defaults ON);
+          * the web switch enables it persistently via NVS usb_dev_en. */
+         .device_enable = AICAM_FALSE,
          .follow_ap = AICAM_TRUE,
          .ip = "192.168.20.1",        /* custom-mode default: classic
                                        * standalone USB subnet */

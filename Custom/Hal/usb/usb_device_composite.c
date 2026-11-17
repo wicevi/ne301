@@ -1157,9 +1157,10 @@ void usb_cherry_device_diag(char *buf, int buflen)
  * cache is refreshed first so it reflects THIS boot (u0_module_register
  * ran earlier in driver_core_init).
  *
- * Master switch: usb_config.device_enable (web system settings, default
- * ON). OFF -> the USB device side is not initialized AT ALL (no composite
- * device, no DWC2 clocks/IRQ) — power saving. The boot task runs after
+ * Master switch: usb_config.device_enable (web system settings; NE301
+ * compiles the default OFF for power saving, NE302 keeps ON). OFF -> the
+ * USB device side is not initialized AT ALL (no composite device, no DWC2
+ * clocks/IRQ) — power saving. The boot task runs after
  * core_system_init, so the config manager is up when this reads it.
  */
 static void usb_dev_boot_task(void *argument)

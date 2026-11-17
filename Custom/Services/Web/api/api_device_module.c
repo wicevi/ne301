@@ -378,7 +378,7 @@ aicam_result_t device_usb_status_handler(http_handler_context_t *ctx) {
         return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Only GET method is allowed");
     }
 
-    usb_config_t usb_cfg = { .device_enable = AICAM_TRUE };
+    usb_config_t usb_cfg = { .device_enable = AICAM_FALSE };
     (void)json_config_get_usb_config(&usb_cfg);
 
     cJSON* response_json = cJSON_CreateObject();

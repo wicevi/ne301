@@ -2393,7 +2393,7 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
     else
         json_config_nvs_write_uint32(NVS_KEY_DN_IR_BRIGHTNESS, config->device_service.day_night_config.ir_brightness);
     // Load USB device configuration (absent key keeps the compiled-in
-    // default: device_enable = TRUE)
+    // default: device_enable = FALSE — NE301 ships with USB off)
     result = json_config_nvs_read_bool(NVS_KEY_USB_DEVICE_ENABLE, &temp_bool);
     if (result == AICAM_OK)
         config->usb_config.device_enable = temp_bool;
