@@ -1543,8 +1543,16 @@ aicam_result_t json_config_parse_json_object(const char *json_str, aicam_global_
         parse_device_service(dev_svc, &config->device_service);
 
     cJSON *usb_cfg = cJSON_GetObjectItem(root, "usb_config");
-    if (cJSON_IsObject(usb_cfg))
+    if (cJSON_IsObject(usb_cfg)) {
         json_get_bool(usb_cfg, "device_enable", &config->usb_config.device_enable);
+        json_get_bool(usb_cfg, "follow_ap", &config->usb_config.follow_ap);
+        cJSON *s = cJSON_GetObjectItem(usb_cfg, "ip");
+        if (cJSON_IsString(s) && s->valuestring[0] != '\0')
+            strncpy(config->usb_config.ip, s->valuestring, sizeof(config->usb_config.ip) - 1);
+        s = cJSON_GetObjectItem(usb_cfg, "netmask");
+        if (cJSON_IsString(s) && s->valuestring[0] != '\0')
+            strncpy(config->usb_config.netmask, s->valuestring, sizeof(config->usb_config.netmask) - 1);
+    }
 
     cJSON *net_svc = cJSON_GetObjectItem(root, "network_service");
     if (cJSON_IsObject(net_svc))
@@ -1606,6 +1614,9 @@ aicam_result_t json_config_serialize_json_object(const aicam_global_config_t *co
 
     cJSON *usb_cfg = cJSON_CreateObject();
     cJSON_AddBoolToObject(usb_cfg, "device_enable", config->usb_config.device_enable);
+    cJSON_AddBoolToObject(usb_cfg, "follow_ap", config->usb_config.follow_ap);
+    cJSON_AddStringToObject(usb_cfg, "ip", config->usb_config.ip);
+    cJSON_AddStringToObject(usb_cfg, "netmask", config->usb_config.netmask);
     cJSON_AddItemToObject(root, "usb_config", usb_cfg);
     cJSON_AddItemToObject(root, "network_service", serialize_network_service(&config->network_service));
     cJSON_AddItemToObject(root, "mqtt_service", serialize_mqtt_service(&config->mqtt_service));

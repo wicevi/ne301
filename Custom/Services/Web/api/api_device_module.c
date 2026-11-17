@@ -396,6 +396,13 @@ aicam_result_t device_usb_status_handler(http_handler_context_t *ctx) {
     cJSON_AddBoolToObject(response_json, "via_usb",
                           usb_cherry_device_request_from_client(ctx->request.client_ip)
                               ? AICAM_TRUE : AICAM_FALSE);
+    /* Addressing config + the values currently in force */
+    cJSON_AddBoolToObject(response_json, "follow_ap", usb_cfg.follow_ap);
+    cJSON_AddStringToObject(response_json, "ip", usb_cfg.ip);
+    cJSON_AddStringToObject(response_json, "netmask", usb_cfg.netmask);
+    cJSON_AddStringToObject(response_json, "client_hint",
+                            usb_cfg.follow_ap ? "192.168.10.251"
+                                              : "ip host +1 of the configured address");
 
     char* json_string = cJSON_Print(response_json);
     cJSON_Delete(response_json);
@@ -433,9 +440,48 @@ aicam_result_t device_usb_config_handler(http_handler_context_t *ctx) {
         return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Missing or invalid 'enabled' field");
     }
     aicam_bool_t enabled = cJSON_IsTrue(enabled_item) ? AICAM_TRUE : AICAM_FALSE;
+
+    /* Optional addressing fields; absent fields keep their current values. */
+    usb_config_t usb_cfg;
+    aicam_bool_t addr_changed = AICAM_FALSE;
+    if (json_config_get_usb_config(&usb_cfg) != AICAM_OK) {
+        cJSON_Delete(request_json);
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to read USB configuration");
+    }
+    aicam_bool_t prev_follow = usb_cfg.follow_ap;
+    char prev_ip[USB_IP_STR_LEN];
+    char prev_mask[USB_IP_STR_LEN];
+    strncpy(prev_ip, usb_cfg.ip, sizeof(prev_ip) - 1);
+    strncpy(prev_mask, usb_cfg.netmask, sizeof(prev_mask) - 1);
+
+    cJSON* item = cJSON_GetObjectItem(request_json, "follow_ap");
+    if (cJSON_IsBool(item)) {
+        usb_cfg.follow_ap = cJSON_IsTrue(item) ? AICAM_TRUE : AICAM_FALSE;
+    }
+    item = cJSON_GetObjectItem(request_json, "ip_address");
+    if (cJSON_IsString(item) && item->valuestring[0] != '\0') {
+        strncpy(usb_cfg.ip, item->valuestring, sizeof(usb_cfg.ip) - 1);
+        usb_cfg.ip[sizeof(usb_cfg.ip) - 1] = '\0';
+    }
+    item = cJSON_GetObjectItem(request_json, "netmask");
+    if (cJSON_IsString(item) && item->valuestring[0] != '\0') {
+        strncpy(usb_cfg.netmask, item->valuestring, sizeof(usb_cfg.netmask) - 1);
+        usb_cfg.netmask[sizeof(usb_cfg.netmask) - 1] = '\0';
+    }
     cJSON_Delete(request_json);
 
-    usb_config_t usb_cfg = { .device_enable = enabled };
+    if (usb_cfg.follow_ap != AICAM_TRUE &&
+        !usb_cherry_device_ip_config_valid(usb_cfg.ip, usb_cfg.netmask)) {
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                                  "Invalid ip/netmask (check dotted-quad values and host bits)");
+    }
+    if (usb_cfg.follow_ap != prev_follow ||
+        strncmp(usb_cfg.ip, prev_ip, sizeof(prev_ip)) != 0 ||
+        strncmp(usb_cfg.netmask, prev_mask, sizeof(prev_mask)) != 0) {
+        addr_changed = AICAM_TRUE;
+    }
+
+    usb_cfg.device_enable = enabled;
     aicam_result_t result = json_config_set_usb_config(&usb_cfg);
     if (result != AICAM_OK) {
         return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to save USB configuration");
@@ -452,6 +498,8 @@ aicam_result_t device_usb_config_handler(http_handler_context_t *ctx) {
         (void)usb_cherry_device_deinit();
     } else if (!usb_cherry_device_is_inited()) {
         (void)usb_cherry_device_init_ex(1);
+    } else if (addr_changed == AICAM_TRUE) {
+        (void)usb_cherry_device_apply_ip_config();
     }
 
     cJSON* response_json = cJSON_CreateObject();
@@ -462,6 +510,9 @@ aicam_result_t device_usb_config_handler(http_handler_context_t *ctx) {
     cJSON_AddBoolToObject(response_json, "enabled", enabled);
     cJSON_AddBoolToObject(response_json, "running",
                           usb_cherry_device_is_inited() ? AICAM_TRUE : AICAM_FALSE);
+    cJSON_AddBoolToObject(response_json, "follow_ap", usb_cfg.follow_ap);
+    cJSON_AddStringToObject(response_json, "ip", usb_cfg.ip);
+    cJSON_AddStringToObject(response_json, "netmask", usb_cfg.netmask);
     cJSON_AddStringToObject(response_json, "message", "USB configuration updated");
 
     char* json_string = cJSON_Print(response_json);

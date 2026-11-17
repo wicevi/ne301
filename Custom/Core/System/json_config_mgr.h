@@ -658,6 +658,8 @@ typedef struct {
 
 /* ==================== USB Configuration ==================== */
 
+#define USB_IP_STR_LEN 16    /* dotted quad + NUL */
+
 typedef struct {
     aicam_bool_t device_enable;   /* Master switch for the USB device (CDC
                                    * console + RNDIS NIC). OFF (default is
@@ -665,6 +667,14 @@ typedef struct {
                                    * initialized at boot — no composite
                                    * device, no DWC2 IRQ, saves power. The
                                    * host sees no enumeration at all. */
+    /* RNDIS ("ud") netif addressing. follow_ap = TRUE (default): share the
+     * hotspot address 192.168.10.10/24 — one web address for both links,
+     * the USB PC leases .251 (outside the AP DHCP pool). FALSE: use the
+     * static ip/netmask below; the USB PC then leases <ip host+1> with the
+     * device as router/DNS. */
+    aicam_bool_t follow_ap;
+    char ip[USB_IP_STR_LEN];        /* device IP, e.g. "192.168.20.1" */
+    char netmask[USB_IP_STR_LEN];   /* e.g. "255.255.255.0" */
 } usb_config_t;
 
 typedef struct {

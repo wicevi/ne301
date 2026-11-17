@@ -856,6 +856,18 @@ aicam_result_t json_config_save_usb_config_to_nvs(const usb_config_t *config)
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save USB device enable to NVS");
 
+    result = json_config_nvs_write_bool(NVS_KEY_USB_FOLLOW_AP, config->follow_ap);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save USB follow-AP to NVS");
+
+    result = json_config_nvs_write_string(NVS_KEY_USB_IP, config->ip);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save USB IP to NVS");
+
+    result = json_config_nvs_write_string(NVS_KEY_USB_NETMASK, config->netmask);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save USB netmask to NVS");
+
     LOG_CORE_INFO("USB configuration saved to NVS successfully");
     return result;
 }
@@ -2387,6 +2399,27 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
         config->usb_config.device_enable = temp_bool;
     else
         json_config_nvs_write_bool(NVS_KEY_USB_DEVICE_ENABLE, config->usb_config.device_enable);
+
+    result = json_config_nvs_read_bool(NVS_KEY_USB_FOLLOW_AP, &temp_bool);
+    if (result == AICAM_OK)
+        config->usb_config.follow_ap = temp_bool;
+    else
+        json_config_nvs_write_bool(NVS_KEY_USB_FOLLOW_AP, config->usb_config.follow_ap);
+
+    {
+        char temp_str[USB_IP_STR_LEN];
+        if (json_config_nvs_read_string(NVS_KEY_USB_IP, temp_str, sizeof(temp_str)) == AICAM_OK &&
+            temp_str[0] != '\0')
+            strncpy(config->usb_config.ip, temp_str, sizeof(config->usb_config.ip) - 1);
+        else
+            json_config_nvs_write_string(NVS_KEY_USB_IP, config->usb_config.ip);
+
+        if (json_config_nvs_read_string(NVS_KEY_USB_NETMASK, temp_str, sizeof(temp_str)) == AICAM_OK &&
+            temp_str[0] != '\0')
+            strncpy(config->usb_config.netmask, temp_str, sizeof(config->usb_config.netmask) - 1);
+        else
+            json_config_nvs_write_string(NVS_KEY_USB_NETMASK, config->usb_config.netmask);
+    }
 
     // Load ISP configuration
     result = json_config_nvs_read_bool(NVS_KEY_ISP_VALID, &temp_bool);

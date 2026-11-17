@@ -141,11 +141,17 @@ const systemSettings = {
         gateway?: string;
     }) => request.post('/api/v1/system/network/halow/ip', data),
 
-    // usb (system settings: master switch for the USB device — CDC console + RNDIS NIC)
+    // usb (system settings: master switch + RNDIS addressing for the USB device)
     getUsbStatusReq: () => request.get('/api/v1/device/usb'),
-    /** config carries optional axios options; the RNDIS-host disable call
-     *  passes skipErrorToast — the network error is the expected outcome. */
-    setUsbConfigReq: (data: { enabled: boolean }, config?: { skipErrorToast?: boolean }) => request.post('/api/v1/device/usb/config', data, config),
+    /** config carries optional axios options; USB-link requests pass
+     *  skipErrorToast — a network error there is often the expected outcome
+     *  (the NIC bounces while the request is in flight). */
+    setUsbConfigReq: (data: {
+        enabled: boolean;
+        follow_ap?: boolean;
+        ip_address?: string;
+        netmask?: string;
+    }, config?: { skipErrorToast?: boolean }) => request.post('/api/v1/device/usb/config', data, config),
 }
 
 export default systemSettings;

@@ -140,6 +140,9 @@
 
 // USB device configuration key names
 #define NVS_KEY_USB_DEVICE_ENABLE       "usb_dev_en"
+#define NVS_KEY_USB_FOLLOW_AP           "usb_follow"
+#define NVS_KEY_USB_IP                  "usb_ip"
+#define NVS_KEY_USB_NETMASK             "usb_mask"
 
 // ISP configuration key names
 #define NVS_KEY_ISP_VALID               "isp_valid"

@@ -177,7 +177,11 @@
      },
 
      .usb_config = {
-         .device_enable = AICAM_TRUE
+         .device_enable = AICAM_TRUE,
+         .follow_ap = AICAM_TRUE,
+         .ip = "192.168.20.1",        /* custom-mode default: classic
+                                       * standalone USB subnet */
+         .netmask = "255.255.255.0"
      },
 
      .network_service = {

@@ -63,6 +63,17 @@ int usb_cherry_device_init(void);
  */
 int usb_cherry_device_set_rndis(int enable);
 
+/** @brief Validate a dotted-quad ip/netmask pair for the custom USB subnet
+ *         (parses, non-zero mask, ip has usable host bits). */
+int usb_cherry_device_ip_config_valid(const char *ip, const char *netmask);
+
+/**
+ * @brief Re-resolve the RNDIS netif addressing from usb_config and bounce
+ *        the USB device so the host re-enumerates and re-leases. No-op
+ *        when the device is not running (next boot picks it up).
+ */
+int usb_cherry_device_apply_ip_config(void);
+
 /** @brief Non-zero while the RNDIS function is in the active config. */
 int usb_cherry_device_rndis_is_active(void);
 

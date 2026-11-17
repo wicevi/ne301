@@ -76,12 +76,10 @@
 
 #define UDHCP_SERVER_PORT      67
 #define UDHCP_CLIENT_PORT      68
-/* Shared-subnet plan: the ud netif sits on the SAME 192.168.10.0/24 as the
- * device hotspot (same IP 192.168.10.10), so the web UI is reachable via
- * one address over both links. The USB PC gets a FIXED lease outside the
- * AP dhcpserver pool (host octets 100..250, see dhcpserver.c): .251. */
-#define UDHCP_SUBNET_3RD       10       /* 192.168.10.x (== AP subnet) */
-#define UDHCP_CLIENT_IP_4TH    251      /* single client: always .251, outside the AP pool */
+/* Addressing is RUNTIME (see usb_dev_addr_from_config / g_ud_server_ip):
+ *  - follow-AP mode (default): share the hotspot 192.168.10.10/24, single
+ *    USB client leases .251 (outside the AP dhcpserver pool 100..250).
+ *  - custom mode: usb_config.ip/netmask; the client leases <ip host+1>. */
 #define UDHCP_LEASE_TIME_S     86400
 
 /* defined below (netif section) */
@@ -102,6 +100,21 @@ static struct netif rndis_dev_netif;
 static struct udp_pcb *g_udhcp_pcb;
 static osSemaphoreId_t g_rndis_tx_sem;
 static osSemaphoreId_t g_cdc_console_sem; /* worker wait object (console + rndis rx) */
+
+/* RNDIS netif addressing, resolved from usb_config at netif start:
+ * server == netif IP (also router/DNS/server-id), client == the single
+ * fixed lease for the USB PC. Follow-AP default: 192.168.10.10/24, .251. */
+static ip4_addr_t g_ud_server_ip;
+static ip4_addr_t g_ud_netmask;
+static ip4_addr_t g_ud_client_ip;
+
+static void put_ip4_bytes(uint8_t *dst, const ip4_addr_t *src)
+{
+    dst[0] = ip4_addr1(src);
+    dst[1] = ip4_addr2(src);
+    dst[2] = ip4_addr3(src);
+    dst[3] = ip4_addr4(src);
+}
 /* fixed header of a bootp/dhcp message (236 bytes before the cookie) */
 struct udhcp_msg {
     uint8_t op, htype, hlen, hops;
@@ -149,8 +162,7 @@ static void udhcp_send_reply(struct udhcp_msg *req, uint8_t msg_type,
     rsp->flags = req->flags;
     if (include_addr) memcpy(rsp->yiaddr, yiaddr, 4);
     /* siaddr: next-server — mirror the AP dhcpserver (some clients check it) */
-    rsp->siaddr[0] = 192; rsp->siaddr[1] = 168;
-    rsp->siaddr[2] = UDHCP_SUBNET_3RD; rsp->siaddr[3] = 1;
+    put_ip4_bytes(rsp->siaddr, &g_ud_server_ip);
     memcpy(rsp->chaddr, req->chaddr, 16);
 
     uint16_t o = DHCP_MSG_FIXED_LEN;
@@ -159,20 +171,21 @@ static void udhcp_send_reply(struct udhcp_msg *req, uint8_t msg_type,
     out[o++] = 53; out[o++] = 1; out[o++] = msg_type;
     /* 54: server identifier */
     out[o++] = 54; out[o++] = 4;
-    out[o++] = 192; out[o++] = 168; out[o++] = UDHCP_SUBNET_3RD; out[o++] = 1;
+    put_ip4_bytes(&out[o], &g_ud_server_ip); o += 4;
     if (include_addr) {
         /* 51: lease time */
         out[o++] = 51; out[o++] = 4;
         out[o++] = (uint8_t)(UDHCP_LEASE_TIME_S >> 24); out[o++] = (uint8_t)(UDHCP_LEASE_TIME_S >> 16);
         out[o++] = (uint8_t)(UDHCP_LEASE_TIME_S >> 8);  out[o++] = (uint8_t)(UDHCP_LEASE_TIME_S);
         /* 1: subnet mask */
-        out[o++] = 1; out[o++] = 4; out[o++] = 255; out[o++] = 255; out[o++] = 255; out[o++] = 0;
-        /* 3: router */
+        out[o++] = 1; out[o++] = 4;
+        put_ip4_bytes(&out[o], &g_ud_netmask); o += 4;
+        /* 3: router — the device itself */
         out[o++] = 3; out[o++] = 4;
-        out[o++] = 192; out[o++] = 168; out[o++] = UDHCP_SUBNET_3RD; out[o++] = 1;
+        put_ip4_bytes(&out[o], &g_ud_server_ip); o += 4;
         /* 6: dns (the device itself) */
         out[o++] = 6; out[o++] = 4;
-        out[o++] = 192; out[o++] = 168; out[o++] = UDHCP_SUBNET_3RD; out[o++] = 1;
+        put_ip4_bytes(&out[o], &g_ud_server_ip); o += 4;
     }
     out[o++] = 255; /* end */
 
@@ -196,7 +209,8 @@ static void udhcp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 {
     (void)arg; (void)pcb; (void)addr; (void)port;
 
-    static const uint8_t client_ip[4] = {192, 168, UDHCP_SUBNET_3RD, UDHCP_CLIENT_IP_4TH};
+    uint8_t client_ip[4];
+    put_ip4_bytes(client_ip, &g_ud_client_ip);
 
     if (p == NULL || p->len < DHCP_MSG_FIXED_LEN + 4) {
         if (p) pbuf_free(p);
@@ -221,8 +235,10 @@ static void udhcp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
             /* SELECTING names a server (54): must be us. RENEWING has no 54. */
             bool server_match = true;
             if (v54 && olen == 4) {
-                server_match = (v54[0] == 192 && v54[1] == 168 &&
-                                v54[2] == UDHCP_SUBNET_3RD && v54[3] == 1);
+                server_match = (v54[0] == ip4_addr1(&g_ud_server_ip) &&
+                                v54[1] == ip4_addr2(&g_ud_server_ip) &&
+                                v54[2] == ip4_addr3(&g_ud_server_ip) &&
+                                v54[3] == ip4_addr4(&g_ud_server_ip));
             }
             if (!server_match) {
                 break; /* another server's client */
@@ -279,8 +295,15 @@ static void udhcp_start(void)
         return;
     }
     udp_recv(g_udhcp_pcb, udhcp_recv, NULL);
-    printf("[USB-DEV] mini-dhcps: serving 192.168.%u.%u\r\n",
-           UDHCP_SUBNET_3RD, UDHCP_CLIENT_IP_4TH);
+    {
+        /* ip4addr_ntoa returns ONE shared static buffer — three calls in a
+         * single printf would print the same (last) string three times. */
+        char c_ip[16], s_ip[16], m_ip[16];
+        strcpy(c_ip, ip4addr_ntoa(&g_ud_client_ip));
+        strcpy(s_ip, ip4addr_ntoa(&g_ud_server_ip));
+        strcpy(m_ip, ip4addr_ntoa(&g_ud_netmask));
+        printf("[USB-DEV] mini-dhcps: serving %s (device %s/%s)\r\n", c_ip, s_ip, m_ip);
+    }
 }
 
 static void udhcp_stop(void)
@@ -376,9 +399,8 @@ static volatile uint8_t g_dev_configured;
  * new transfers until RESUME/RESET. */
 static volatile uint8_t g_dev_suspended;
 static volatile uint8_t g_rndis_tx_busy;
-/* Fixed IP the mini DHCP server leases to the USB PC (see UDHCP_* above);
- * filled in rndis_dev_netif_start(). */
-static ip4_addr_t g_ud_client_ip;
+/* g_ud_client_ip (with the other runtime addresses at the top of the file)
+ * is the fixed lease the mini DHCP server hands the USB PC. */
 
 /*
  * Egress disambiguation for the shared subnet: ud and the hotspot netif
@@ -591,6 +613,69 @@ static void rndis_dev_input_poll(void)
     }
 }
 
+/*
+ * Resolve the "ud" netif addressing from usb_config (web-configurable):
+ *  - follow-AP (default): 192.168.10.10/24 (== NETIF_WIFI_AP_DEFAULT_IP),
+ *    client .251 — one web address for hotspot + USB, client lease outside
+ *    the AP dhcpserver pool (100..250).
+ *  - custom: usb_config.ip/netmask; the client leases <ip host + 1>
+ *    (stepping below the broadcast when needed), device = router/DNS.
+ * Falls back to the follow-AP plan when the custom values don't parse.
+ */
+static void usb_dev_addr_from_config(ip4_addr_t *ip, ip4_addr_t *mask,
+                                     ip4_addr_t *client)
+{
+    usb_config_t cfg;
+    ip4_addr_t cip, cmask;
+
+    if (json_config_get_usb_config(&cfg) == AICAM_OK &&
+        cfg.follow_ap != AICAM_TRUE &&
+        ip4addr_aton(cfg.ip, &cip) != 0 &&
+        ip4addr_aton(cfg.netmask, &cmask) != 0) {
+        uint32_t h_ip = lwip_ntohl(cip.addr);
+        uint32_t h_mask = lwip_ntohl(cmask.addr);
+        uint32_t hosts = ~h_mask;            /* all host bits */
+        uint32_t host = h_ip & hosts;
+        uint32_t net = h_ip & h_mask;
+
+        if (h_mask != 0 && ((hosts + 1) & hosts) == 0 &&
+            net != 0 && host != 0 && host != hosts) {
+            /* client = host + 1, or host - 1 when that would be broadcast
+             * (compare against the host-bit set, not the subnet mask). */
+            uint32_t chost = (host + 1 > hosts) ? (host - 1) : (host + 1);
+            ip->addr = cip.addr;
+            mask->addr = cmask.addr;
+            client->addr = lwip_htonl(net | chost);
+            return;
+        }
+        printf("[USB-DEV] invalid custom ip %s/%s, falling back to shared-AP\r\n",
+               cfg.ip, cfg.netmask);
+    }
+
+    IP4_ADDR(ip, 192, 168, 10, 10);       /* NETIF_WIFI_AP_DEFAULT_IP plan */
+    IP4_ADDR(mask, 255, 255, 255, 0);
+    IP4_ADDR(client, 192, 168, 10, 251);  /* outside the AP pool */
+}
+
+int usb_cherry_device_ip_config_valid(const char *ip, const char *netmask)
+{
+    ip4_addr_t a, m;
+    if (ip == NULL || netmask == NULL) return 0;
+    if (ip4addr_aton(ip, &a) == 0 || ip4addr_aton(netmask, &m) == 0) return 0;
+    uint32_t h_mask = lwip_ntohl(m.addr);
+    uint32_t h_ip = lwip_ntohl(a.addr);
+    uint32_t hosts = ~h_mask;              /* all host bits */
+    uint32_t host = h_ip & hosts;
+    uint32_t net = h_ip & h_mask;
+    /* mask must be non-zero and contiguous (leading ones then zeros):
+     * ~mask + 1 has a single bit set only for contiguous masks. */
+    uint32_t inv = ~h_mask;
+    int contiguous = ((inv + 1) & inv) == 0;
+    /* reject zero mask, network address (host==0) and directed broadcast
+     * (host==all host bits — compare against ~mask, NOT the mask itself). */
+    return (h_mask != 0 && contiguous && net != 0 && host != 0 && host != hosts) ? 1 : 0;
+}
+
 static int rndis_dev_netif_start(void)
 {
     ip_addr_t ipaddr, netmask, gw;
@@ -617,14 +702,14 @@ static int rndis_dev_netif_start(void)
 
     if (netif_get_by_index(rndis_dev_netif.num + 1) == &rndis_dev_netif) return 0;
 
-    IP4_ADDR(&g_ud_client_ip, 192, 168, UDHCP_SUBNET_3RD, UDHCP_CLIENT_IP_4TH);
+    usb_dev_addr_from_config(&g_ud_server_ip, &g_ud_netmask, &g_ud_client_ip);
 
-    /* Same IP as the hotspot (NETIF_WIFI_AP_DEFAULT_IP): the web UI is one
-     * address (192.168.10.10) on both links. Duplicate IP on two netifs is
-     * deliberate — the route hook above disambiguates the egress side. */
-    IP4_ADDR(&ipaddr, 192, 168, UDHCP_SUBNET_3RD, 10);
-    IP4_ADDR(&netmask, 255, 255, 255, 0);
-    IP4_ADDR(&gw, 192, 168, UDHCP_SUBNET_3RD, 10);
+    /* Follow-AP mode shares the hotspot address on purpose (one web address
+     * for both links; duplicate IP on two netifs, egress disambiguated by
+     * the route hook). Custom mode uses its own subnet. */
+    ip_addr_copy_from_ip4(ipaddr, g_ud_server_ip);
+    ip_addr_copy_from_ip4(netmask, g_ud_netmask);
+    ip_addr_copy_from_ip4(gw, g_ud_server_ip);
     err_t err = netifapi_netif_add(&rndis_dev_netif, &ipaddr, &netmask, &gw, NULL,
                                    &rndis_dev_netif_init, &tcpip_input);
     if (err != ERR_OK) {
@@ -960,6 +1045,19 @@ int usb_cherry_device_init_ex(int with_rndis)
 int usb_cherry_device_init(void)
 {
     return usb_cherry_device_init_ex(1);
+}
+
+int usb_cherry_device_apply_ip_config(void)
+{
+    /* Address change = re-register the netif + new DHCP values: bounce the
+     * whole device (host re-enumerates and the PC re-leases). No-op when
+     * not running; the boot task picks the config up on the next start. */
+    if (!g_dev_inited) {
+        return 0;
+    }
+    int keep_rndis = g_rndis_active ? 1 : 0;
+    usb_cherry_device_deinit();
+    return usb_cherry_device_init_ex(keep_rndis);
 }
 
 int usb_cherry_device_set_rndis(int enable)
