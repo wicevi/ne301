@@ -11,11 +11,15 @@ type PlayerProps = {
   videoUrl: string;
   videoRendererInstance: React.RefObject<H264Player | null>;
   // setVideoRendererInstance: (inst: H264Player | null) => void;
+  /** Full toolbar (timestamp overlay + capture/AI/stats/snapshot/fullscreen
+   *  panel). False = bare preview for embedded contexts such as the
+   *  hardware-management image tuning page. Default true. */
+  showToolbar?: boolean;
 }
 
 const STREAM_STATS_KEY = 'deviceToolStreamStatsVisible';
 
-export default function Player({ videoUrl, videoRendererInstance }: PlayerProps) {
+export default function Player({ videoUrl, videoRendererInstance, showToolbar = true }: PlayerProps) {
   const [loading, setLoading] = useState(false);
   const { i18n } = useLingui();
   // isloading and isReload are mutually exclusive
@@ -38,6 +42,8 @@ export default function Player({ videoUrl, videoRendererInstance }: PlayerProps)
   const [isControlPanel, setIsControlPanel] = useState(false);
   const [latency, setLatency] = useState(0);
   const [bandwidth, setBandwidth] = useState(0);
+  // Decoded video size ("WxH", empty until the decoder reports a frame)
+  const [resolution, setResolution] = useState('');
   const { startVideoStreamReq, stopVideoStreamReq } = deviceTool;
   const [sysTime, setSysTime] = useState('');
 
@@ -79,6 +85,11 @@ export default function Player({ videoUrl, videoRendererInstance }: PlayerProps)
   useEffect(() => {
     if (!videoRendererInstance.current) return;
     const interval = setInterval(() => {
+      // Decoded video size from the media element (follows stream param changes)
+      const vw = videoRef.current?.videoWidth ?? 0;
+      const vh = videoRef.current?.videoHeight ?? 0;
+      setResolution(vw > 0 && vh > 0 ? `${vw}x${vh}` : '');
+
       const rawTs = videoRendererInstance.current?.currentTime;
       if (rawTs == null || rawTs === 0) {
         setSysTime('');
@@ -258,20 +269,22 @@ export default function Player({ videoUrl, videoRendererInstance }: PlayerProps)
               disableRemotePlayback
             />
             {/* Time display in the top-left corner of video */}
-            {sysTime && (
+            {showToolbar && sysTime && (
               <div className="absolute md:top-4 top-2 md:left-4 left-2 bg-gray-800/50 text-white px-3 py-1 rounded text-sm font-mono">
                 {sysTime}
               </div>
             )}
-            {isShowStreamStats && (
-              <div className="absolute md:top-4 top-2 md:right-4 right-2 bg-gray-800/50 px-2 py-1 rounded text-xs font-mono space-y-0.5">
-                <div><span className="text-gray-400 font-bold">{i18n._('sys.device_tool.fps')}:</span> <span className="text-white">{fps}</span></div>
+            {showToolbar && isShowStreamStats && (
+    <div className="absolute md:top-4 top-2 md:right-4 right-2 bg-gray-800/50 px-2 py-1 rounded text-xs font-mono space-y-0.5">
+      <div><span className="text-gray-400 font-bold">{i18n._('sys.device_tool.resolution')}:</span> <span className="text-white">{resolution || '--'}</span></div>
+      <div><span className="text-gray-400 font-bold">{i18n._('sys.device_tool.fps')}:</span> <span className="text-white">{fps}</span></div>
                 <div><span className="text-gray-400 font-bold">{i18n._('sys.device_tool.latency')}:</span> <span className="text-white">{latency.toFixed(2)}s</span></div>
                 <div><span className="text-gray-400 font-bold">{i18n._('sys.device_tool.bandwidth')}:</span> <span className="text-white">{bandwidth.toFixed(1)} kB/s</span></div>
-              </div>
+    </div>
             )}
           </div>
         </div>
+        {showToolbar && (
         <PlayerPanel
           handleReload={handleReload}
           className={`absolute bottom-0 left-0 transition-all duration-300 ease-in-out ${isShowPanel
@@ -285,6 +298,7 @@ export default function Player({ videoUrl, videoRendererInstance }: PlayerProps)
           isShowStreamStats={isShowStreamStats}
           toggleStreamStats={() => setIsShowStreamStats((prev) => !prev)}
         />
+        )}
         {loading && (
           <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
             <Loading placeholder="Loading..." />

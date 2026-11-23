@@ -22,15 +22,24 @@ export interface CaptureUploadConfig {
   /** Total record cap on internal flash, all states combined (16-256, default
    *  32). User-configurable; only meaningful when storage can land on flash. */
   flash_max_records: number;
+  /** AI inference filter: when enabled, a capture is stored/uploaded only if
+   *  the model produced a result meeting ai_filter_threshold. Independent from
+   *  the debug-page inference confidence threshold. */
+  ai_filter_enable: boolean;
+  ai_filter_threshold: number; // 1-100 (percent)
+  /** Comma-separated allowed class names; '' (default) = all labels pass */
+  ai_filter_labels: string;
 }
 
 export type RecordState = 'pending' | 'sent' | 'failed' | 'local';
 
 export interface RecordInfo {
   id: string;
-  state: RecordState;
+  state: RecordState;            // 'pending' | 'sent' | 'failed' | 'local'
   timestamp: number;
   size: number;
+  width?: number;                // primary image width (0/undefined = unknown)
+  height?: number;               // primary image height
   retry_count: number;
   trigger: string;
   last_error: string;

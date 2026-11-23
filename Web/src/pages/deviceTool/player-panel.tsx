@@ -36,8 +36,14 @@ export default function PlayerPanel({ handleReload, isFullscreen, snapshot, full
     const handlePhotoCameraClick = async () => {
         try {
             setCaptureDisabled(true);
-            await photoCaptureReq({ enable_ai: true, chunk_size: 0, store_to_sd: false })
-            toast.success(i18n._('sys.device_tool.photo_capture_success'))
+            const res = await photoCaptureReq({ enable_ai: true, chunk_size: 0, store_to_sd: false })
+            if (res?.data?.ai_filtered) {
+                /* Dropped by the capture-settings AI filter: policy behavior,
+                 * tell the user instead of showing a misleading success. */
+                toast.warning(i18n._('sys.device_tool.photo_capture_filtered'))
+            } else {
+                toast.success(i18n._('sys.device_tool.photo_capture_success'))
+            }
         } catch (error) {
             console.error('handlePhotoCameraClick', error)
             throw error

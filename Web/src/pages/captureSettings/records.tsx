@@ -91,6 +91,9 @@ export default function CaptureRecords() {
    * unlike preview. */
   const [downloading, setDownloading] = useState<Set<string>>(new Set());
 
+  /* Batch download progress — sequential, one primary image per record. */
+  const [batchDl, setBatchDl] = useState<{ active: boolean; cur: number; total: number }>({ active: false, cur: 0, total: 0 });
+
   /* Time filter — input values (not yet applied) */
   const [filterFrom, setFilterFrom] = useState('');
   const [filterTo, setFilterTo] = useState('');
@@ -259,6 +262,32 @@ to: appliedTo,
     } catch { toast.error('Batch retry failed'); }
   };
 
+  /* Sequential download of the selected records' PRIMARY images (inference
+   * images stay per-record downloads). The device streams each file over its
+   * own HTTP response — no zip on the firmware side — so the browser saves
+   * them one by one (it may ask once for multi-download permission). */
+  const batchDownload = async () => {
+    if (allOnPage.length === 0 || batchDl.active) return;
+    const targets = [...allOnPage];
+    setBatchDl({ active: true, cur: 0, total: targets.length });
+    let ok = 0;
+    for (let i = 0; i < targets.length; i++) {
+      setBatchDl({ active: true, cur: i + 1, total: targets.length });
+      try {
+        // Sequential on purpose: the device streams one file per HTTP response.
+        // eslint-disable-next-line no-await-in-loop
+        await downloadImage(targets[i], 'p');
+        ok++;
+      } catch { /* downloadImage already toasts its own error */ }
+      if (i < targets.length - 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise(res => { setTimeout(res, 400); });
+      }
+    }
+    setBatchDl({ active: false, cur: targets.length, total: targets.length });
+    toast.success(i18n._('sys.capture_settings.batch_download_done').replace('{ok}', String(ok)).replace('{total}', String(targets.length)));
+  };
+
   const batchDelete = async () => {
     if (allOnPage.length === 0 || batchDeleting) return;
     // eslint-disable-next-line no-alert, no-restricted-globals
@@ -413,6 +442,11 @@ to: appliedTo,
               {i18n._('sys.capture_settings.retry_selected')}
             </Button>
           )}
+          <Button variant="outline" size="sm" onClick={batchDownload} disabled={batchDl.active}>
+            {batchDl.active
+              ? i18n._('sys.capture_settings.batch_download_progress').replace('{cur}', String(batchDl.cur)).replace('{total}', String(batchDl.total))
+              : i18n._('sys.capture_settings.batch_download')}
+          </Button>
           <Button variant="destructive" size="sm" onClick={batchDelete}>
             {i18n._('sys.capture_settings.delete_selected')}
           </Button>
@@ -486,12 +520,18 @@ to: appliedTo,
             <span className="text-xs text-gray-500 whitespace-nowrap ml-auto">{formatTimestamp(r.timestamp)}</span>
           </div>
 
-          {/* Row 1: trigger + size */}
-          <div className="flex gap-4 text-gray-600 text-xs ml-6">
+          {/* Row 1: trigger + resolution + size */}
+          <div className="flex flex-wrap gap-4 text-gray-600 text-xs ml-6">
             <span className="min-w-[60px]">
               <span className="text-gray-400">{i18n._('sys.capture_settings.col_trigger')}: </span>
               {r.trigger || '—'}
             </span>
+            {!!r.width && !!r.height && (
+              <span className="min-w-[60px]">
+                <span className="text-gray-400">{i18n._('sys.capture_settings.col_resolution')}: </span>
+                {r.width}x{r.height}
+              </span>
+            )}
             <span className="min-w-[60px]">
               <span className="text-gray-400">{i18n._('sys.capture_settings.col_size')}: </span>
               {formatSize(r.size)}

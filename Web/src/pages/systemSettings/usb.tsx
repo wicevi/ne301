@@ -79,19 +79,63 @@ export default function UsbSettings() {
         loadStatus();
     }, [loadStatus]);
 
+    /* After a USB change that can reset the connection carrying the request
+     * (lwIP drops TCP connections bound to the netif's old address - and in
+     * follow-AP mode the RNDIS netif holds a duplicate of the hotspot
+     * address, so ANY usb change can RST the client's own link, especially
+     * on dual-homed PCs wired via USB AND on the hotspot WiFi), poll the
+     * device's ACTUAL state with short deadlines and report that. */
+    const waitMs = (ms: number) => new Promise<void>((resolve) => {
+            setTimeout(resolve, ms);
+        });
+
+    /* One bounded (4s AbortController) status attempt, null on failure. */
+    const attemptStatusFetch = async (): Promise<UsbStatus | null> => {
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), 4000);
+        try {
+            const res = await getUsbStatusReq({ skipErrorToast: true, signal: ctl.signal });
+            const d = res.data ?? {};
+            return {
+                enabled: !!d.enabled,
+                running: !!d.running,
+                rndis_active: !!d.rndis_active,
+                via_usb: !!d.via_usb,
+                follow_ap: !!d.follow_ap,
+                ip: String(d.ip ?? ''),
+                netmask: String(d.netmask ?? ''),
+            };
+        } catch {
+            return null;
+        } finally {
+            clearTimeout(timer);
+        }
+    };
+
+    /* Sequential retries while the connection settles after the change. */
+    const fetchStatusQuick = async (): Promise<UsbStatus | null> => {
+        await waitMs(800);
+        const first = await attemptStatusFetch();
+        if (first) return first;
+        await waitMs(1500);
+        const second = await attemptStatusFetch();
+        if (second) return second;
+        await waitMs(1500);
+        return attemptStatusFetch();
+    };
+
     const applyToggle = async (checked: boolean) => {
         if (!status || switching) return;
         const prev = status;
         // optimistic: flip immediately, restore on failure
         setStatus({ ...status, enabled: checked });
         setSwitching(true);
-
-        // Disabling while THIS page rides the USB RNDIS link: the device
-        // tears the NIC down synchronously inside the HTTP handler, so the
-        // request may die mid-flight — a network error there IS the success
-        // confirmation (skip the global error toast for it).
         const viaUsb = status.via_usb;
-        const reqCfg = (!checked && viaUsb) ? { skipErrorToast: true } : undefined;
+
+        /* Outcomes are handled here: a disable can reset the request's own
+         * connection (see fetchStatusQuick) - we verify the device state
+         * instead of trusting the network error. */
+        const reqCfg = { skipErrorToast: true };
 
         try {
             const res = await setUsbConfigReq({
@@ -119,7 +163,18 @@ export default function UsbSettings() {
                 setStatus({ ...prev, enabled: false, running: false, rndis_active: false, via_usb: false });
                 toast.success(i18n._('sys.system_management.usb_disable_ok'));
             } else {
-                setStatus(prev);
+                /* Verify what the device actually did (the request may have
+                 * been RST'd mid-flight although the change was applied). */
+                const st = await fetchStatusQuick();
+                if (st && st.enabled === checked) {
+                    setStatus(checked ? { ...st, via_usb: st.via_usb } : { ...st, enabled: false, running: false, rndis_active: false, via_usb: false });
+                    toast.success(checked
+                        ? i18n._('sys.system_management.usb_enable_ok')
+                        : i18n._('sys.system_management.usb_disable_ok'));
+                } else {
+                    setStatus(prev);
+                    toast.error(i18n._('sys.system_management.usb_apply_failed'));
+                }
             }
         } finally {
             setSwitching(false);
@@ -147,7 +202,13 @@ export default function UsbSettings() {
             return;
         }
         const viaUsb = status.via_usb;
-        const reqCfg = viaUsb ? { skipErrorToast: true } : undefined;
+        /* Always suppress the global error toast: applying an address change
+         * can reset the very connection the request rides on (lwIP drops
+         * connections bound to the old address - the follow-AP RNDIS netif
+         * holds a duplicate of the hotspot address), so a network error here
+         * does not mean the change failed. Outcomes are reported below after
+         * verifying the device's actual state. */
+        const reqCfg = { skipErrorToast: true };
         setSaving(true);
         try {
             const res = await setUsbConfigReq({
@@ -168,6 +229,18 @@ export default function UsbSettings() {
             if (viaUsb) {
                 // the USB NIC bounced with the re-enumeration — treat as applied
                 toast.success(i18n._('sys.system_management.usb_apply_ok'));
+            } else {
+                /* Connection likely reset by the address change itself.
+                 * Re-connect and check what the device actually applied. */
+                const st = await fetchStatusQuick();
+                const applied = !!st && !!st.follow_ap === followAp
+                    && (followAp || (st.ip === ip && st.netmask === netmask));
+                if (applied && st) {
+                    applyStatus(st);
+                    toast.success(i18n._('sys.system_management.usb_apply_ok'));
+                } else {
+                    toast.error(i18n._('sys.system_management.usb_apply_failed'));
+                }
             }
         } finally {
             setSaving(false);
@@ -309,16 +382,20 @@ export default function UsbSettings() {
                         </div>
                         <p className="text-xs text-gray-400">{i18n._('sys.system_management.usb_ip_hint')}</p>
                         {ipError && <p className="text-xs text-red-500 self-end">{ipError}</p>}
-                        <Button
-                          variant="primary"
-                          className="self-end"
-                          disabled={saving || !addressDirty()}
-                          onClick={handleSaveClick}
-                        >
-                            {i18n._('sys.system_management.usb_apply')}
-                        </Button>
                     </div>
                 )}
+                {/* Apply stays visible in BOTH modes: switching back to
+                 * follow-ap is also a saveable change - hiding the button
+                 * with the custom fields made that state impossible to
+                 * apply (or recover from). */}
+                <Button
+                  variant="primary"
+                  className="self-end"
+                  disabled={saving || !addressDirty()}
+                  onClick={handleSaveClick}
+                >
+                    {i18n._('sys.system_management.usb_apply')}
+                </Button>
             </div>
             {confirmOffDialog()}
             {confirmIpDialog()}

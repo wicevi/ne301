@@ -217,9 +217,14 @@ export default class H264Player {
         const elapsedMs = nowMs - this.frameRateWindowStartMs;
         if (elapsedMs >= 1000 && this.frameRateWindowFrames >= 10) {
             const measuredFrameMs = elapsedMs / this.frameRateWindowFrames;
-            // Accept 15-60 fps and smooth changes so WebSocket burstiness does not
-            // immediately distort the media timeline.
-            const boundedFrameMs = Math.min(1000 / 15, Math.max(1000 / 60, measuredFrameMs));
+            // Accept 8-60 fps and smooth changes so WebSocket burstiness does not
+            // immediately distort the media timeline. The floor must sit below
+            // the true supply rate (1080p VENC delivers ~9-12fps): a 15fps floor
+            // forces the timeline to consume frames faster than they arrive,
+            // draining the live buffer into a rebuffer loop (periodic stutter).
+            // 8fps lets the timeline track the real cadence without holding
+            // extra buffer, so latency stays at the live target.
+            const boundedFrameMs = Math.min(1000 / 8, Math.max(1000 / 60, measuredFrameMs));
             this.estimatedPreviewFrameMs = this.estimatedPreviewFrameMs * 0.75 + boundedFrameMs * 0.25;
             this.frameRateWindowStartMs = nowMs;
             this.frameRateWindowFrames = 0;

@@ -9,15 +9,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/tooltip';
 // import Slider from '@/components/slider'; // ISP group (temporarily disabled)
 import { useSystemInfo } from '@/store/systemInfo';
 import deviceTool from '@/services/api/deviceTool';
-import H264Player from '@/lib/MSE/h264Player';
-import Loading from '@/components/loading';
 import hardwareManagement, {
   ISP_MODE_DAY,
   ISP_MODE_NIGHT,
   ISP_MODE_AUTO,
   ISP_MODE_CUSTOM,
+  type DayNightConfig,
 } from '@/services/api/hardware-management';
-import DayNightAutoConfig from './day-night-auto';
+import DayNightLogicConfig from './day-night-auto';
 import SvgIcon from '@/components/svg-icon';
 import { Input } from '@/components/ui/input';
 import {
@@ -35,19 +34,9 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { getWebSocketUrl, downloadFile } from '@/utils';
+import Player from '@/pages/deviceTool/player';
+import type H264Player from '@/lib/MSE/h264Player';
 import { toast } from 'sonner';
-
-/* Resolve true once the condition holds, or false after the timeout.
- * Interval-based so the (intentional) polling stays eslint-clean. */
-const waitFor = (cond: () => boolean, timeoutMs: number): Promise<boolean> => new Promise<boolean>(resolve => {
-  const deadline = Date.now() + timeoutMs;
-  const timer = setInterval(() => {
-    if (cond() || Date.now() >= deadline) {
-      clearInterval(timer);
-      resolve(cond());
-    }
-  }, 50);
-});
 
 export default function Graphics() {
   const { i18n } = useLingui();
@@ -58,8 +47,10 @@ export default function Graphics() {
     getIspProfileExportReq,
     postIspProfileImportReq,
     getDayNightStatusReq,
+    getDayNightConfigReq,
+    setDayNightConfigReq,
   } = hardwareManagement;
-  const { toggleAiReq, startVideoStreamReq, stopVideoStreamReq } = deviceTool;
+  const { toggleAiReq } = deviceTool;
   const [connectionStatus, setConnectionStatus] = useState('');
   const [brightness, setBrightness] = useState(0);
   const [contrast, setContrast] = useState(0);
@@ -67,12 +58,17 @@ export default function Graphics() {
   const [flipVertical, setFlipVertical] = useState(false);
   const [aec, setAec] = useState(0);
   const [cameraSectionOpen, setCameraSectionOpen] = useState(true);
-  /* IR board (day/night-capable): ISP selector shows day/night/auto and the
-   * AUTO mode renders the day/night auto-switch config. Standard board keeps
-   * outdoor/indoor/custom (main behavior). */
+  /* IR board (day/night-capable): the ISP selector becomes the day/night
+   * SWITCH LOGIC selector (always day / always night / custom time window /
+   * adaptive by ambient light). Standard board keeps the ISP mode selector
+   * (outdoor/indoor/custom). */
   const [isIrBoard, setIsIrBoard] = useState(false);
   const [ispMode, setIspMode] = useState(0);
+  /* IR-board switch logic, derived from the day/night config:
+   * day / night / schedule (auto+time) / adaptive (auto+light) */
+  const [dnLogic, setDnLogic] = useState<'day' | 'night' | 'schedule' | 'adaptive'>('day');
   const ispImportInputRef = useRef<HTMLInputElement>(null);
+  const previewPlayerRef = useRef<H264Player | null>(null);
   const [luxRefDialogOpen, setLuxRefDialogOpen] = useState(false);
   const [luxRefForm, setLuxRefForm] = useState({
     calibFactor: 0,
@@ -96,10 +92,7 @@ export default function Graphics() {
   // const [ispEstimatedLux, setIspEstimatedLux] = useState<number | null>(null);
   // const [ispManualSensorGain, setIspManualSensorGain] = useState(0);
   // const [ispManualExposureTime, setIspManualExposureTime] = useState(0);
-  const playerRef = useRef<HTMLVideoElement>(null);
-  const [playerLoading, setPlayerLoading] = useState(false);
   const [loading, setLoading] = useState(false);
-  let playerRender: H264Player | null = null;
   // ----------Skeleton screen
   const skeletonScreen = () => (
     <div className="flex flex-col gap-2 w-full">
@@ -131,39 +124,14 @@ export default function Graphics() {
   // auto-reconnect keep running (and keep replacing other connections) until
   // the tab is closed. `cancelled` is re-checked after every await for the
   // same reason.
+  /* AI off while tuning image parameters (the page's purpose); the shared
+   * Player owns the stream start/stop and the MSE lifecycle - the previous
+   * hand-rolled H264Player instance here decoded in periodic bursts
+   * (buffer dropped to ~0.2 s, playback stalled ~200 ms every ~2 s) while
+   * the same browser played the device-tool Player smoothly. */
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      initData();
-      await toggleAiReq({ ai_enabled: false });
-      try {
-        setPlayerLoading(true);
-        await startVideoStreamReq();
-        /* The <video> element mounts only after the config load flips
-         * `loading` off. When the camera is already running (e.g. navigating
-         * here from the preview page) startVideoStreamReq resolves almost
-         * instantly and can beat it — wait for the element instead of
-         * bailing, otherwise no player is ever created and the preview
-         * stays black forever. */
-        const mounted = await waitFor(() => !!playerRef.current, 5000);
-        if (cancelled || !mounted || !playerRef.current) return;
-        const video = playerRef.current;
-        const player = new H264Player(() => {});
-        playerRender = player;
-        player.initPlayer(video);
-        player.start(getWebSocketUrl());
-      } catch (error) {
-        console.error(error);
-      } finally {
-        setPlayerLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      playerRender?.destroy();
-      playerRender = null;
-      stopVideoStreamReq();
-    };
+    initData();
+    toggleAiReq({ ai_enabled: false }).catch(() => { /* fire-and-forget */ });
   }, []);
 
   // Connection label only - cheap, never touches the stream.
@@ -186,9 +154,21 @@ export default function Graphics() {
       /* Board variant probe: the day/night status reports configured=true only
        * on IR boards (the endpoint is readable on all boards). Fire-and-forget
        * on purpose: awaiting it would extend `loading`, which gates the
-       * <video> element the stream effect needs (see below). */
+       * <video> element the stream effect needs (see below).
+       * On IR boards also derive the current switch logic from the config
+       * (mode + auto_source; isp_stats normalizes to "adaptive" in this UI). */
       getDayNightStatusReq()
-        .then(st => setIsIrBoard(Boolean(st?.data?.configured)))
+        .then(st => {
+          const ir = Boolean(st?.data?.configured);
+          setIsIrBoard(ir);
+          if (!ir) return;
+          return getDayNightConfigReq().then(cfg => {
+            const d = cfg.data;
+            if (d?.mode === 'night') setDnLogic('night');
+            else if (d?.mode === 'auto') setDnLogic(d.auto_source === 'time' ? 'schedule' : 'adaptive');
+            else setDnLogic('day');
+          });
+        })
         .catch(() => setIsIrBoard(false));
       // TODO: when ISP APIs are wired, hydrate ISP exposure state from /api/v1/isp/aec, /aec/manual, /sensor_delay, /statistics, etc.
     } catch (error) {
@@ -291,20 +271,12 @@ export default function Graphics() {
           {connectionStatus === 'connected' && (
             <>
               <Separator />
-              <div className="flex justify-between relative bg-black">
-                <video
-                  ref={playerRef as React.Ref<HTMLVideoElement>}
-                  id="player"
-                  className="w-full aspect-video"
-                  muted
-                  playsInline
-                  disableRemotePlayback
+              <div className="relative bg-black">
+                <Player
+                  videoUrl={getWebSocketUrl()}
+                  videoRendererInstance={previewPlayerRef}
+                  showToolbar={false}
                 />
-                {playerLoading && (
-                  <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-                    <Loading placeholder="Loading..." />
-                  </div>
-                )}
               </div>
               {loading ? (
                 skeletonScreen()
@@ -360,7 +332,13 @@ export default function Graphics() {
                         <Separator />
                         <div className="flex justify-between gap-4 items-center">
                           <div className="flex min-w-0  items-center gap-2 shrink-0">
-                            <Label className="shrink-0">{i18n._('sys.hardware_management.isp_mode')}</Label>
+                            <Label className="shrink-0">
+                              {i18n._(
+                                isIrBoard
+                                  ? 'sys.hardware_management.dn_switch_logic'
+                                  : 'sys.hardware_management.isp_mode'
+                              )}
+                            </Label>
                             <Tooltip mbEnhance>
                               <TooltipTrigger>
                                 <div className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-gray-500">
@@ -375,7 +353,7 @@ export default function Graphics() {
                                   <p>
                                     {i18n._(
                                       isIrBoard
-                                        ? 'sys.hardware_management.isp_mode_hint_ir'
+                                        ? 'sys.hardware_management.dn_switch_logic_note'
                                         : 'sys.hardware_management.isp_mode_hint'
                                     )}
                                   </p>
@@ -383,6 +361,55 @@ export default function Graphics() {
                               </TooltipContent>
                             </Tooltip>
                           </div>
+                          {isIrBoard ? (
+                            <Select
+                              value={dnLogic}
+                              onValueChange={async v => {
+                                const next = v as 'day' | 'night' | 'schedule' | 'adaptive';
+                                /* The day/night API applies the mode end-to-end
+                                 * (isp_mode + IR-CUT + IR light + IQ hot-swap)
+                                 * and persists it — no separate image-config
+                                 * post needed here. */
+                                const payload: Partial<DayNightConfig> =                                  next === 'day' ? { mode: 'day' }
+                                  : next === 'night' ? { mode: 'night' }
+                                  : next === 'schedule'
+                                    ? { mode: 'auto', auto_source: 'time' }
+                                    : { mode: 'auto', auto_source: 'light_sensor' };
+                                try {
+                                  await setDayNightConfigReq(payload);
+                                  setDnLogic(next);
+                                  setIspMode(
+                                    next === 'day' ? ISP_MODE_DAY
+                                      : next === 'night' ? ISP_MODE_NIGHT
+                                        : ISP_MODE_AUTO
+                                  );
+                                  toast.success(
+                                    i18n._('sys.hardware_management.isp_mode_applied_toast')
+                                  );
+                                } catch (error) {
+                                  console.error(error);
+                                }
+                              }}
+                            >
+                              <SelectTrigger className="border-0 shadow-none focus-visible:ring-0 w-fit min-w-0">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="day">
+                                  {i18n._('sys.hardware_management.dn_logic_day')}
+                                </SelectItem>
+                                <SelectItem value="night">
+                                  {i18n._('sys.hardware_management.dn_logic_night')}
+                                </SelectItem>
+                                <SelectItem value="schedule">
+                                  {i18n._('sys.hardware_management.dn_logic_schedule')}
+                                </SelectItem>
+                                <SelectItem value="adaptive">
+                                  {i18n._('sys.hardware_management.dn_logic_adaptive')}
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          ) : (
                           <Select
                             value={String(ispMode)}
                             onValueChange={async v => {
@@ -406,45 +433,26 @@ export default function Graphics() {
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              {isIrBoard ? (
-                                <>
-                                  <SelectItem value={String(ISP_MODE_DAY)}>
-                                    {i18n._(
-                                      'sys.hardware_management.isp_mode_day'
-                                    )}
-                                  </SelectItem>
-                                  <SelectItem value={String(ISP_MODE_NIGHT)}>
-                                    {i18n._(
-                                      'sys.hardware_management.isp_mode_night'
-                                    )}
-                                  </SelectItem>
-                                  <SelectItem value={String(ISP_MODE_AUTO)}>
-                                    {i18n._(
-                                      'sys.hardware_management.isp_mode_auto'
-                                    )}
-                                  </SelectItem>
-                                </>
-                              ) : (
-                                <>
-                                  <SelectItem value="0">
-                                    {i18n._(
-                                      'sys.hardware_management.isp_mode_outdoor'
-                                    )}
-                                  </SelectItem>
-                                  <SelectItem value="1">
-                                    {i18n._(
-                                      'sys.hardware_management.isp_mode_indoor'
-                                    )}
-                                  </SelectItem>
-                                  <SelectItem value={String(ISP_MODE_CUSTOM)}>
-                                    {i18n._(
-                                      'sys.hardware_management.isp_mode_custom'
-                                    )}
-                                  </SelectItem>
-                                </>
-                              )}
+                                  <>
+                                    <SelectItem value="0">
+                                      {i18n._(
+                                        'sys.hardware_management.isp_mode_outdoor'
+                                      )}
+                                    </SelectItem>
+                                    <SelectItem value="1">
+                                      {i18n._(
+                                        'sys.hardware_management.isp_mode_indoor'
+                                      )}
+                                    </SelectItem>
+                                    <SelectItem value={String(ISP_MODE_CUSTOM)}>
+                                      {i18n._(
+                                        'sys.hardware_management.isp_mode_custom'
+                                      )}
+                                    </SelectItem>
+                                  </>
                             </SelectContent>
                           </Select>
+                          )}
                         </div>
                         {!isIrBoard && ispMode === ISP_MODE_CUSTOM && (
                           <>
@@ -523,11 +531,8 @@ export default function Graphics() {
                             </div>
                           </>
                         )}
-                        {isIrBoard && ispMode === ISP_MODE_AUTO && (
-                          <>
-                            <Separator />
-                            <DayNightAutoConfig />
-                          </>
+                        {isIrBoard && (dnLogic === 'schedule' || dnLogic === 'adaptive') && (
+                          <DayNightLogicConfig key={dnLogic} logic={dnLogic} />
                         )}
                       </div>
                     )}

@@ -142,14 +142,14 @@ const systemSettings = {
     }) => request.post('/api/v1/system/network/halow/ip', data),
 
     // usb (system settings: master switch + RNDIS addressing for the USB device)
-    getUsbStatusReq: () => request.get('/api/v1/device/usb'),
+    getUsbStatusReq: (config?: { skipErrorToast?: boolean; signal?: AbortSignal }) => request.get('/api/v1/device/usb', config),
     /** config carries optional axios options; USB-link requests pass
      *  skipErrorToast — a network error there is often the expected outcome
      *  (the NIC bounces while the request is in flight). */
     setUsbConfigReq: (data: {
         enabled: boolean;
         follow_ap?: boolean;
-        ip_address?: string;
+        ip_address?: boolean | string;
         netmask?: string;
     }, config?: { skipErrorToast?: boolean }) => request.post('/api/v1/device/usb/config', data, config),
 }
