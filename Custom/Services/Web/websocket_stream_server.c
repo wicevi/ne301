@@ -713,7 +713,7 @@ static void ws_frame_fifo_drain(void)
              * MG_ERROR at frame rate. Drop frames for a stalled client
              * instead of buffering past one max frame. */
             if (conn->send.len >= WS_SEND_BUF_CAP) {
-                LOG_SVC_WARN("WS send-buffer cap hit (%lu bytes), dropping frame for client %u",
+                LOG_SVC_DEBUG("WS send-buffer cap hit (%lu bytes), dropping frame for client %u",
                              (unsigned long) conn->send.len,
                              client->client_id);
                 continue;
@@ -1262,13 +1262,45 @@ static aicam_result_t ws_stream_on_hub_frame(const video_hub_frame_t *frame, voi
 static void ws_stream_on_hub_sps_pps(const video_hub_sps_pps_t *sps_pps, void *user_data)
 {
     (void)user_data;
-    
+
     if (!sps_pps || !sps_pps->sps_data || !sps_pps->pps_data) {
         return;
     }
-    
+
     LOG_SVC_INFO("WebSocket: SPS/PPS received (SPS=%u, PPS=%u bytes)",
                  sps_pps->sps_size, sps_pps->pps_size);
+
+    /* A fresh SPS/PPS means the encoder session restarted, possibly with a
+     * NEW resolution. Already-connected MSE players are initialized against
+     * the old parameter set and cannot switch resolution mid-stream: the
+     * appended samples mismatch the SourceBuffer config, the decode stalls
+     * and the picture freezes on the last old-resolution frame (e.g. stuck
+     * on a 320x320 PIPE2 image after the user switched to 720p). Close the
+     * client connections: the front-end worker auto-reconnects and
+     * re-initializes from the fresh join-sync frame. */
+    osMutexAcquire(g_websocket_server.mutex, osWaitForever);
+    /* Drop in-flight frames from the OLD session still sitting in the fifo:
+     * a late joiner assembled from an old-session keyframe plus the (new)
+     * cached parameter set - or vice versa - produces a mixed join frame the
+     * MSE cannot decode, freezing the picture after a resolution switch. */
+    while (s_ws_fifo_count > 0) {
+        if (s_ws_fifo_meta[s_ws_fifo_tail].is_heap) {
+            hal_mem_free(s_ws_fifo_meta[s_ws_fifo_tail].data);
+        }
+        s_ws_fifo_tail = (s_ws_fifo_tail + 1) % WS_FIFO_SLOTS;
+        s_ws_fifo_count--;
+    }
+    s_ws_fifo_skip_until_key = AICAM_TRUE;
+    for (uint32_t i = 0; i < g_websocket_server.config.max_clients; i++) {
+        websocket_client_t *client = &g_websocket_server.clients[i];
+        if (client->is_active && client->conn && !client->conn->is_closing) {
+            client->sps_synced = AICAM_FALSE;
+            ws_stream_send_close(client->conn, 4001, "stream-reset");
+            WS_LOG("[WS] sps-reset close id=%lu client=%u (encoder session changed)",
+                   (unsigned long) client->conn->id, client->client_id);
+        }
+    }
+    osMutexRelease(g_websocket_server.mutex);
 }
 
 /**

@@ -707,6 +707,9 @@ static aicam_result_t work_mode_triggers_get_handler(http_handler_context_t* ctx
     cJSON_AddBoolToObject(pir_trigger, "enable", config.pir_trigger.enable);
     //cJSON_AddNumberToObject(pir_trigger, "pin_number", config.pir_trigger.pin_number);
     cJSON_AddStringToObject(pir_trigger, "trigger_type", get_trigger_type_string(config.pir_trigger.trigger_type));
+    // Device type on the PIR wake input: "pir" (conditioning IC) or "io" (plain signal)
+    cJSON_AddStringToObject(pir_trigger, "device_type",
+        config.pir_trigger.device_type == AICAM_PIR_DEVICE_IO ? "io" : "pir");
     // PIR sensor configuration parameters
     cJSON_AddNumberToObject(pir_trigger, "sensitivity_level", config.pir_trigger.sensitivity_level);
     cJSON_AddNumberToObject(pir_trigger, "ignore_time_s", config.pir_trigger.ignore_time_s);
@@ -756,6 +759,135 @@ static aicam_result_t work_mode_triggers_get_handler(http_handler_context_t* ctx
     return AICAM_OK;
 }
 
+/* Parse the "timer_trigger" JSON object onto cfg (absent fields keep the
+ * stored value). Shared by the legacy combined triggers endpoint and the
+ * dedicated timer-trigger endpoint. */
+static void parse_timer_trigger_json(cJSON* timer_trigger, work_mode_config_t* cfg)
+{
+    cJSON* enable_item = cJSON_GetObjectItem(timer_trigger, "enable");
+    cfg->timer_trigger.enable = (enable_item && cJSON_IsBool(enable_item)) ? cJSON_IsTrue(enable_item) : AICAM_FALSE;
+    LOG_SVC_INFO("Timer trigger enable: %d", cfg->timer_trigger.enable);
+
+    cJSON* capture_mode_item = cJSON_GetObjectItem(timer_trigger, "capture_mode");
+    if (capture_mode_item && cJSON_IsString(capture_mode_item)) {
+        cfg->timer_trigger.capture_mode = parse_capture_mode(cJSON_GetStringValue(capture_mode_item));
+    }
+
+    cJSON* interval_item = cJSON_GetObjectItem(timer_trigger, "interval_sec");
+    if (interval_item && cJSON_IsNumber(interval_item)) {
+        cfg->timer_trigger.interval_sec = (uint32_t)cJSON_GetNumberValue(interval_item);
+    }
+
+    cJSON* time_node_count_item = cJSON_GetObjectItem(timer_trigger, "time_node_count");
+    if (time_node_count_item && cJSON_IsNumber(time_node_count_item)) {
+        cfg->timer_trigger.time_node_count = (uint32_t)cJSON_GetNumberValue(time_node_count_item);
+    }
+
+    // Parse time nodes array
+    cJSON* time_nodes = cJSON_GetObjectItem(timer_trigger, "time_node");
+    if (time_nodes && cJSON_IsArray(time_nodes)) {
+        int node_count = cJSON_GetArraySize(time_nodes);
+        if (node_count > 10) node_count = 10; // Safety check
+        cfg->timer_trigger.time_node_count = node_count;
+
+        for (int i = 0; i < node_count; i++) {
+            cJSON* node = cJSON_GetArrayItem(time_nodes, i);
+            if (node && cJSON_IsString(node)) {
+                cfg->timer_trigger.time_node[i] = parse_time_node(cJSON_GetStringValue(node));
+            }
+        }
+    }
+
+    // Parse weekdays array
+    cJSON* weekdays = cJSON_GetObjectItem(timer_trigger, "weekdays");
+    if (weekdays && cJSON_IsArray(weekdays)) {
+        int weekday_count = cJSON_GetArraySize(weekdays);
+        if (weekday_count > 10) weekday_count = 10; // Safety check
+
+        for (int i = 0; i < weekday_count; i++) {
+            cJSON* weekday = cJSON_GetArrayItem(weekdays, i);
+            if (weekday && cJSON_IsNumber(weekday)) {
+                uint8_t weekday_value = (uint8_t)cJSON_GetNumberValue(weekday);
+                if (weekday_value <= 7) { // 0-7 valid range
+                    cfg->timer_trigger.weekdays[i] = weekday_value;
+                } else {
+                    cfg->timer_trigger.weekdays[i] = 0; // Default to all days
+                }
+            } else {
+                cfg->timer_trigger.weekdays[i] = 0; // Default to all days
+            }
+        }
+    }
+
+    // Parse interval_mode
+    cJSON* interval_mode_item = cJSON_GetObjectItem(timer_trigger, "interval_mode");
+    if (interval_mode_item && cJSON_IsString(interval_mode_item)) {
+        const char* mode_str = cJSON_GetStringValue(interval_mode_item);
+        if (strcmp(mode_str, "scheduled") == 0) {
+            cfg->timer_trigger.interval_mode = AICAM_TIMER_INTERVAL_MODE_SCHEDULED;
+        } else {
+            cfg->timer_trigger.interval_mode = AICAM_TIMER_INTERVAL_MODE_NORMAL;
+        }
+    } else {
+        cfg->timer_trigger.interval_mode = AICAM_TIMER_INTERVAL_MODE_NORMAL;
+    }
+
+    // start_time: absent = keep stored
+    cJSON* start_time_item = cJSON_GetObjectItem(timer_trigger, "start_time");
+    if (start_time_item && cJSON_IsString(start_time_item)) {
+        cfg->timer_trigger.start_time = parse_time_node(cJSON_GetStringValue(start_time_item));
+    } else if (start_time_item && cJSON_IsNumber(start_time_item)) {
+        cfg->timer_trigger.start_time = (uint32_t)cJSON_GetNumberValue(start_time_item);
+    }
+
+    // end_time: absent = keep stored
+    cJSON* end_time_item = cJSON_GetObjectItem(timer_trigger, "end_time");
+    if (end_time_item && cJSON_IsString(end_time_item)) {
+        cfg->timer_trigger.end_time = parse_time_node(cJSON_GetStringValue(end_time_item));
+    } else if (end_time_item && cJSON_IsNumber(end_time_item)) {
+        cfg->timer_trigger.end_time = (uint32_t)cJSON_GetNumberValue(end_time_item);
+    }
+
+    // anchor: absent = keep stored; same-minute echo keeps the stored value
+    cJSON* anchor_item = cJSON_GetObjectItem(timer_trigger, "anchor");
+    if (anchor_item && cJSON_IsString(anchor_item)) {
+        uint32_t parsed = parse_time_node(cJSON_GetStringValue(anchor_item));
+        if (parsed / 60u != cfg->timer_trigger.anchor_time / 60u) {
+            cfg->timer_trigger.anchor_time = parsed;
+        }
+    } else if (anchor_item && cJSON_IsNumber(anchor_item)) {
+        cfg->timer_trigger.anchor_time = (uint32_t)cJSON_GetNumberValue(anchor_item);
+    }
+}
+
+/* Cross-field validation for the timer lattice. Returns an error message to
+ * reject with, or NULL when valid. */
+static const char* validate_timer_trigger_json(const work_mode_config_t* cfg)
+{
+    if (!(cfg->timer_trigger.enable &&
+          cfg->timer_trigger.capture_mode == AICAM_TIMER_CAPTURE_MODE_INTERVAL)) {
+        return NULL;
+    }
+    if (cfg->timer_trigger.interval_sec == 0 ||
+        cfg->timer_trigger.interval_sec >= 86400) {
+        return "Invalid interval_sec: must be 1..86399 (less than 24h)";
+    }
+    if (cfg->timer_trigger.interval_mode == AICAM_TIMER_INTERVAL_MODE_SCHEDULED) {
+        uint32_t start = cfg->timer_trigger.start_time;
+        uint32_t end = cfg->timer_trigger.end_time;
+        if (end == start) {
+            return "Invalid end_time: must differ from start_time "
+                   "(a full-day window is any start T with end T-1min, "
+                   "e.g. 00:00-23:59 or 01:00-00:59)";
+        }
+        uint32_t window = (end > start ? end - start : end + 86400u - start) + 1u;
+        if (window <= cfg->timer_trigger.interval_sec) {
+            return "Invalid schedule: daily window must be longer than interval_sec";
+        }
+    }
+    return NULL;
+}
+
 /**
  * @brief Configure image mode triggers handler
  */
@@ -800,156 +932,14 @@ static aicam_result_t work_mode_triggers_set_handler(http_handler_context_t* ctx
     }
     
     // Parse configuration from request
-    // Parse timer trigger settings
     cJSON* timer_trigger = cJSON_GetObjectItem(request, "timer_trigger");
     if (timer_trigger && cJSON_IsObject(timer_trigger)) {
-        cJSON* enable_item = cJSON_GetObjectItem(timer_trigger, "enable");
-        config.timer_trigger.enable = (enable_item && cJSON_IsBool(enable_item)) ? cJSON_IsTrue(enable_item) : AICAM_FALSE;
-        LOG_SVC_INFO("Timer trigger enable: %d", config.timer_trigger.enable);
-        
-        cJSON* capture_mode_item = cJSON_GetObjectItem(timer_trigger, "capture_mode");
-        if (capture_mode_item && cJSON_IsString(capture_mode_item)) {
-            config.timer_trigger.capture_mode = parse_capture_mode(cJSON_GetStringValue(capture_mode_item));
-        }
-        
-        cJSON* interval_item = cJSON_GetObjectItem(timer_trigger, "interval_sec");
-        if (interval_item && cJSON_IsNumber(interval_item)) {
-            config.timer_trigger.interval_sec = (uint32_t)cJSON_GetNumberValue(interval_item);
-        }
-        
-        cJSON* time_node_count_item = cJSON_GetObjectItem(timer_trigger, "time_node_count");
-        if (time_node_count_item && cJSON_IsNumber(time_node_count_item)) {
-            config.timer_trigger.time_node_count = (uint32_t)cJSON_GetNumberValue(time_node_count_item);
-        }
-        
-        // Parse time nodes array
-        cJSON* time_nodes = cJSON_GetObjectItem(timer_trigger, "time_node");
-        if (time_nodes && cJSON_IsArray(time_nodes)) {
-            int node_count = cJSON_GetArraySize(time_nodes);
-            if (node_count > 10) node_count = 10; // Safety check
-            config.timer_trigger.time_node_count = node_count;
-            
-            for (int i = 0; i < node_count; i++) {
-                cJSON* node = cJSON_GetArrayItem(time_nodes, i);
-                if (node && cJSON_IsString(node)) {
-                    config.timer_trigger.time_node[i] = parse_time_node(cJSON_GetStringValue(node));
-                }
-            }
-        }
-        
-        // Parse weekdays array
-        cJSON* weekdays = cJSON_GetObjectItem(timer_trigger, "weekdays");
-        if (weekdays && cJSON_IsArray(weekdays)) {
-            int weekday_count = cJSON_GetArraySize(weekdays);
-            if (weekday_count > 10) weekday_count = 10; // Safety check
-            
-            for (int i = 0; i < weekday_count; i++) {
-                cJSON* weekday = cJSON_GetArrayItem(weekdays, i);
-                if (weekday && cJSON_IsNumber(weekday)) {
-                    uint8_t weekday_value = (uint8_t)cJSON_GetNumberValue(weekday);
-                    if (weekday_value <= 7) { // 0-7 valid range
-                        config.timer_trigger.weekdays[i] = weekday_value;
-                    } else {
-                        config.timer_trigger.weekdays[i] = 0; // Default to all days
-                    }
-                } else {
-                    config.timer_trigger.weekdays[i] = 0; // Default to all days
-                }
-            }
-        }
-
-        // Parse interval_mode (new field)
-        cJSON* interval_mode_item = cJSON_GetObjectItem(timer_trigger, "interval_mode");
-        if (interval_mode_item && cJSON_IsString(interval_mode_item)) {
-            const char* mode_str = cJSON_GetStringValue(interval_mode_item);
-            if (strcmp(mode_str, "scheduled") == 0) {
-                config.timer_trigger.interval_mode = AICAM_TIMER_INTERVAL_MODE_SCHEDULED;
-            } else {
-                config.timer_trigger.interval_mode = AICAM_TIMER_INTERVAL_MODE_NORMAL;
-            }
-        } else {
-            config.timer_trigger.interval_mode = AICAM_TIMER_INTERVAL_MODE_NORMAL;
-        }
-
-        // Parse start_time ("HH:MM" or seconds-of-day; absent = keep stored,
-        // same as end_time/anchor). start/end are the SCHEDULED-mode window;
-        // normal mode runs on anchor_time and must not clobber them.
-        cJSON* start_time_item = cJSON_GetObjectItem(timer_trigger, "start_time");
-        if (start_time_item && cJSON_IsString(start_time_item)) {
-            config.timer_trigger.start_time = parse_time_node(cJSON_GetStringValue(start_time_item));
-        } else if (start_time_item && cJSON_IsNumber(start_time_item)) {
-            config.timer_trigger.start_time = (uint32_t)cJSON_GetNumberValue(start_time_item);
-        }
-
-        // Parse end_time ("HH:MM" or seconds-of-day; absent = keep stored).
-        // SCHEDULED-mode daily window end, CLOSED [start_time, end_time]:
-        // earlier than start_time wraps past midnight (00:00 with start >
-        // 00:00 = ends at midnight); equal to start_time is rejected below
-        // (it is the normal-mode full-day lattice's internal representation).
-        cJSON* end_time_item = cJSON_GetObjectItem(timer_trigger, "end_time");
-        if (end_time_item && cJSON_IsString(end_time_item)) {
-            config.timer_trigger.end_time = parse_time_node(cJSON_GetStringValue(end_time_item));
-        } else if (end_time_item && cJSON_IsNumber(end_time_item)) {
-            config.timer_trigger.end_time = (uint32_t)cJSON_GetNumberValue(end_time_item);
-        }
-
-        // Parse anchor (normal interval mode grid origin, "HH:MM" or
-        // seconds-of-day 1..86399). Absent = keep the stored value (the
-        // config copy above already holds it; the apply path stamps the
-        // current time-of-day if it has never been set). The anchor is a
-        // time-of-day, not a date: the lattice restarts at it every day.
-        cJSON* anchor_item = cJSON_GetObjectItem(timer_trigger, "anchor");
-        if (anchor_item && cJSON_IsString(anchor_item)) {
-            uint32_t parsed = parse_time_node(cJSON_GetStringValue(anchor_item));
-            /* "HH:MM" is minute-granular while the stored anchor may carry
-             * seconds (stamped at apply time): when the client echoes the
-             * same minute back, keep the stored value so a no-touch save
-             * doesn't shift the grid by up to 59s. Only an explicit minute
-             * change re-bases the anchor. */
-            if (parsed / 60u != config.timer_trigger.anchor_time / 60u) {
-                config.timer_trigger.anchor_time = parsed;
-            }
-        } else if (anchor_item && cJSON_IsNumber(anchor_item)) {
-            config.timer_trigger.anchor_time = (uint32_t)cJSON_GetNumberValue(anchor_item);
-        }
+        parse_timer_trigger_json(timer_trigger, &config);
     }
-
-    /* Cross-field validation once all timer_trigger fields are parsed.
-     * Both interval modes are daily lattices, so the interval must be a
-     * strict sub-day step, SCHEDULED's window must not be degenerate and
-     * must be longer than the interval (else no node ever fits inside). */
-    if (config.timer_trigger.enable &&
-        config.timer_trigger.capture_mode == AICAM_TIMER_CAPTURE_MODE_INTERVAL) {
-        if (config.timer_trigger.interval_sec == 0 ||
-            config.timer_trigger.interval_sec >= 86400) {
-            cJSON_Delete(request);
-            return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
-                "Invalid interval_sec: must be 1..86399 (less than 24h)");
-        }
-        if (config.timer_trigger.interval_mode == AICAM_TIMER_INTERVAL_MODE_SCHEDULED) {
-            uint32_t start = config.timer_trigger.start_time;
-            uint32_t end = config.timer_trigger.end_time;
-            /* Equal start/end is the normal-mode full-day lattice's internal
-             * representation — scheduled mode rejects it so the two modes
-             * stay disjoint; a full-day schedule is 00:00-23:59 (closed). */
-            if (end == start) {
-                cJSON_Delete(request);
-                return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
-                    "Invalid end_time: must differ from start_time "
-                    "(a full-day window is any start T with end T-1min, "
-                    "e.g. 00:00-23:59 or 01:00-00:59)");
-            }
-            /* Inclusive window: the window is CLOSED (a node landing exactly
-             * on end_time fires — span + 1). The +1 makes "window must be
-             * longer than the interval" mean: at least two nodes fit
-             * (start and end). */
-            uint32_t window = (end > start ? end - start : end + 86400u - start) + 1u;
-            if (window <= config.timer_trigger.interval_sec) {
-                cJSON_Delete(request);
-                return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
-                    "Invalid schedule: daily window must be longer than interval_sec");
-            }
-        }
+    const char* timer_error = validate_timer_trigger_json(&config);
+    if (timer_error != NULL) {
+        cJSON_Delete(request);
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, timer_error);
     }
 
     // Parse PIR trigger settings
@@ -971,7 +961,26 @@ static aicam_result_t work_mode_triggers_set_handler(http_handler_context_t* ctx
                 }
             }
         }
-        
+
+        // Parse device type: "pir" (conditioning IC) / "io" (plain signal); 0/1 accepted
+        cJSON* device_type_item = cJSON_GetObjectItem(pir_trigger, "device_type");
+        if (device_type_item) {
+            if (cJSON_IsString(device_type_item)) {
+                const char *dt = cJSON_GetStringValue(device_type_item);
+                if (strcmp(dt, "io") == 0) {
+                    config.pir_trigger.device_type = AICAM_PIR_DEVICE_IO;
+                } else if (strcmp(dt, "pir") == 0) {
+                    config.pir_trigger.device_type = AICAM_PIR_DEVICE_PIR;
+                }
+                // Unknown strings keep the current value
+            } else if (cJSON_IsNumber(device_type_item)) {
+                double dt = cJSON_GetNumberValue(device_type_item);
+                if (dt == (double)AICAM_PIR_DEVICE_PIR || dt == (double)AICAM_PIR_DEVICE_IO) {
+                    config.pir_trigger.device_type = (aicam_pir_device_type_t)dt;
+                }
+            }
+        }
+
         // Parse PIR sensor configuration parameters.
         // Validate on the raw number BEFORE the uint8_t cast: casting first
         // wraps out-of-range values (e.g. 300 -> 44) into the legal window
@@ -1089,14 +1098,140 @@ static aicam_result_t work_mode_triggers_set_handler(http_handler_context_t* ctx
                  2.0 + 2.0 * config.pir_trigger.window_time_s);
  
     // Update configuration
-    result = system_controller_set_work_config(controller, &config);
-    
+    aicam_bool_t pir_apply_failed = AICAM_FALSE;
+    result = system_controller_set_work_config(controller, &config, &pir_apply_failed, AICAM_FALSE);
+
     if (result == AICAM_OK) {
+        /* Surface a PIR chip-level write failure to the frontend (config was
+         * saved and will be retried at sleep/boot, so this stays a success
+         * envelope with a warning flag rather than an error). */
+        if (pir_apply_failed) {
+            /* _static: the JSON lives on THIS stack frame; the dispatcher
+             * frees non-borrowed response data after sending, and freeing a
+             * stack pointer corrupts the heap (random watchdog resets). */
+            api_response_success_static(ctx, "{\"pir_apply_failed\":true}",
+                                        "Config saved, but PIR sensor write failed - will retry at sleep/boot");
+            return AICAM_OK;
+        }
         api_response_success(ctx, NULL, "Image mode triggers configured successfully");
     } else {
         api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to configure image mode triggers");
     }
     
+    return AICAM_OK;
+}
+
+/**
+ * @brief POST /api/v1/work-mode/timer-trigger — update ONLY the scheduled
+ *        capture (timer) config. Body: {"timer_trigger": {...}} (same shape
+ *        as in the combined triggers endpoint). The chip-level PIR write is
+ *        skipped entirely: it is a seconds-long bridge retry loop and has
+ *        nothing to do with the timer fields. The combined endpoint stays
+ *        for compatibility.
+ */
+static aicam_result_t work_mode_timer_trigger_set_handler(http_handler_context_t* ctx) {
+    if (!ctx) return AICAM_ERROR_INVALID_PARAM;
+
+    if (!web_api_verify_method(ctx, "POST")) {
+        return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Method Not Allowed");
+    }
+    if (!web_api_verify_content_type(ctx, "application/json")) {
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Invalid Content-Type");
+    }
+
+    system_controller_t* controller = get_system_controller();
+    if (!controller) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "System controller not available");
+    }
+
+    cJSON* request = web_api_parse_body(ctx);
+    if (!request) {
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Invalid JSON request body");
+    }
+
+    cJSON* timer_trigger = cJSON_GetObjectItem(request, "timer_trigger");
+    if (!timer_trigger || !cJSON_IsObject(timer_trigger)) {
+        cJSON_Delete(request);
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Missing timer_trigger object");
+    }
+
+    work_mode_config_t config;
+    if (system_controller_get_work_config(controller, &config) != AICAM_OK) {
+        cJSON_Delete(request);
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to get current configuration");
+    }
+
+    parse_timer_trigger_json(timer_trigger, &config);
+    const char* timer_error = validate_timer_trigger_json(&config);
+    if (timer_error != NULL) {
+        cJSON_Delete(request);
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, timer_error);
+    }
+
+    LOG_SVC_INFO("Timer trigger configuration: %s", config.timer_trigger.enable ? "enabled" : "disabled");
+    for (uint32_t i = 0; i < config.timer_trigger.time_node_count; i++) {
+        LOG_SVC_INFO("Timer trigger time node %d: %d", i, config.timer_trigger.time_node[i]);
+    }
+
+    cJSON_Delete(request);
+
+    aicam_result_t result = system_controller_set_work_config(controller, &config, NULL, AICAM_TRUE);
+    if (result == AICAM_OK) {
+        api_response_success(ctx, NULL, "Timer trigger configuration updated");
+    } else {
+        api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to update timer trigger configuration");
+    }
+    return AICAM_OK;
+}
+
+/**
+ * @brief POST /api/v1/work-mode/remote-trigger — update ONLY the remote
+ *        wakeup enable. Body: {"enable": true|false}. Skips the chip-level
+ *        PIR write (see the timer endpoint above).
+ */
+static aicam_result_t work_mode_remote_trigger_set_handler(http_handler_context_t* ctx) {
+    if (!ctx) return AICAM_ERROR_INVALID_PARAM;
+
+    if (!web_api_verify_method(ctx, "POST")) {
+        return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Method Not Allowed");
+    }
+    if (!web_api_verify_content_type(ctx, "application/json")) {
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Invalid Content-Type");
+    }
+
+    system_controller_t* controller = get_system_controller();
+    if (!controller) {
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "System controller not available");
+    }
+
+    cJSON* request = web_api_parse_body(ctx);
+    if (!request) {
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Invalid JSON request body");
+    }
+
+    cJSON* enable_item = cJSON_GetObjectItem(request, "enable");
+    if (!enable_item || !cJSON_IsBool(enable_item)) {
+        cJSON_Delete(request);
+        return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Missing boolean 'enable'");
+    }
+
+    work_mode_config_t config;
+    if (system_controller_get_work_config(controller, &config) != AICAM_OK) {
+        cJSON_Delete(request);
+        return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to get current configuration");
+    }
+
+    config.remote_trigger.enable = cJSON_IsTrue(enable_item);
+    cJSON_Delete(request);
+
+    LOG_SVC_INFO("Remote trigger configuration: %s", config.remote_trigger.enable ? "enabled" : "disabled");
+
+    aicam_result_t result = system_controller_set_work_config(controller, &config, NULL, AICAM_TRUE);
+    if (result == AICAM_OK) {
+        api_response_success(ctx, NULL, "Remote trigger configuration updated");
+    } else {
+        api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to update remote trigger configuration");
+    }
     return AICAM_OK;
 }
 
@@ -1163,10 +1298,10 @@ static aicam_result_t work_mode_video_stream_config_handler(http_handler_context
     }
     
     cJSON_Delete(request);
-    
+
     // Update configuration
-    result = system_controller_set_work_config(controller, &config);
-    
+    result = system_controller_set_work_config(controller, &config, NULL, AICAM_FALSE);
+
     if (result == AICAM_OK) {
         api_response_success(ctx, NULL, "Video stream push configuration updated successfully");
     } else {
@@ -1205,6 +1340,20 @@ static const api_route_t work_mode_module_routes[] = {
         .path = API_PATH_PREFIX "/work-mode/triggers",
         .method = "POST",
         .handler = work_mode_triggers_set_handler,
+        .require_auth = AICAM_TRUE,
+        .user_data = NULL
+    },
+    {
+        .path = API_PATH_PREFIX "/work-mode/timer-trigger",
+        .method = "POST",
+        .handler = work_mode_timer_trigger_set_handler,
+        .require_auth = AICAM_TRUE,
+        .user_data = NULL
+    },
+    {
+        .path = API_PATH_PREFIX "/work-mode/remote-trigger",
+        .method = "POST",
+        .handler = work_mode_remote_trigger_set_handler,
         .require_auth = AICAM_TRUE,
         .user_data = NULL
     },

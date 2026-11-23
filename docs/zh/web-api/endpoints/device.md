@@ -10,7 +10,7 @@ title: 设备管理 端点参考
 
 源文件: [`Custom/Services/Web/api/api_device_module.c`](https://github.com/camthink-ai/ne301/blob/main/Custom/Services/Web/api/api_device_module.c)
 
-共 **27** 个端点。鉴权列 ✅ 表示需要携带[认证凭据](../authentication.md)。
+共 **33** 个端点。鉴权列 ✅ 表示需要携带[认证凭据](../authentication.md)。
 
 | 方法 | 路径 | 鉴权 | 处理函数 |
 |------|------|:----:|----------|
@@ -18,6 +18,8 @@ title: 设备管理 端点参考
 | `POST` | `/api/v1/device/day-night/config` | ✅ | `device_day_night_config_handler` |
 | `GET` | `/api/v1/device/day-night/status` | ✅ | `device_day_night_status_handler` |
 | `GET` | `/api/v1/device/info` | ✅ | `device_info_handler` |
+| `GET` | `/api/v1/device/usb` | ✅ | `device_usb_status_handler` |
+| `POST` | `/api/v1/device/usb/config` | ✅ | `device_usb_config_handler` |
 | `GET` | `/api/v1/device/firmware-versions` | ✅ | `firmware_versions_handler` |
 | `GET` | `/api/v1/device/version-check` | ✅ | `version_check_handler` |
 | `GET` | `/api/v1/device/storage` | ✅ | `device_storage_handler` |
@@ -25,6 +27,8 @@ title: 设备管理 端点参考
 | `POST` | `/api/v1/device/storage/format` | ✅ | `device_storage_format_handler` |
 | `GET` | `/api/v1/device/image/config` | ✅ | `device_image_config_handler` |
 | `POST` | `/api/v1/device/image/config` | ✅ | `device_image_config_handler` |
+| `GET` | `/api/v1/device/stream/config` | ✅ | `device_stream_config_handler` |
+| `POST` | `/api/v1/device/stream/config` | ✅ | `device_stream_config_handler` |
 | `GET` | `/api/v1/device/sys-clk/config` | ✅ | `device_sys_clk_config_handler` |
 | `POST` | `/api/v1/device/sys-clk/config` | ✅ | `device_sys_clk_config_handler` |
 | `GET` | `/api/v1/device/light/config` | ✅ | `device_light_config_handler` |
@@ -32,6 +36,8 @@ title: 设备管理 端点参考
 | `GET` | `/api/v1/device/camera/config` | ✅ | `device_camera_config_handler` |
 | `POST` | `/api/v1/device/camera/config` | ✅ | `device_camera_config_handler` |
 | `POST` | `/api/v1/system/time` | ✅ | `system_time_handler` |
+| `GET` | `/api/v1/system/ntp/config` | ✅ | `system_ntp_config_handler` |
+| `POST` | `/api/v1/system/ntp/config` | ✅ | `system_ntp_config_handler` |
 | `POST` | `/api/v1/device/name` | ✅ | `device_name_handler` |
 | `GET` | `/api/v1/system/logs` | ✅ | `system_logs_handler` |
 | `GET` | `/api/v1/system/logs/export` | ✅ | `system_logs_export_handler` |

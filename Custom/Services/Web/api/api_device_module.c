@@ -492,14 +492,17 @@ aicam_result_t device_usb_config_handler(http_handler_context_t *ctx) {
      * a single thread, so concurrent enable/disable requests are naturally
      * serialized — no deferred teardown, no races. When this request
      * arrived over the RNDIS netif the response may not reach the browser
-     * (the NIC just died); the frontend treats that network error as
-     * success. */
+     * (the NIC just died); the frontend verifies the device state and
+     * reports that. */
     if (enabled == AICAM_FALSE) {
         (void)usb_cherry_device_deinit();
     } else if (!usb_cherry_device_is_inited()) {
         (void)usb_cherry_device_init_ex(1);
     } else if (addr_changed == AICAM_TRUE) {
-        (void)usb_cherry_device_apply_ip_config();
+        if (usb_cherry_device_apply_ip_config() != 0) {
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR,
+                                      "Failed to apply USB address change");
+        }
     }
 
     cJSON* response_json = cJSON_CreateObject();
@@ -523,6 +526,141 @@ aicam_result_t device_usb_config_handler(http_handler_context_t *ctx) {
 
     return api_response_success(ctx, json_string, "USB configuration updated");
 }
+
+/**
+ * @brief GET/POST /api/v1/device/stream/config - Live video stream parameters
+ *
+ * Fields (POST, all optional - omitted keys keep current values):
+ *   resolution : "pipe2" | "720p" | "1080p"  (numeric 0/1/2 also accepted)
+ *   bitrate_kbps : 256..8192
+ *   gop_sec      : 1 | 2 | 4
+ *
+ * POST persists the config and applies it live (pipelines restart when the
+ * preview/stream was running; otherwise it takes effect on the next start).
+ */
+aicam_result_t device_stream_config_handler(http_handler_context_t *ctx) {
+    if (!ctx) return AICAM_ERROR_INVALID_PARAM;
+
+    static const char *resolution_strings[] = { "pipe2", "720p", "1080p" };
+
+    if (web_api_verify_method(ctx, "GET")) {
+        video_stream_param_t config;
+        aicam_result_t result = json_config_get_video_stream_param(&config);
+        if (result != AICAM_OK) {
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to get stream parameters");
+        }
+
+        cJSON* response_json = cJSON_CreateObject();
+        if (!response_json) {
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to create response");
+        }
+        const char *res_str = (config.resolution <= STREAM_RES_1080P)
+                                ? resolution_strings[config.resolution] : "720p";
+        cJSON_AddStringToObject(response_json, "resolution", res_str);
+        cJSON_AddNumberToObject(response_json, "bitrate_kbps", config.bitrate_kbps);
+        cJSON_AddNumberToObject(response_json, "gop_sec", config.gop_sec);
+
+        char* json_string = cJSON_Print(response_json);
+        cJSON_Delete(response_json);
+        if (!json_string) {
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to serialize response");
+        }
+        return api_response_success(ctx, json_string, "Stream parameters retrieved successfully");
+
+    } else if (web_api_verify_method(ctx, "POST")) {
+        cJSON* request_json = web_api_parse_body(ctx);
+        if (!request_json) {
+            return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "Invalid JSON request body");
+        }
+
+        video_stream_param_t config;
+        aicam_result_t result = json_config_get_video_stream_param(&config);
+        if (result != AICAM_OK) {
+            cJSON_Delete(request_json);
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to get current stream parameters");
+        }
+
+        cJSON* res_item = cJSON_GetObjectItem(request_json, "resolution");
+        if (res_item) {
+            if (cJSON_IsString(res_item)) {
+                const char *s = cJSON_GetStringValue(res_item);
+                if (strcmp(s, "pipe2") == 0)        config.resolution = STREAM_RES_PIPE2;
+                else if (strcmp(s, "720p") == 0)   config.resolution = STREAM_RES_720P;
+                else if (strcmp(s, "1080p") == 0)  config.resolution = STREAM_RES_1080P;
+                else {
+                    cJSON_Delete(request_json);
+                    return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "resolution must be pipe2, 720p or 1080p");
+                }
+            } else if (cJSON_IsNumber(res_item)) {
+                double v = cJSON_GetNumberValue(res_item);
+                if (v < 0 || v > STREAM_RES_1080P || v != (int)v) {
+                    cJSON_Delete(request_json);
+                    return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "resolution must be 0, 1 or 2");
+                }
+                config.resolution = (uint8_t)v;
+            }
+        }
+
+        cJSON* bitrate_item = cJSON_GetObjectItem(request_json, "bitrate_kbps");
+        if (bitrate_item && cJSON_IsNumber(bitrate_item)) {
+            double v = cJSON_GetNumberValue(bitrate_item);
+            if (v < (double)VSTREAM_BITRATE_MIN_KBPS || v > (double)VSTREAM_BITRATE_MAX_KBPS || v != (int)v) {
+                cJSON_Delete(request_json);
+                return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                                          "bitrate_kbps must be between 256 and 8192");
+            }
+            config.bitrate_kbps = (uint32_t)v;
+        }
+
+        cJSON* gop_item = cJSON_GetObjectItem(request_json, "gop_sec");
+        if (gop_item && cJSON_IsNumber(gop_item)) {
+            double v = cJSON_GetNumberValue(gop_item);
+            if (v != 1 && v != 2 && v != 4) {
+                cJSON_Delete(request_json);
+                return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                                          "gop_sec must be 1, 2 or 4");
+            }
+            config.gop_sec = (uint8_t)v;
+        }
+
+        cJSON_Delete(request_json);
+
+        result = json_config_set_video_stream_param(&config);
+        if (result != AICAM_OK) {
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to save stream parameters");
+        }
+
+        /* Apply live: restarts the pipelines when the stream was running.
+         * Pass the just-saved values: an NVS re-read inside apply can race
+         * a still-persisting field and mix new bitrate with old resolution. */
+        aicam_result_t apply_result = ai_service_apply_stream_params(&config);
+
+        cJSON* response_json = cJSON_CreateObject();
+        if (!response_json) {
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to create response");
+        }
+        const char *res_str = (config.resolution <= STREAM_RES_1080P)
+                                ? resolution_strings[config.resolution] : "720p";
+        cJSON_AddStringToObject(response_json, "resolution", res_str);
+        cJSON_AddNumberToObject(response_json, "bitrate_kbps", config.bitrate_kbps);
+        cJSON_AddNumberToObject(response_json, "gop_sec", config.gop_sec);
+        cJSON_AddBoolToObject(response_json, "applied", apply_result == AICAM_OK);
+
+        char* json_string = cJSON_Print(response_json);
+        cJSON_Delete(response_json);
+        if (!json_string) {
+            return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to serialize response");
+        }
+        if (apply_result == AICAM_OK) {
+            return api_response_success(ctx, json_string, "Stream parameters saved and applied");
+        }
+        /* Saved but not applied (e.g. AI service not up yet): success with flag. */
+        return api_response_success(ctx, json_string, "Stream parameters saved (applied on next stream start)");
+    }
+
+    return api_response_error(ctx, API_ERROR_METHOD_NOT_ALLOWED, "Method Not Allowed");
+}
+
 
 /**
  * @brief GET/POST /api/v1/device/image/config - Get/Set image configuration
@@ -1094,8 +1232,11 @@ aicam_result_t device_camera_config_handler(http_handler_context_t *ctx) {
             cJSON_AddNumberToObject(image_config_json, "fast_capture_skip_frames", camera_config.image_config.fast_capture_skip_frames);
             cJSON_AddNumberToObject(image_config_json, "fast_capture_resolution", camera_config.image_config.fast_capture_resolution);
             cJSON_AddNumberToObject(image_config_json, "fast_capture_jpeg_quality", camera_config.image_config.fast_capture_jpeg_quality);
+            cJSON_AddNumberToObject(image_config_json, "runtime_capture_skip_frames", camera_config.image_config.runtime_capture_skip_frames);
+            cJSON_AddNumberToObject(image_config_json, "runtime_capture_jpeg_quality", camera_config.image_config.runtime_capture_jpeg_quality);
             cJSON_AddBoolToObject(image_config_json, "capture_disable_comm", camera_config.image_config.capture_disable_comm);
             cJSON_AddBoolToObject(image_config_json, "capture_storage_ai", camera_config.image_config.capture_storage_ai);
+            cJSON_AddBoolToObject(image_config_json, "ai_capture_enable", camera_config.image_config.ai_capture_enable);
             cJSON_AddItemToObject(response_json, "image_config", image_config_json);
         }
         
@@ -1218,6 +1359,33 @@ aicam_result_t device_camera_config_handler(http_handler_context_t *ctx) {
                 camera_config.image_config.capture_storage_ai =
                     cJSON_IsTrue(cap_stor_ai_item) ? AICAM_TRUE : AICAM_FALSE;
             }
+
+            /* Runtime capture params (captures while the device is running;
+             * the sleep-wake path keeps its own fast_capture_* fields). */
+            cJSON* rt_skip_item = cJSON_GetObjectItem(image_config_item, "runtime_capture_skip_frames");
+            if (rt_skip_item && cJSON_IsNumber(rt_skip_item)) {
+                double v = cJSON_GetNumberValue(rt_skip_item);
+                if (v < 0 || v > 30)
+                    { cJSON_Delete(request_json); return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "runtime_capture_skip_frames must be 0-30"); }
+                camera_config.image_config.runtime_capture_skip_frames = (uint32_t)v;
+            }
+
+            cJSON* rt_jq_item = cJSON_GetObjectItem(image_config_item, "runtime_capture_jpeg_quality");
+            if (rt_jq_item && cJSON_IsNumber(rt_jq_item)) {
+                double v = cJSON_GetNumberValue(rt_jq_item);
+                if (v < 1 || v > 100)
+                    { cJSON_Delete(request_json); return api_response_error(ctx, API_ERROR_INVALID_REQUEST, "runtime_capture_jpeg_quality must be 1-100"); }
+                camera_config.image_config.runtime_capture_jpeg_quality = (uint32_t)v;
+            }
+
+            /* AI master switch for captures: off = capture without AI
+             * inference (no annotated image, no result filter). Also read
+             * by the sleep-wake quick-snapshot path via NVS. */
+            cJSON* ai_cap_item = cJSON_GetObjectItem(image_config_item, "ai_capture_enable");
+            if (ai_cap_item && cJSON_IsBool(ai_cap_item)) {
+                camera_config.image_config.ai_capture_enable =
+                    cJSON_IsTrue(ai_cap_item) ? AICAM_TRUE : AICAM_FALSE;
+            }
         }
         
         cJSON_Delete(request_json);
@@ -1227,6 +1395,11 @@ aicam_result_t device_camera_config_handler(http_handler_context_t *ctx) {
         if (result != AICAM_OK) {
             return api_response_error(ctx, API_ERROR_INTERNAL_ERROR, "Failed to set camera configuration");
         }
+
+        /* set_config only updates RAM + hardware - persist the image config
+         * (incl. the runtime capture params) to json_config/NVS so it
+         * survives a reboot (same pattern as the day/night mode path). */
+        (void)json_config_set_device_service_image_config(&camera_config.image_config);
         
         // Create success response
         cJSON* response_json = cJSON_CreateObject();
@@ -1251,8 +1424,11 @@ aicam_result_t device_camera_config_handler(http_handler_context_t *ctx) {
             cJSON_AddNumberToObject(image_config_response, "fast_capture_skip_frames", camera_config.image_config.fast_capture_skip_frames);
             cJSON_AddNumberToObject(image_config_response, "fast_capture_resolution", camera_config.image_config.fast_capture_resolution);
             cJSON_AddNumberToObject(image_config_response, "fast_capture_jpeg_quality", camera_config.image_config.fast_capture_jpeg_quality);
+            cJSON_AddNumberToObject(image_config_response, "runtime_capture_skip_frames", camera_config.image_config.runtime_capture_skip_frames);
+            cJSON_AddNumberToObject(image_config_response, "runtime_capture_jpeg_quality", camera_config.image_config.runtime_capture_jpeg_quality);
             cJSON_AddBoolToObject(image_config_response, "capture_disable_comm", camera_config.image_config.capture_disable_comm);
             cJSON_AddBoolToObject(image_config_response, "capture_storage_ai", camera_config.image_config.capture_storage_ai);
+            cJSON_AddBoolToObject(image_config_response, "ai_capture_enable", camera_config.image_config.ai_capture_enable);
             cJSON_AddItemToObject(response_json, "image_config", image_config_response);
         }
         
@@ -2888,6 +3064,20 @@ static const api_route_t device_module_routes[] = {
         .method = "POST",
         .path = API_PATH_PREFIX "/device/image/config",
         .handler = device_image_config_handler,
+        .require_auth = AICAM_TRUE,
+        .user_data = NULL
+    },
+    {
+        .method = "GET",
+        .path = API_PATH_PREFIX "/device/stream/config",
+        .handler = device_stream_config_handler,
+        .require_auth = AICAM_TRUE,
+        .user_data = NULL
+    },
+    {
+        .method = "POST",
+        .path = API_PATH_PREFIX "/device/stream/config",
+        .handler = device_stream_config_handler,
         .require_auth = AICAM_TRUE,
         .user_data = NULL
     },

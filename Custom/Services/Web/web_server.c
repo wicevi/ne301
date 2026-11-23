@@ -1081,6 +1081,18 @@ aicam_result_t http_send_response(http_handler_context_t* ctx) {
  
  /* ==================== Static Resource Management ==================== */
 
+/* Cache policy per asset: hashed build artifacts (js/css/img) are immutable
+ * for their URL lifetime -> 24h fresh. HTML entry documents reference those
+ * hashed artifacts; caching one for 24h pins the browser to the PREVIOUS
+ * firmware's bundle after a web OTA (observed in the field as "the new UI
+ * never shows up"). HTML gets `no-cache` instead: always revalidated, and
+ * the ETag logic turns unchanged documents into a cheap 304. */
+static const char *asset_cache_control(const char *path)
+{
+    return (path != NULL && strstr(path, ".html") != NULL)
+               ? "no-cache" : "max-age=86400, public";
+}
+
 static aicam_result_t web_server_handle_static_request(http_handler_context_t* ctx)
 {
     char decoded_uri[256];
@@ -1163,10 +1175,10 @@ static aicam_result_t web_server_handle_static_request(http_handler_context_t* c
             WEB_LOG("[RSP] %s -> 304 not modified", path_to_find);
             mg_printf(ctx->conn, "HTTP/1.1 304 Not Modified\r\n"
                                  "ETag: %s\r\n"
-                                 "Cache-Control: max-age=86400, public\r\n"
+                                 "Cache-Control: %s\r\n"
                                  "Connection: close\r\n"
                                  "\r\n",
-                      etag_hdr);
+                      etag_hdr, asset_cache_control(path_to_find));
             ctx->conn->is_draining = 1;
             return AICAM_OK;
         }
@@ -1175,7 +1187,7 @@ static aicam_result_t web_server_handle_static_request(http_handler_context_t* c
                              "Content-Type: %s\r\n"
                              "Content-Length: %d\r\n"
                              "ETag: %s\r\n"
-                             "Cache-Control: max-age=86400, public\r\n"
+                             "Cache-Control: %s\r\n"
                              "Connection: close\r\n"
                              "Access-Control-Allow-Origin: *\r\n"
                              "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
@@ -1185,6 +1197,7 @@ static aicam_result_t web_server_handle_static_request(http_handler_context_t* c
                   asset->mime_type,
                   (int)asset->size,
                   etag_hdr,
+                  asset_cache_control(path_to_find),
                   asset->is_compressed ? "Content-Encoding: gzip\r\n" : "");
 
         mg_send(ctx->conn, (uint8_t*)asset->data, asset->size);

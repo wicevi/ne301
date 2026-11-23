@@ -6,6 +6,7 @@
 
 #include "web_api.h"
 #include "ai_service.h"
+#include "Hal/nn.h"
 #include "cJSON.h"
 #include "debug.h"
 #include <string.h>
@@ -109,7 +110,6 @@ static int parse_multipart_data(const char *body, size_t body_len,
 {
     if (!body || !boundary || !config)
     {
-        printf("[DEBUG] Invalid parameters\r\n");
         return -1;
     }
 
@@ -126,7 +126,6 @@ static int parse_multipart_data(const char *body, size_t body_len,
     }
     snprintf(boundary_str, strlen(boundary) + 3 + 1, "--%s", boundary);
     size_t boundary_len = strlen(boundary_str);
-    printf("[DEBUG] boundary_str: %s\r\n", boundary_str);
 
 
     const char *current = body;
@@ -169,7 +168,6 @@ static int parse_multipart_data(const char *body, size_t body_len,
         }
         memcpy(header_buf, current, header_len);
         header_buf[header_len] = '\0';
-        printf("[DEBUG] header_buf: %s\r\n", header_buf);
 
         // Data starts after \r\n\r\n
         const char *data_start = header_end + 4;
@@ -199,42 +197,34 @@ static int parse_multipart_data(const char *body, size_t body_len,
         if (memfind(header_buf, header_len, "name=\"ai_image_width\"", 20))
         {
             config->ai_image_width = atoi_n(data_start, data_size);
-            printf("[DEBUG] Found ai_image_width, value: %d\r\n", (int)config->ai_image_width);
         }
         else if (memfind(header_buf, header_len, "name=\"draw_image_width\"", 22))
         {
             config->draw_image_width = atoi_n(data_start, data_size);
-            printf("[DEBUG] Found draw_image_width, value: %d\r\n", (int)config->draw_image_width);
         }
         else if (memfind(header_buf, header_len, "name=\"ai_image_height\"", 21))
         {
             config->ai_image_height = atoi_n(data_start, data_size);
-            printf("[DEBUG] Found ai_image_height, value: %d\r\n", (int)config->ai_image_height);
         }
         else if (memfind(header_buf, header_len, "name=\"draw_image_height\"", 23))
         {
             config->draw_image_height = atoi_n(data_start, data_size);
-            printf("[DEBUG] Found draw_image_height, value: %d\r\n", (int)config->draw_image_height);
         }
         else if (memfind(header_buf, header_len, "name=\"ai_image_quality\"", 23))
         {
             config->ai_image_quality = atoi_n(data_start, data_size);
-            printf("[DEBUG] Found ai_image_quality, value: %d\r\n", (int)config->ai_image_quality);
         }
         else if (memfind(header_buf, header_len, "name=\"draw_image_quality\"", 25))
         {
             config->draw_image_quality = atoi_n(data_start, data_size);
-            printf("[DEBUG] Found draw_image_quality, value: %d\r\n", (int)config->draw_image_quality);
         }
         else if (memfind(header_buf, header_len, "name=\"ai_image\"", 15))
         {
-            printf("[DEBUG] Found ai_image, size: %d\r\n", (int)data_size);
             config->ai_image_data = (uint8_t *)data_start;
             config->ai_image_size = data_size;
         }
         else if (memfind(header_buf, header_len, "name=\"draw_image\"", 17))
         {
-            printf("[DEBUG] Found draw_image, size: %d\r\n", (int)data_size);
             config->draw_image_data = (uint8_t *)data_start;
             config->draw_image_size = data_size;
         }
@@ -244,21 +234,13 @@ static int parse_multipart_data(const char *body, size_t body_len,
         current = next_boundary;
     }
 
-    LOG_SVC_INFO("[DEBUG] Final result: ai_image=%p (size=%d), draw_image=%p (size=%d) ",
-            config->ai_image_data, (int)config->ai_image_size, config->draw_image_data, (int)config->draw_image_size);
-    LOG_SVC_INFO("[DEBUG] ai_image_width=%d, ai_image_height=%d, ai_image_quality=%d, draw_image_width=%d, draw_image_height=%d, draw_image_quality=%d",
-            (int)config->ai_image_width, (int)config->ai_image_height, (int)config->ai_image_quality, (int)config->draw_image_width, (int)config->draw_image_height, (int)config->draw_image_quality);
     
     buffer_free(boundary_str);
 
     // Return 0 if both images are found, or -1 if not
     if (config->ai_image_data && config->draw_image_data) {
-        LOG_SVC_INFO("[DEBUG] Both images found successfully");
         return 0;
     } else {
-        LOG_SVC_INFO("[DEBUG] Missing images: ai_image=%s, draw_image=%s",
-               config->ai_image_data ? "found" : "missing",
-               config->draw_image_data ? "found" : "missing");
         return -1;
     }
 }
@@ -285,7 +267,6 @@ static aicam_result_t model_validation_upload_handler(http_handler_context_t* ct
     
     // Extract boundary from Content-Type header
     const char* content_type = ctx->request.content_type;
-    printf("[DEBUG] Content-Type: \"%s\"\r\n", content_type);
     
     const char* boundary_start = memfind(content_type, strlen(content_type), "boundary=", 9);
     if (!boundary_start) {
@@ -294,7 +275,6 @@ static aicam_result_t model_validation_upload_handler(http_handler_context_t* ct
     boundary_start += 9; // Skip "boundary="
     
     // Parse multipart data
-    LOG_SVC_INFO("[DEBUG] begin parse multipart data");
     
     int parse_result = parse_multipart_data(ctx->request.body, ctx->request.content_length, boundary_start, &config);
     
@@ -386,7 +366,16 @@ static aicam_result_t model_reload_handler(http_handler_context_t* ctx) {
    //reload the model
    aicam_result_t result = ai_reload_model();
    if (result != AICAM_OK) {
-       return api_response_error(ctx, API_BUSINESS_ERROR_MODEL_RELOAD_FAILED, "Failed to reload model");
+       /* Surface WHY the load failed (e.g. unsupported postprocess)
+        * instead of a generic error the UI cannot act on. */
+       char reason[128];
+       const char *nn_err = nn_get_last_error();
+       if (nn_err[0] != 0) {
+           snprintf(reason, sizeof(reason), "Failed to reload model: %s", nn_err);
+       } else {
+           snprintf(reason, sizeof(reason), "Failed to reload model");
+       }
+       return api_response_error(ctx, API_BUSINESS_ERROR_MODEL_RELOAD_FAILED, reason);
    }
    
    return api_response_success(ctx, NULL, "Model reload completed successfully");

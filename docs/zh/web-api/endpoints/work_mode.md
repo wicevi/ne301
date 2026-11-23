@@ -10,7 +10,7 @@ title: 工作模式 端点参考
 
 源文件: [`Custom/Services/Web/api/api_work_mode_module.c`](https://github.com/camthink-ai/ne301/blob/main/Custom/Services/Web/api/api_work_mode_module.c)
 
-共 **9** 个端点。鉴权列 ✅ 表示需要携带[认证凭据](../authentication.md)。
+共 **11** 个端点。鉴权列 ✅ 表示需要携带[认证凭据](../authentication.md)。
 
 | 方法 | 路径 | 鉴权 | 处理函数 |
 |------|------|:----:|----------|
@@ -18,6 +18,8 @@ title: 工作模式 端点参考
 | `POST` | `/api/v1/work-mode/switch` | ✅ | `work_mode_switch_handler` |
 | `GET` | `/api/v1/work-mode/triggers` | ✅ | `work_mode_triggers_get_handler` |
 | `POST` | `/api/v1/work-mode/triggers` | ✅ | `work_mode_triggers_set_handler` |
+| `POST` | `/api/v1/work-mode/timer-trigger` | ✅ | `work_mode_timer_trigger_set_handler` |
+| `POST` | `/api/v1/work-mode/remote-trigger` | ✅ | `work_mode_remote_trigger_set_handler` |
 | `POST` | `/api/v1/work-mode/video-stream/config` | ✅ | `work_mode_video_stream_config_handler` |
 | `GET` | `/api/v1/power-mode/status` | ✅ | `power_mode_status_handler` |
 | `POST` | `/api/v1/power-mode/switch` | ✅ | `power_mode_switch_handler` |

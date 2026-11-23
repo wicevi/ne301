@@ -1,10 +1,10 @@
 {
   "base_path": "/api/v1",
-  "total_endpoints": 179,
+  "total_endpoints": 187,
   "modules": {
     "ai_management": {
       "source": "Custom/Services/Web/api/api_ai_management_module.c",
-      "source_sha256": "835b997bd3f82087",
+      "source_sha256": "cea4d64b9d056fcc",
       "routes": [
         {
           "method": "GET",
@@ -64,7 +64,7 @@
     },
     "capture": {
       "source": "Custom/Services/Web/api/api_capture_module.c",
-      "source_sha256": "bfd8a1abd02bdc85",
+      "source_sha256": "92506a3449697fe0",
       "routes": [
         {
           "method": "GET",
@@ -112,7 +112,7 @@
     },
     "device": {
       "source": "Custom/Services/Web/api/api_device_module.c",
-      "source_sha256": "dd421da8263c47b2",
+      "source_sha256": "af1ca5b2f112a86c",
       "routes": [
         {
           "method": "GET",
@@ -136,6 +136,18 @@
           "method": "GET",
           "path": "/api/v1/device/info",
           "handler": "device_info_handler",
+          "require_auth": true
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/device/usb",
+          "handler": "device_usb_status_handler",
+          "require_auth": true
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/device/usb/config",
+          "handler": "device_usb_config_handler",
           "require_auth": true
         },
         {
@@ -182,6 +194,18 @@
         },
         {
           "method": "GET",
+          "path": "/api/v1/device/stream/config",
+          "handler": "device_stream_config_handler",
+          "require_auth": true
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/device/stream/config",
+          "handler": "device_stream_config_handler",
+          "require_auth": true
+        },
+        {
+          "method": "GET",
           "path": "/api/v1/device/sys-clk/config",
           "handler": "device_sys_clk_config_handler",
           "require_auth": true
@@ -220,6 +244,18 @@
           "method": "POST",
           "path": "/api/v1/system/time",
           "handler": "system_time_handler",
+          "require_auth": true
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/system/ntp/config",
+          "handler": "system_ntp_config_handler",
+          "require_auth": true
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/system/ntp/config",
+          "handler": "system_ntp_config_handler",
           "require_auth": true
         },
         {
@@ -550,7 +586,7 @@
     },
     "model_validation": {
       "source": "Custom/Services/Web/api/api_model_validation_module.c",
-      "source_sha256": "4865b8c0fe42b38a",
+      "source_sha256": "adf561f037a89fbb",
       "routes": [
         {
           "method": "POST",
@@ -568,7 +604,7 @@
     },
     "mqtt": {
       "source": "Custom/Services/Web/api/api_mqtt_module.c",
-      "source_sha256": "e20abc81c97170d7",
+      "source_sha256": "3b7231a1fd167187",
       "routes": [
         {
           "method": "GET",
@@ -1108,7 +1144,7 @@
     },
     "work_mode": {
       "source": "Custom/Services/Web/api/api_work_mode_module.c",
-      "source_sha256": "173763ebffe9e4b7",
+      "source_sha256": "c9ddaedac30efcbc",
       "routes": [
         {
           "method": "GET",
@@ -1132,6 +1168,18 @@
           "method": "POST",
           "path": "/api/v1/work-mode/triggers",
           "handler": "work_mode_triggers_set_handler",
+          "require_auth": true
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/work-mode/timer-trigger",
+          "handler": "work_mode_timer_trigger_set_handler",
+          "require_auth": true
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/work-mode/remote-trigger",
+          "handler": "work_mode_remote_trigger_set_handler",
           "require_auth": true
         },
         {
