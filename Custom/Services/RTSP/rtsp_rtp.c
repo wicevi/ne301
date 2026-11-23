@@ -8,6 +8,7 @@
 #include "debug.h"
 #include <string.h>
 #include "lwip/sockets.h"
+#include <errno.h>
 #include "lwip/inet.h"
 
 /* ==================== Static TX buffer (saves ~1.4KB stack per call) ==================== */
@@ -35,6 +36,49 @@ static void rtp_header_init(rtp_header_t *hdr, uint8_t marker,
 static aicam_result_t rtp_sendto(rtsp_client_t *client,
                                   const uint8_t *packet, uint32_t size)
 {
+    /* RTP/AVP/TCP (interleaved): '$'-frame the RTP packet over the RTSP
+     * TCP connection (RFC 2326 §10.12). NEVER a bare send() on the shared
+     * socket: it can block forever when the client stalls (TCP window
+     * full). select() first (writability, 100 ms) and loop to finish
+     * PARTIAL writes - a truncated '$' frame would shift the whole byte
+     * stream and corrupt everything after it (green/smeared screen).
+     * Total budget 500 ms per packet; the caller drops to keyframe-wait. */
+    if (client->interleaved) {
+        if (client->tcp_socket < 0) {
+            return AICAM_ERROR;
+        }
+        static uint8_t il_buf[4 + RTP_HEADER_SIZE + RTP_MAX_PAYLOAD + 2];
+        il_buf[0] = '$';
+        il_buf[1] = client->interleave_rtp_channel;
+        il_buf[2] = (uint8_t)((size >> 8) & 0xFF);
+        il_buf[3] = (uint8_t)(size & 0xFF);
+        memcpy(&il_buf[4], packet, size);
+        uint32_t total = size + 4;
+        uint32_t sent = 0;
+        int attempts = 0;
+        while (sent < total) {
+            if (++attempts > 5) {
+                LOG_SVC_WARN("RTSP RTP: interleaved send budget exhausted (%lu/%lu)", (unsigned long)sent, (unsigned long)total);
+                return AICAM_ERROR_TIMEOUT;
+            }
+            fd_set wfds;
+            FD_ZERO(&wfds);
+            FD_SET(client->tcp_socket, &wfds);
+            struct timeval tv = { 0, 100000 }; /* 100 ms */
+            int sr = select(client->tcp_socket + 1, NULL, &wfds, NULL, &tv);
+            if (sr <= 0) {
+                continue; /* not writable yet - retry within budget */
+            }
+            int ret = send(client->tcp_socket, &il_buf[sent], total - sent, 0);
+            if (ret < 0) {
+                LOG_SVC_ERROR("RTSP RTP: interleaved send failed ret=%d", ret);
+                return AICAM_ERROR;
+            }
+            sent += (uint32_t)ret;
+        }
+        return AICAM_OK;
+    }
+
     if (client->rtp_socket < 0) {
         LOG_SVC_ERROR("RTSP RTP: sendto failed - rtp_socket=%d (invalid)", client->rtp_socket);
         return AICAM_ERROR;
@@ -69,6 +113,11 @@ aicam_result_t rtsp_rtp_send_single_nal(rtsp_client_t *client,
         return AICAM_ERROR_INVALID_PARAM;
     }
 
+    /* NOTE: big-NAL unfragmented sends were tried here (TCP has no MTU
+     * limit) but a single blocking send() of a 256KB framed NAL blocks
+     * until the WHOLE thing queues into the TCP send buffer - select()
+     * only guarantees one byte of space - so one slow client collapsed
+     * throughput to ~3fps. FU-A fragmentation keeps every write small. */
     if (size > RTP_MAX_PAYLOAD) {
         return rtsp_rtp_send_fu_a(client, data, size, timestamp, marker);
     }
@@ -151,18 +200,6 @@ aicam_result_t rtsp_rtp_send_frame(rtsp_client_t *client,
         return AICAM_ERROR_INVALID_PARAM;
     }
 
-    /* Log first 10 frames, all keyframes, and every 50th frame */
-    {
-        static uint32_t send_frame_count = 0;
-        send_frame_count++;
-        if (send_frame_count <= 10) {
-            LOG_SVC_INFO("RTSP: rtp_ts_diag #%lu: rtp_ts=%lu seq=%lu",
-                         (unsigned long)send_frame_count,
-                         (unsigned long)rtp_ts,
-                         (unsigned long)client->rtp_seq);
-        }
-    }
-
     /* Update client's RTP timestamp (all packets in a frame share the same timestamp) */
     client->rtp_timestamp = rtp_ts;
 
@@ -231,26 +268,6 @@ aicam_result_t rtsp_rtp_send_frame(rtsp_client_t *client,
                 }
                 nal_count++;
             }
-        }
-    }
-
-    /* Log first 10 frames, all keyframes, and every 50th frame */
-    {
-        static uint32_t send_frame_count = 0;
-        send_frame_count++;
-        if (send_frame_count <= 10 || is_keyframe || (send_frame_count % 50) == 0) {
-            static char nal_info[128];
-            int pos = 0;
-            for (uint32_t i = 0; i < nal_count && pos < 100; i++) {
-                pos += snprintf(nal_info + pos, sizeof(nal_info) - pos,
-                               "%s%d(%u)", (i > 0 ? "," : ""),
-                               nal_types[i], (unsigned)nal_sizes[i]);
-            }
-            LOG_SVC_INFO("RTSP: send_frame #%lu: size=%lu key=%d nals=%lu last_slice=%d types=[%s] sock=%d",
-                         (unsigned long)send_frame_count,
-                         (unsigned long)size, is_keyframe,
-                         (unsigned long)nal_count, last_slice_idx,
-                         nal_info, client->rtp_socket);
         }
     }
 

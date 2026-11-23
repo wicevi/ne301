@@ -35,6 +35,9 @@ typedef struct rtsp_client {
     uint16_t client_rtcp_port;          /* Client RTCP port */
     uint16_t server_rtp_port;           /* Server RTP port */
     int rtp_socket;                     /* RTP UDP socket, -1 if unused */
+    aicam_bool_t interleaved;           /* RTP over the RTSP TCP connection (RTP/AVP/TCP) */
+    uint8_t interleave_rtp_channel;     /* '$' framing channel for RTP */
+    uint8_t interleave_rtcp_channel;    /* '$' framing channel for RTCP */
     aicam_bool_t playing;              /* Whether actively streaming */
     aicam_bool_t waiting_for_keyframe; /* Skip P-frames until keyframe arrives */
     uint32_t connected_time;            /* Connection time (ticks) */
@@ -44,6 +47,8 @@ typedef struct rtsp_client {
     uint32_t rtp_frame_index;           /* Frame counter for timestamp generation */
     aicam_bool_t in_use;               /* Slot in use */
     aicam_bool_t authenticated;        /* Passed DESCRIBE auth challenge */
+    uint8_t send_errors;               /* Consecutive async-send failures (stalled client) */
+    aicam_bool_t stalled;              /* Send task gave up; server task owns the release */
 } rtsp_client_t;
 
 typedef struct {
