@@ -158,31 +158,21 @@ aicam_result_t image_crop_roi(
         return AICAM_ERROR_NOT_FOUND;
     }
     
-    // Set color mode for draw device
-    draw_colormode_param_t colormode = {
-        .in_colormode = src_format,
-        .out_colormode = dst_format
-    };
-    int ret = device_ioctl(draw_dev, DRAW_CMD_SET_COLOR_MODE, 
-                          (uint8_t *)&colormode, sizeof(colormode));
-    if (ret != AICAM_OK) {
-        LOG_DRV_ERROR("Failed to set color mode");
-        return ret;
-    }
-    
     // Calculate bytes per pixel for source address calculation
     int src_bpp = DMA2D_BYTES_PER_PIXEL(src_format);
     if (src_bpp == 0) {
         LOG_DRV_ERROR("Unsupported source pixel format");
         return AICAM_ERROR_INVALID_PARAM;
     }
-    
+
     // Calculate source address offset for ROI
     uint8_t *src_roi_start = (uint8_t *)src_image + (roi_y * src_width + roi_x) * src_bpp;
-    
-    // Use DMA2D copy to crop ROI (copy from ROI start to destination)
-    // Note: We use DRAW_CMD_COPY which copies entire source buffer, but we've calculated
-    // the correct source offset, so it will copy from ROI start
+
+    /* The copy command carries its own in/out color modes. Setting the
+     * device-wide mode first and copying afterwards is not atomic against
+     * other threads (capture path) doing the same; a device mode flipped
+     * in between makes this copy run with the wrong pixel format (vertical
+     * stripes) and leaves a stale mode for later AI box draws. */
     draw_copy_param_t copy_param = {
         .p_src = src_roi_start,
         .src_width = roi_width,
@@ -191,15 +181,44 @@ aicam_result_t image_crop_roi(
         .dst_width = roi_width,
         .dst_height = roi_height,
         .x_offset = 0,
-        .y_offset = 0
+        .y_offset = 0,
+        .in_colormode = src_format,
+        .out_colormode = dst_format
     };
-    
-    ret = device_ioctl(draw_dev, DRAW_CMD_COPY, (uint8_t *)&copy_param, sizeof(copy_param));
+
+    int ret = device_ioctl(draw_dev, DRAW_CMD_COPY, (uint8_t *)&copy_param, sizeof(copy_param));
     if (ret != AICAM_OK) {
         LOG_DRV_ERROR("DMA2D crop failed: %d", ret);
         return ret;
     }
     
+    return AICAM_OK;
+}
+
+aicam_result_t image_bridge_to_rgb888(const uint8_t *src_image,
+                                      uint32_t width, uint32_t height,
+                                      uint32_t src_dma2d_format,
+                                      uint8_t *dst_buffer,
+                                      uint8_t swap_rb)
+{
+    uint32_t dst_size = width * height * 3;
+    aicam_result_t ret = image_crop_roi(src_image, width, height,
+                                        src_dma2d_format, 0, 0, width, height,
+                                        dst_buffer, DMA2D_OUTPUT_RGB888);
+    if (ret != AICAM_OK) {
+        return ret;
+    }
+    /* DMA2D wrote dst straight to memory (bypassing cache) - make it
+     * CPU-visible for the byte-order pass and the model input copy. */
+    SCB_InvalidateDCache_by_Addr((void *)((uint32_t)dst_buffer & ~31u),
+                                 (dst_size + 31u) & ~31u);
+    if (swap_rb) {
+        for (uint32_t p = 0; p < dst_size / 3; ++p) {
+            uint8_t t = dst_buffer[p * 3 + 0];
+            dst_buffer[p * 3 + 0] = dst_buffer[p * 3 + 2];
+            dst_buffer[p * 3 + 2] = t;
+        }
+    }
     return AICAM_OK;
 }
 

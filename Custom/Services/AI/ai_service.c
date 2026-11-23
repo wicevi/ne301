@@ -20,12 +20,23 @@
 #include "video_camera_node.h"
 #include "device_service.h"
 #include "camera.h"
+#include "cmw_camera.h"
+#include "image_utils.h"
 #include "Services/Video/video_stream_hub.h"
 #include "mqtt_service.h"
 #include "drtc.h"
 #include "common_utils.h"
 #include "cbor_enc.h"
 #include "rng.h"
+
+/* Geometry of the capture-exclusive PIPE1 while the preview streams PIPE2.
+ * Restored to full 4MP after the 720p bandwidth A/B: stripes reduced but
+ * white speckles persisted at 720p, so the write bandwidth is not the sole
+ * source (see the buffer_get_latest_ready IRQ critical section too). */
+#define PIPE2_CAPTURE_PIPE1_W 2688
+#define PIPE2_CAPTURE_PIPE1_H 1520
+
+static aicam_result_t apply_stream_params_locked(const video_stream_param_t *override);
 
 /* ==================== AI Service Context ==================== */
 
@@ -498,7 +509,23 @@ aicam_result_t ai_pipeline_start(void)
         LOG_SVC_ERROR("Failed to start camera pipeline: %d", result);
         return result;
     }
-    
+
+    /* Diagnostic: post-start pipe states + effective pipe1 geometry (locate
+     * the frozen-stream case after PIPE2 -> pipe1 mode switches). */
+    {
+        device_t *cd = device_find_pattern(CAMERA_DEVICE_NAME, DEV_TYPE_VIDEO);
+        camera_state_t cs; memset(&cs, 0, sizeof(cs));
+        pipe_params_t p1; memset(&p1, 0, sizeof(p1));
+        if (cd) {
+            (void)device_ioctl(cd, CAM_CMD_GET_STATE, (uint8_t *)&cs, sizeof(cs));
+            (void)device_ioctl(cd, CAM_CMD_GET_PIPE1_PARAM, (uint8_t *)&p1, sizeof(p1));
+            LOG_SVC_INFO("[PSTRT] cam=%d p1=%d(%ux%u nb%u) p2=%d",
+                          (int)cs.camera_state, (int)cs.pipe1_state,
+                          (unsigned)p1.width, (unsigned)p1.height, (unsigned)p1.buffer_nb,
+                          (int)cs.pipe2_state);
+        }
+    }
+
     g_ai_service.camera_pipeline_running = AICAM_TRUE;
     
     // Start AI pipeline
@@ -791,10 +818,33 @@ static aicam_result_t ai_create_camera_pipeline_nodes(const ai_service_config_t 
     camera_config.format = config->format;
     camera_config.ai_enabled = config->ai_enabled;
     camera_config.overlay_results = config->overlay_results;
-    
-    // Create encoder node configuration
+
+    /* Stream params decide the source pipe; PIPE2 = encode the AI pipe's
+     * frames directly (pipe1 stays free for still capture). */
+    video_stream_param_t vs;
+    (void)json_config_get_video_stream_param(&vs);
+    camera_config.pipe_id = (vs.resolution == STREAM_RES_PIPE2) ? 2 : 1;
+
+    // Create encoder node configuration: match the camera node's output.
+    // In PIPE2 mode the camera node emits converted ARGB8888. The DCMIPP
+    // pipe2 runs with enable_swap=1, so the bytes in that buffer are actually
+    // B-G-R ordered: the VENC must interpret them as BGR888 or faces come
+    // out blue (red/blue channels swapped).
     video_encoder_config_t encoder_config;
     video_encoder_get_default_config(&encoder_config);
+    encoder_config.width = config->width;
+    encoder_config.height = config->height;
+    encoder_config.fps = config->fps;
+    /* Encoder input follows the camera format: PIPE2-RGB565 (EXPERIMENT A)
+     * feeds the encoder directly; only the packed-RGB888 pipe2 needs the
+     * 32-bit-container BGR888 interpretation. */
+    {
+        int enc_fmt = fmt_dcmipp_to_enc(config->format);
+        encoder_config.input_type = (enc_fmt >= 0)
+            ? (uint32_t)enc_fmt : (uint32_t)H264ENC_BGR888;
+    }
+    encoder_config.bitrate = vs.bitrate_kbps;
+    encoder_config.gop_len = (uint32_t)vs.gop_sec * config->fps;
     
     // Create camera and encoder nodes
     g_ai_service.camera_node = video_camera_node_create("CameraPipelineCamera", &camera_config);
@@ -823,9 +873,9 @@ static aicam_result_t ai_create_camera_pipeline_nodes(const ai_service_config_t 
     }
     
     // Register AI drawing callback to camera node
-  
-    result = video_camera_node_set_ai_callback(g_ai_service.camera_node, 
-                                                ai_service_draw_callback, 
+
+    result = video_camera_node_set_ai_callback(g_ai_service.camera_node,
+                                                ai_service_draw_callback,
                                                 &g_ai_service);
     if (result != AICAM_OK) {
         LOG_SVC_WARN("Failed to register AI callback to camera node: %d", result);
@@ -833,10 +883,72 @@ static aicam_result_t ai_create_camera_pipeline_nodes(const ai_service_config_t 
     } else {
         LOG_SVC_INFO("AI drawing callback registered to camera node");
     }
-    
-    
+
+    /* Boot-time pipe1 sync: the camera device may already run with its
+     * default geometry while the configured stream resolution differs. The
+     * camera node applies its config lazily on start - and SET_PIPE1_PARAM
+     * only works on a stopped pipe. Stop the camera, push the geometry, and
+     * let ai_pipeline_start's self-heal restart the device. */
+    device_t *cam_dev = device_find_pattern(CAMERA_DEVICE_NAME, DEV_TYPE_VIDEO);
+    if (camera_config.pipe_id == 1) {
+        pipe_params_t cur;
+        memset(&cur, 0, sizeof(cur));
+        if (cam_dev &&
+            device_ioctl(cam_dev, CAM_CMD_GET_PIPE1_PARAM,
+                         (uint8_t *)&cur, sizeof(cur)) == AICAM_OK &&
+            (cur.width != camera_config.width || cur.height != camera_config.height)) {
+            camera_state_t st;
+            memset(&st, 0, sizeof(st));
+            (void)device_ioctl(cam_dev, CAM_CMD_GET_STATE, (uint8_t *)&st, sizeof(st));
+            if (st.pipe1_state != PIPE_STOP) {
+                (void)device_service_camera_stop();
+            }
+            pipe_params_t pp;
+            memset(&pp, 0, sizeof(pp));
+            pp.width = camera_config.width;
+            pp.height = camera_config.height;
+            pp.format = camera_config.format;
+            pp.bpp = camera_config.bpp;
+            pp.fps = camera_config.fps;
+            pp.buffer_nb = 3;
+            int ret = device_ioctl(cam_dev, CAM_CMD_SET_PIPE1_PARAM,
+                                   (uint8_t *)&pp, sizeof(pp));
+            LOG_SVC_INFO("Boot pipe1 sync to %ux%u: %d", (unsigned)pp.width, (unsigned)pp.height, ret);
+        }
+    } else if (cam_dev) {
+        /* Boot into PIPE2 mode: PIPE1 = 4MP capture pipe at FULL frame
+         * rate, same as the runtime apply path. */
+        pipe_params_t cur;
+        memset(&cur, 0, sizeof(cur));
+        if (device_ioctl(cam_dev, CAM_CMD_GET_PIPE1_PARAM,
+                         (uint8_t *)&cur, sizeof(cur)) == AICAM_OK &&
+            cur.width == PIPE2_CAPTURE_PIPE1_W && cur.height == PIPE2_CAPTURE_PIPE1_H) {
+            /* already the capture-pipe geometry (apply ran earlier) */
+        } else {
+            camera_state_t st;
+            memset(&st, 0, sizeof(st));
+            (void)device_ioctl(cam_dev, CAM_CMD_GET_STATE, (uint8_t *)&st, sizeof(st));
+            if (st.pipe1_state != PIPE_STOP) {
+                (void)device_service_camera_stop();
+            }
+            pipe_params_t p1;
+            memset(&p1, 0, sizeof(p1));
+            p1.width = PIPE2_CAPTURE_PIPE1_W;
+            p1.height = PIPE2_CAPTURE_PIPE1_H;
+            p1.format = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
+            p1.bpp = 2;
+            p1.fps = 30;
+            p1.buffer_nb = 2;
+            int ret = device_ioctl(cam_dev, CAM_CMD_SET_PIPE1_PARAM,
+                                   (uint8_t *)&p1, sizeof(p1));
+            LOG_SVC_INFO("Boot pipe1 capture pipe %ux%u full-rate: %d",
+                         (unsigned)p1.width, (unsigned)p1.height, ret);
+        }
+    }
+
+
     LOG_SVC_INFO("Camera pipeline nodes created successfully");
-    
+
     return AICAM_OK;
 }
 
@@ -1364,6 +1476,296 @@ static aicam_result_t ai_reload_model_restart_pipeline(void)
         LOG_SVC_ERROR("Failed to restart AI pipelines after model reload: %d", result);
     }
     return result;
+}
+
+aicam_result_t ai_service_apply_stream_params(const video_stream_param_t *override)
+{
+    if (!g_ai_service.initialized) {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    /* Serialize applies: the API dispatcher can run two stream-config POSTs
+     * concurrently (e.g. a double-clicked Save). Without the lock the two
+     * applies interleave - the older one finishes LAST and reverts the
+     * stream to the previous resolution, which reads on the UI as "cannot
+     * switch away from PIPE2". Lock-held re-read of the config below makes
+     * the LAST request win. */
+    static osMutexId_t s_apply_mtx = NULL;
+    if (s_apply_mtx == NULL) {
+        osMutexId_t created = osMutexNew(NULL);
+        if (created == NULL) return AICAM_ERROR;
+        /* First-caller-wins create; if two threads raced, delete the loser. */
+        __disable_irq();
+        if (s_apply_mtx == NULL) {
+            s_apply_mtx = created;
+            created = NULL;
+        }
+        __enable_irq();
+        if (created) osMutexDelete(created);
+    }
+    osMutexAcquire(s_apply_mtx, osWaitForever);
+    aicam_result_t result = apply_stream_params_locked(override);
+    osMutexRelease(s_apply_mtx);
+    return result;
+}
+
+static aicam_result_t apply_stream_params_locked(const video_stream_param_t *override)
+{
+    if (!g_ai_service.initialized) {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    video_stream_param_t vs;
+    if (override) {
+        /* Caller just saved these values - apply them verbatim. Re-reading
+         * NVS here raced a still-persisting field and produced a mixed
+         * config (new bitrate + old resolution), leaving the stream one
+         * switch behind the UI. */
+        vs = *override;
+    } else if (json_config_get_video_stream_param(&vs) != AICAM_OK) {
+        return AICAM_ERROR;
+    }
+
+    /* Resolve the stream geometry for the configured preset. PIPE2 follows the
+     * AI pipe (model input size, packed RGB888 -> converted to ARGB8888 by the
+     * camera node before encoding); 720P/1080P come from pipe1 as RGB565. */
+    uint32_t w, h, fmt, bpp, pipe_id;
+    switch ((stream_resolution_t)vs.resolution) {
+    case STREAM_RES_PIPE2: {
+        json_config_get_ai_pipe_size(&w, &h);
+        /* FINAL PIPE2 configuration (validated 2026-11-19): RGB565. Of all
+         * pipe2 packer formats it is the only one whose write path survives
+         * every tested concurrent load - full-rate 4MP PIPE1 writes (245
+         * MB/s) plus full-frame pool readers (VENC, the NN bridge's DMA2D
+         * conversion) - with zero corruption. RGB888 (3-byte packing)
+         * corrupts under any reader with PIPE1 rows >=2560B; ARGB8888
+         * corrupts at full-rate PIPE1 (full experiment matrix in the RGB565
+         * investigation, Nov 2026). VENC consumes RGB565 zero-copy
+         * (H264ENC_RGB565); the NN bridge converts RGB565->RGB888 for the
+         * model at inference cadence (video_ai_node.c + nn.c). */
+        fmt = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
+        bpp = 2;
+        pipe_id = 2;
+        break;
+    }
+    case STREAM_RES_1080P:
+        w = 1920; h = 1080;
+        fmt = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
+        bpp = 2; pipe_id = 1;
+        break;
+    case STREAM_RES_720P:
+    default:
+        w = 1280; h = 720;
+        fmt = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
+        bpp = 2; pipe_id = 1;
+        break;
+    }
+
+    aicam_bool_t was_running = (g_ai_service.camera_pipeline_running ||
+                                g_ai_service.ai_pipeline_running);
+
+    if (was_running) {
+        ai_pipeline_stop();
+    }
+    /* Pipes must be STOP for CAM_CMD_SET_PIPE1_PARAM (BUSY otherwise); the
+     * camera node's stop above already hits device_stop, this makes it
+     * explicit for the not-running case. */
+    (void)device_service_camera_stop();
+
+    device_t *cam_dev = device_find_pattern(CAMERA_DEVICE_NAME, DEV_TYPE_VIDEO);
+    LOG_SVC_INFO("[APPLY] res=%u pipe%u %ux%u was_run=%d", (unsigned)vs.resolution,
+                  (unsigned)pipe_id, (unsigned)w, (unsigned)h, (int)was_running);
+    if (pipe_id == 2 && cam_dev) {
+        /* PIPE2-streaming: PIPE1 = 4MP capture pipe at FULL frame rate.
+         * Kept full-rate for 30Hz ISP/AE statistics; validated clean with
+         * the RGB565 pipe2 (see apply_stream_params). */
+        pipe_params_t p1;
+        memset(&p1, 0, sizeof(p1));
+        p1.width = PIPE2_CAPTURE_PIPE1_W;
+        p1.height = PIPE2_CAPTURE_PIPE1_H;
+        p1.format = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
+        p1.bpp = 2;
+        p1.fps = 30;
+        p1.buffer_nb = 2;
+        int ret = device_ioctl(cam_dev, CAM_CMD_SET_PIPE1_PARAM,
+                               (uint8_t *)&p1, sizeof(p1));
+        if (ret != AICAM_OK) {
+            LOG_SVC_ERROR("SET_PIPE1_PARAM %ux%u full-rate failed: %d",
+                          (unsigned)p1.width, (unsigned)p1.height, ret);
+        }
+
+        pipe_params_t p2;
+        memset(&p2, 0, sizeof(p2));
+        p2.width = w;
+        p2.height = h;
+        p2.format = fmt;
+        p2.bpp = bpp;
+        p2.fps = 30;
+        p2.buffer_nb = 4;
+        ret = device_ioctl(cam_dev, CAM_CMD_SET_PIPE2_PARAM,
+                           (uint8_t *)&p2, sizeof(p2));
+        if (ret != AICAM_OK) {
+            LOG_SVC_ERROR("SET_PIPE2_PARAM %ux%u x4buf failed: %d", (unsigned)w, (unsigned)h, ret);
+        }
+    }
+
+    /* Reconfigure the pipe1 geometry while stopped for pipe1 modes. */
+    if (pipe_id == 1) {
+        if (cam_dev) {
+            pipe_params_t pp;
+            memset(&pp, 0, sizeof(pp));
+            pp.width = w;
+            pp.height = h;
+            pp.format = fmt;
+            pp.bpp = bpp;
+            pp.fps = 30;
+            pp.buffer_nb = 3;
+            int ret = device_ioctl(cam_dev, CAM_CMD_SET_PIPE1_PARAM,
+                                   (uint8_t *)&pp, sizeof(pp));
+            if (ret != AICAM_OK) {
+                LOG_SVC_ERROR("SET_PIPE1_PARAM %ux%u failed: %d", (unsigned)w, (unsigned)h, ret);
+            }
+            /* PIPE1-streaming: pipe2 reverts to the model-input pipe
+             * (packed RGB888). Coming FROM a pipe2 stream the driver still
+             * carries the stream's RGB565 format - nobody else resets it,
+             * and the AI node's direct feed would hand raw RGB565 bytes to
+             * nn_inference_frame (silent CPU-bridge fallback, ~3x slower
+             * per inference). Mirrors the AI node's own init
+             * SET_PIPE2_PARAM (model geometry, 4-buffer pool). */
+            pipe_params_t p2m;
+            memset(&p2m, 0, sizeof(p2m));
+            uint32_t mw = 0, mh = 0;
+            json_config_get_ai_pipe_size(&mw, &mh);
+            p2m.width = mw;
+            p2m.height = mh;
+            p2m.format = DCMIPP_PIXEL_PACKER_FORMAT_RGB888_YUV444_1;
+            p2m.bpp = 3;
+            p2m.fps = 30;
+            /* Single consumer (AI node): 3 frames suffice. 4 is only
+             * mandatory for the pipe2-STREAM pool (two consumers). */
+            p2m.buffer_nb = 3;
+            int r2 = device_ioctl(cam_dev, CAM_CMD_SET_PIPE2_PARAM,
+                                  (uint8_t *)&p2m, sizeof(p2m));
+            if (r2 != AICAM_OK) {
+                LOG_SVC_ERROR("SET_PIPE2_PARAM model %ux%u failed: %d",
+                              (unsigned)p2m.width, (unsigned)p2m.height, r2);
+            }
+
+            /* Explicitly restore full frame rate: the PIPE2 branch decimates
+             * pipe1 to 1/8, and when the geometry is UNCHANGED between the
+             * PIPE2 diagnostic setup (1280x720) and a 720p stream the
+             * reconfiguration path can leave the decimation bit as-is,
+             * capping the stream at ~3.75fps. Never rely on the config path
+             * clearing it for us. */
+            DCMIPP_HandleTypeDef *hdcmipp = CMW_CAMERA_GetDCMIPPHandle();
+            if (hdcmipp &&
+                HAL_DCMIPP_PIPE_SetFrameRate(hdcmipp, DCMIPP_PIPE1,
+                                             DCMIPP_FRAME_RATE_ALL) != HAL_OK) {
+                LOG_SVC_ERROR("PIPE1 frame-rate restore failed");
+            }
+        }
+    }
+
+    /* Camera node: new geometry + source pipe. */
+    if (g_ai_service.camera_node) {
+        video_camera_config_t ccfg;
+        video_camera_node_get_config(g_ai_service.camera_node, &ccfg);
+        ccfg.width = w;
+        ccfg.height = h;
+        ccfg.format = fmt;
+        ccfg.bpp = bpp;
+        ccfg.fps = 30;
+        ccfg.pipe_id = pipe_id;
+        aicam_result_t cr = video_camera_node_set_config(g_ai_service.camera_node, &ccfg);
+        LOG_SVC_INFO("[APPLY] cam node set: %d (now pipe%u %ux%u)", (int)cr,
+                      (unsigned)ccfg.pipe_id, (unsigned)ccfg.width, (unsigned)ccfg.height);
+    }
+
+    /* Encoder node: match the camera node's OUTPUT format. In PIPE2 mode the
+     * camera node emits converted ARGB8888 whose bytes are B-G-R ordered
+     * (DCMIPP pipe2 enable_swap) - the VENC must read them as BGR888. */
+    if (g_ai_service.encoder_node) {
+        video_encoder_config_t ecfg;
+        video_encoder_node_get_config(g_ai_service.encoder_node, &ecfg);
+        ecfg.width = w;
+        ecfg.height = h;
+        ecfg.fps = 30;
+        /* Encoder input follows the frame format: pipe2 runs ARGB8888 and
+         * the VENC consumes those frames ZERO-COPY in its 32-bit container
+         * (H264ENC_RGB888) - the final product path, validated clean under
+         * every PIPE1 load (no full-frame reader exists on this path, which
+         * is what corrupts in-flight DCMIPP writes). */
+        {
+            int enc_fmt = fmt_dcmipp_to_enc(fmt);
+            ecfg.input_type = (enc_fmt >= 0)
+                ? (uint32_t)enc_fmt : (uint32_t)H264ENC_BGR888;
+        }
+        ecfg.bitrate = vs.bitrate_kbps;
+        ecfg.gop_len = (uint32_t)vs.gop_sec * 30;
+        aicam_result_t er = video_encoder_node_set_config(g_ai_service.encoder_node, &ecfg);
+        LOG_SVC_INFO("[APPLY] enc node set: %d (%ux%u in=%u br=%u)", (int)er,
+                      (unsigned)ecfg.width, (unsigned)ecfg.height,
+                      (unsigned)ecfg.input_type, (unsigned)ecfg.bitrate);
+    }
+
+    /* AI node: re-derive its pipe2 input format from the (possibly new)
+     * stream mode. The NN-bridge decision in video_ai_process_frame depends
+     * on config.bpp matching the ACTUAL pipe2 pixel format - without this
+     * re-sync, a runtime switch 720p -> pipe2 left the node at bpp=3 while
+     * the driver delivered RGB565: the direct-feed branch then handed the
+     * raw RGB565 buffer to nn_inference_frame, which silently fell back to
+     * its CPU software bridge (~30ms/inference instead of the ~5ms DMA2D
+     * hardware bridge). Zero width in the non-pipe2 modes means "derive
+     * from model_info" (an init-time job) - keep the node geometry then. */
+    if (g_ai_service.ai_node) {
+        ai_service_config_t acfg;
+        ai_get_ai_config(&acfg);
+        video_ai_config_t ai_ncfg;
+        if (video_ai_node_get_config(g_ai_service.ai_node, &ai_ncfg) == AICAM_OK) {
+            if (acfg.width != 0) {
+                ai_ncfg.width = acfg.width;
+                ai_ncfg.height = acfg.height;
+            } else {
+                /* Model-input mode: derive from the LOADED model - a hot
+                 * model swap may have changed the input size since this
+                 * node was created. */
+                nn_model_info_t mi;
+                if (nn_get_model_info(&mi) == 0 && mi.input_width != 0) {
+                    ai_ncfg.width = mi.input_width;
+                    ai_ncfg.height = mi.input_height;
+                }
+            }
+            ai_ncfg.input_format = acfg.format;
+            ai_ncfg.bpp = acfg.bpp;
+            aicam_result_t ar = video_ai_node_set_config(g_ai_service.ai_node, &ai_ncfg);
+            LOG_SVC_INFO("[APPLY] ai node set: %d (%ux%u fmt=%u bpp=%u)",
+                          (int)ar, (unsigned)ai_ncfg.width,
+                          (unsigned)ai_ncfg.height,
+                          (unsigned)ai_ncfg.input_format,
+                          (unsigned)ai_ncfg.bpp);
+        }
+    }
+
+    /* Keep the service config coherent (draw callback / stats consumers). */
+    g_ai_service.config.width = w;
+    g_ai_service.config.height = h;
+    g_ai_service.config.format = fmt;
+    g_ai_service.config.bpp = bpp;
+
+    LOG_SVC_INFO("Stream params applied: res=%u (%ux%u pipe%u), bitrate=%ukbps, gop=%us, was_running=%d",
+                 (unsigned)vs.resolution, (unsigned)w, (unsigned)h, (unsigned)pipe_id,
+                 (unsigned)vs.bitrate_kbps, (unsigned)vs.gop_sec, (int)was_running);
+    if (was_running || (video_hub_is_initialized() && video_hub_has_subscribers())) {
+        /* ai_pipeline_start's self-heal restarts the (now stopped) camera
+         * device, picking up the pipe1 params set above. */
+        aicam_result_t result = ai_pipeline_start();
+        if (result != AICAM_OK) {
+            LOG_SVC_ERROR("Failed to restart pipelines after stream param change: %d", result);
+            return result;
+        }
+    }
+
+    return AICAM_OK;
 }
 
 /* ==================== AI Statistics Functions ==================== */
@@ -2328,13 +2730,34 @@ static void ai_telemetry_deinit(void)
 void ai_get_normal_config(ai_service_config_t *config)
 {
     if (!config) return;
-    
+
     memset(config, 0, sizeof(ai_service_config_t));
-    config->width = 1280;
-    config->height = 720;
+    /* Live stream geometry comes from the persisted video stream parameters
+     * (web-configurable); PIPE2 follows the AI pipe size. */
+    video_stream_param_t vs;
+    (void)json_config_get_video_stream_param(&vs);
+    switch ((stream_resolution_t)vs.resolution) {
+    case STREAM_RES_PIPE2:
+        json_config_get_ai_pipe_size(&config->width, &config->height);
+        /* PIPE2 = RGB565 (final - see apply_stream_params). */
+        config->format = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
+        config->bpp = 2;
+        break;
+    case STREAM_RES_1080P:
+        config->width = 1920;
+        config->height = 1080;
+        config->format = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
+        config->bpp = 2;
+        break;
+    case STREAM_RES_720P:
+    default:
+        config->width = 1280;
+        config->height = 720;
+        config->format = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
+        config->bpp = 2;
+        break;
+    }
     config->fps = 30;
-    config->format = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
-    config->bpp = 2;
     config->confidence_threshold = json_config_get_confidence_threshold();
     config->nms_threshold = json_config_get_nms_threshold();
     config->max_detections = 32;
@@ -2350,13 +2773,37 @@ void ai_get_normal_config(ai_service_config_t *config)
 void ai_get_ai_config(ai_service_config_t *config)
 {
     if (!config) return;
-    
+
     memset(config, 0, sizeof(ai_service_config_t));
-    config->width = 224;
-    config->height = 224;
     config->fps = 30;
-    config->format = DCMIPP_PIXEL_PACKER_FORMAT_RGB888_YUV444_1;
-    config->bpp = 3;
+    /* The AI node owns the pipe2 SET_PARAM at boot, and pipe2's format must
+     * match what the stream pipeline uses - the same rule as
+     * apply_stream_params: when the preview streams FROM pipe2, pipe2 carries
+     * the stream format (EXPERIMENT B: RGB888/3 + enable_swap=0, geometry
+     * from the persisted AI pipe size, matching ai_get_normal_config and the
+     * camera/encoder nodes); otherwise pipe2 stays the NPU's model input
+     * (packed RGB888/3).
+     * A hardcoded RGB888 here booted pipe2 as RGB888 while the camera and
+     * encoder nodes ran RGB565 - the encoder rejected every frame on size
+     * (ret=-2) and the PIPE2 preview stayed dead until a UI stream-config
+     * apply happened to rewrite the driver. */
+    {
+        video_stream_param_t vs;
+        (void)json_config_get_video_stream_param(&vs);
+        if (vs.resolution == STREAM_RES_PIPE2) {
+            json_config_get_ai_pipe_size(&config->width, &config->height);
+            /* PIPE2 = RGB565 (final - see apply_stream_params). */
+            config->format = DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1;
+            config->bpp = 2;
+        } else {
+            /* Model-input pipe: zero geometry tells the AI node to derive
+             * the size from model_info (EXPERIMENT H semantics). */
+            config->width = 0;
+            config->height = 0;
+            config->format = DCMIPP_PIXEL_PACKER_FORMAT_RGB888_YUV444_1;
+            config->bpp = 3;
+        }
+    }
     config->confidence_threshold = json_config_get_confidence_threshold();
     config->nms_threshold = json_config_get_nms_threshold();
     config->max_detections = 32;
@@ -2646,11 +3093,13 @@ aicam_result_t ai_color_convert(const uint8_t *src_data,
     
     *dst_data = converted_data;
     *dst_size = dst_size_tmp;
-    
+
     LOG_SVC_INFO("Color conversion completed: %d bytes", dst_size_tmp);
-    
+
     return AICAM_OK;
 }
+
+
 
 aicam_result_t ai_single_image_inference(const model_validation_config_t *model_validation_config,
                                          ai_single_inference_result_t *result)

@@ -104,8 +104,11 @@
 #define NVS_KEY_AE_LAST_STATE           "ae_state"
  #define NVS_KEY_IMAGE_FAST_RESOLUTION   "img_fast_res"
  #define NVS_KEY_IMAGE_FAST_JPEG_QUALITY "img_fast_jq"
+ #define NVS_KEY_IMAGE_RUNTIME_SKIP_FRAMES "img_rt_skip"
+ #define NVS_KEY_IMAGE_RUNTIME_JPEG_QUALITY "img_rt_jq"
  #define NVS_KEY_CAPTURE_DISABLE_COMM    "capture_un_comm"
  #define NVS_KEY_CAPTURE_STORAGE_AI      "capture_stor_ai"
+ #define NVS_KEY_IMAGE_AI_CAPTURE        "img_ai_cap_en"
  #define NVS_KEY_CAPTURE_QUICK_MODE      "capture_qmode"
  #define NVS_KEY_LIGHT_CONNECTED         "light_conn"
  #define NVS_KEY_LIGHT_MODE              "light_mode"
@@ -362,6 +365,7 @@
 #define NVS_KEY_PIR_ENABLE          "pir_enable"
 #define NVS_KEY_PIR_PIN             "pir_pin"
 #define NVS_KEY_PIR_TRIGGER_TYPE    "pir_type"
+#define NVS_KEY_PIR_DEVICE_TYPE     "pir_dev_type"
 #define NVS_KEY_PIR_SENSITIVITY     "pir_sens"
 #define NVS_KEY_PIR_IGNORE_TIME     "pir_ignore"
 #define NVS_KEY_PIR_PULSE_COUNT     "pir_pulse"
@@ -425,6 +429,15 @@
 #define NVS_KEY_CAPUP_MAX_PENDING   "cu_max_pd"
 #define NVS_KEY_CAPUP_FLASH_MAX     "cu_fl_max"
 #define NVS_KEY_CAPUP_COMM_TYPE     "cu_comm"
+#define NVS_KEY_CAPUP_AI_FLT_EN     "cu_ai_flt_en"
+#define NVS_KEY_CAPUP_AI_FLT_TH     "cu_ai_flt_th"
+#define NVS_KEY_CAPUP_AI_FLT_LB     "cu_ai_flt_lb"
+
+// Live video stream parameter key names
+#define NVS_KEY_VSTREAM_VERSION     "vs_ver"
+#define NVS_KEY_VSTREAM_RESOLUTION  "vs_res"
+#define NVS_KEY_VSTREAM_BITRATE     "vs_br"
+#define NVS_KEY_VSTREAM_GOP_SEC     "vs_gop"
 
 
  /* ==================== Internal Function Prototypes ==================== */
@@ -452,6 +465,8 @@ aicam_result_t json_config_save_webhook_config_to_nvs(const webhook_config_t *co
 aicam_result_t json_config_load_webhook_from_nvs(webhook_config_t *config);
 aicam_result_t json_config_save_capture_upload_to_nvs(const capture_upload_config_t *config);
 aicam_result_t json_config_load_capture_upload_from_nvs(capture_upload_config_t *config);
+aicam_result_t json_config_save_video_stream_to_nvs(const video_stream_param_t *config);
+aicam_result_t json_config_load_video_stream_from_nvs(video_stream_param_t *config);
  aicam_result_t json_config_save_to_nvs(const aicam_global_config_t *config);
  aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config);
  

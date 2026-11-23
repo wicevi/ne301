@@ -504,9 +504,14 @@ typedef void (*aicam_error_handler_t)(aicam_result_t error_code, const char *err
 /* ==================== Debug and Assert Macros ==================== */
 
 #ifdef DEBUG
+    /* Project assert policy: route to the common handler in main.c
+     * (print + SystemReset). A bare while(1) hit from thread mode never
+     * stops the Realtime-priority watchdog feeder - the IWDG keeps being
+     * fed and the unit hangs forever. */
+    void __assert_func(const char *file, int line, const char *func, const char *expr);
     #define AICAM_ASSERT(expr)      do { \
                                         if (!(expr)) { \
-                                            while(1); \
+                                            __assert_func(__FILE__, __LINE__, __func__, #expr); \
                                         } \
                                     } while(0)
 #else

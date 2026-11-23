@@ -124,6 +124,11 @@ static void pose_draw_keypoints(mpe_draw_conf_t *conf, device_t *draw,
     }
 
     draw_line_param_t line_param = {0};
+    /* All AI draw targets are RGB565 buffers (preview pipe1 frames, capture
+     * images converted to RGB565 before drawing). State the format in every
+     * command so a device-wide mode left behind by another path (e.g. the
+     * PIPE2 preview ARGB8888 conversion) cannot corrupt the boxes. */
+    line_param.out_colormode = DMA2D_OUTPUT_RGB565;
     for (int i = 0; i < conf->num_binds; i++) {
         int k1 = conf->binds[i].keypoint1;
         int k2 = conf->binds[i].keypoint2;
@@ -143,6 +148,8 @@ static void pose_draw_keypoints(mpe_draw_conf_t *conf, device_t *draw,
 
     draw_printf_param_t print_param = {0};
     draw_dot_param_t dot_param = {0};
+    print_param.out_colormode = DMA2D_OUTPUT_RGB565;
+    dot_param.out_colormode = DMA2D_OUTPUT_RGB565;
     for (int i = 0; i < nb_keypoints; i++) {
         if (keypoint_valid[i]) {
 
@@ -252,6 +259,7 @@ int mpe_draw_result(mpe_draw_conf_t *mpe_conf, mpe_detect_t *result)
     clamp_point(mpe_conf->image_width, mpe_conf->image_height, &x0, &y0);
 
     draw_rect_param_t rect_param = {0};
+    rect_param.out_colormode = DMA2D_OUTPUT_RGB565; /* draw targets are RGB565 */
     rect_param.p_dst = mpe_conf->p_dst;
     rect_param.dst_width = mpe_conf->image_width;
     rect_param.dst_height = mpe_conf->image_height;
@@ -267,9 +275,14 @@ int mpe_draw_result(mpe_draw_conf_t *mpe_conf, mpe_detect_t *result)
     if(rect_param.y_pos + rect_param.height > rect_param.dst_height){
         rect_param.height = rect_param.dst_height - rect_param.y_pos - mpe_conf->line_width;
     }
+    /* Same as od_draw_result: skip fully-clipped detections entirely. */
+    if (rect_param.width <= 0 || rect_param.height <= 0) {
+        return 0;
+    }
     device_ioctl(draw, DRAW_CMD_RECT, (uint8_t *)&rect_param, sizeof(draw_rect_param_t));
 
     draw_printf_param_t print_param = {0};
+    print_param.out_colormode = DMA2D_OUTPUT_RGB565;
     snprintf(print_param.str, sizeof(print_param.str), "%s %5.2f", result->class_name, result->conf);
     print_param.p_font = &mpe_conf->font;
     print_param.p_dst = mpe_conf->p_dst;
@@ -336,6 +349,10 @@ int od_draw_result(od_draw_conf_t *od_conf, od_detect_t *result)
 
     draw_printf_param_t print_param = {0};
     draw_rect_param_t rect_param = {0};
+    /* draw targets are RGB565 (camera frames and the validation path's
+     * converted draw buffer); state it per command (see pose_draw_keypoints) */
+    print_param.out_colormode = DMA2D_OUTPUT_RGB565;
+    rect_param.out_colormode = DMA2D_OUTPUT_RGB565;
 
     if(od_conf == NULL || result == NULL){
         LOG_DRV_ERROR("mpe_draw_result invalid param\r\n");
@@ -368,6 +385,12 @@ int od_draw_result(od_draw_conf_t *od_conf, od_detect_t *result)
     if(rect_param.y_pos + rect_param.height > od_conf->image_height){
         rect_param.height = od_conf->image_height - rect_param.y_pos - od_conf->line_width;
     }
+    /* Fully-off-screen or degenerate detection: skip the box AND the label.
+     * Drawing the label alone at the clamped edge shows up as a stray label
+     * with no box (reported as an "extra" label on the validation page). */
+    if (rect_param.width <= 0 || rect_param.height <= 0) {
+        return 0;
+    }
     device_ioctl(draw, DRAW_CMD_RECT, (uint8_t *)&rect_param, sizeof(draw_rect_param_t));
 
     // draw_colorrect_param_t colorrect_param = {0};
@@ -388,7 +411,7 @@ int od_draw_result(od_draw_conf_t *od_conf, od_detect_t *result)
     // }
     // device_ioctl(draw, DRAW_CMD_BLEND_COLOR_RECT, (uint8_t *)&colorrect_param, sizeof(draw_colorrect_param_t));
 
-    snprintf(print_param.str, sizeof(print_param.str), "%s", result->class_name);
+    snprintf(print_param.str, sizeof(print_param.str), "%s %5.2f", result->class_name, result->conf);
 
     // int text_len = strlen(print_param.str);
     // int text_width = text_len * od_conf->font.width;
@@ -622,6 +645,7 @@ int iseg_draw_result(iseg_draw_conf_t *iseg_conf, iseg_detect_t *result, uint32_
     } else {
         /* Fallback: semi-transparent filled bbox when no mask data */
         draw_colorrect_param_t colorrect_param = {0};
+        colorrect_param.out_colormode = DMA2D_OUTPUT_RGB565; /* target is RGB565 */
         colorrect_param.p_dst = iseg_conf->p_dst;
         colorrect_param.dst_width = iseg_conf->image_width;
         colorrect_param.dst_height = iseg_conf->image_height;
@@ -642,6 +666,7 @@ int iseg_draw_result(iseg_draw_conf_t *iseg_conf, iseg_detect_t *result, uint32_
 
     /* Class label + confidence (no bounding box — mask+label only) */
     draw_printf_param_t print_param = {0};
+    print_param.out_colormode = DMA2D_OUTPUT_RGB565; /* target is RGB565 */
     snprintf(print_param.str, sizeof(print_param.str), "%s %5.2f", result->class_name, result->conf);
     print_param.p_font = &iseg_conf->font;
     print_param.p_dst = iseg_conf->p_dst;

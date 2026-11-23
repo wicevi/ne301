@@ -283,6 +283,9 @@ static void parse_device_service(cJSON *json, device_service_config_t *cfg)
         json_get_uint32(img_cfg, "fast_capture_skip_frames", &cfg->image_config.fast_capture_skip_frames);
         json_get_uint32(img_cfg, "fast_capture_resolution", &cfg->image_config.fast_capture_resolution);
         json_get_uint32(img_cfg, "fast_capture_jpeg_quality", &cfg->image_config.fast_capture_jpeg_quality);
+        json_get_uint32(img_cfg, "runtime_capture_skip_frames", &cfg->image_config.runtime_capture_skip_frames);
+        json_get_uint32(img_cfg, "runtime_capture_jpeg_quality", &cfg->image_config.runtime_capture_jpeg_quality);
+        json_get_bool(img_cfg, "ai_capture_enable", &cfg->image_config.ai_capture_enable);
         json_get_bool(img_cfg, "capture_disable_comm", &cfg->image_config.capture_disable_comm);
         json_get_bool(img_cfg, "capture_storage_ai", &cfg->image_config.capture_storage_ai);
     }
@@ -718,6 +721,13 @@ static void parse_work_mode(cJSON *json, work_mode_config_t *cfg)
         json_get_bool(pir, "enable", &cfg->pir_trigger.enable);
         json_get_uint32(pir, "pin_number", &cfg->pir_trigger.pin_number);
         json_get_uint32(pir, "trigger_type", (uint32_t *)&cfg->pir_trigger.trigger_type);
+        {
+            uint32_t dev_type = (uint32_t)cfg->pir_trigger.device_type;
+            json_get_uint32(pir, "device_type", &dev_type);
+            cfg->pir_trigger.device_type =
+                (dev_type <= (uint32_t)AICAM_PIR_DEVICE_IO) ? (aicam_pir_device_type_t)dev_type
+                                                            : AICAM_PIR_DEVICE_PIR;
+        }
         // PIR sensor configuration parameters
         json_get_uint8(pir, "sensitivity_level", &cfg->pir_trigger.sensitivity_level);
         json_get_uint8(pir, "ignore_time_s", &cfg->pir_trigger.ignore_time_s);
@@ -876,10 +886,28 @@ static void parse_capture_upload_config(cJSON *json, capture_upload_config_t *cf
     json_get_uint32(json, "max_pending_records", &cfg->max_pending_records);
     json_get_uint32(json, "flash_max_records", &cfg->flash_max_records);
     json_get_uint32(json, "upload_comm_type", &cfg->upload_comm_type);
+    json_get_bool(json, "ai_filter_enable", &cfg->ai_filter_enable);
+    json_get_uint8(json, "ai_filter_threshold", &cfg->ai_filter_threshold);
+    json_get_string(json, "ai_filter_labels",
+                    cfg->ai_filter_labels, sizeof(cfg->ai_filter_labels));
 
     /* Same normalization the web-API setter applies, so a hand-edited file
      * lands on sane values instead of poisoning the upload pipeline. */
     json_config_capture_upload_normalize(cfg);
+}
+
+static void parse_video_stream_config(cJSON *json, video_stream_param_t *cfg)
+{
+    uint32_t temp;
+
+    json_get_uint32(json, "version", &cfg->version);
+
+    temp = cfg->resolution;
+    json_get_uint32(json, "resolution", &temp);
+    cfg->resolution = (uint8_t)temp;
+
+    json_get_uint32(json, "bitrate_kbps", &cfg->bitrate_kbps);
+    json_get_uint8(json, "gop_sec", &cfg->gop_sec);
 }
 
 /* ==================== JSON Serialization Helpers (static) ==================== */
@@ -1079,6 +1107,9 @@ static cJSON *serialize_device_service(const device_service_config_t *cfg)
     cJSON_AddNumberToObject(img_cfg, "fast_capture_skip_frames", cfg->image_config.fast_capture_skip_frames);
     cJSON_AddNumberToObject(img_cfg, "fast_capture_resolution", cfg->image_config.fast_capture_resolution);
     cJSON_AddNumberToObject(img_cfg, "fast_capture_jpeg_quality", cfg->image_config.fast_capture_jpeg_quality);
+    cJSON_AddNumberToObject(img_cfg, "runtime_capture_skip_frames", cfg->image_config.runtime_capture_skip_frames);
+    cJSON_AddNumberToObject(img_cfg, "runtime_capture_jpeg_quality", cfg->image_config.runtime_capture_jpeg_quality);
+    cJSON_AddBoolToObject(img_cfg, "ai_capture_enable", cfg->image_config.ai_capture_enable);
     cJSON_AddBoolToObject(img_cfg, "capture_disable_comm", cfg->image_config.capture_disable_comm);
     cJSON_AddBoolToObject(img_cfg, "capture_storage_ai", cfg->image_config.capture_storage_ai);
     cJSON_AddItemToObject(json, "image_config", img_cfg);
@@ -1392,6 +1423,7 @@ static cJSON *serialize_work_mode(const work_mode_config_t *cfg)
     cJSON_AddBoolToObject(pir, "enable", cfg->pir_trigger.enable);
     cJSON_AddNumberToObject(pir, "pin_number", cfg->pir_trigger.pin_number);
     cJSON_AddNumberToObject(pir, "trigger_type", cfg->pir_trigger.trigger_type);
+    cJSON_AddNumberToObject(pir, "device_type", cfg->pir_trigger.device_type);
     // PIR sensor configuration parameters
     cJSON_AddNumberToObject(pir, "sensitivity_level", cfg->pir_trigger.sensitivity_level);
     cJSON_AddNumberToObject(pir, "ignore_time_s", cfg->pir_trigger.ignore_time_s);
@@ -1483,6 +1515,19 @@ static cJSON *serialize_capture_upload_config(const capture_upload_config_t *cfg
     cJSON_AddNumberToObject(json, "max_pending_records", cfg->max_pending_records);
     cJSON_AddNumberToObject(json, "flash_max_records", cfg->flash_max_records);
     cJSON_AddNumberToObject(json, "upload_comm_type", cfg->upload_comm_type);
+    cJSON_AddBoolToObject(json, "ai_filter_enable", cfg->ai_filter_enable);
+    cJSON_AddNumberToObject(json, "ai_filter_threshold", cfg->ai_filter_threshold);
+    cJSON_AddStringToObject(json, "ai_filter_labels", cfg->ai_filter_labels);
+    return json;
+}
+
+static cJSON *serialize_video_stream_config(const video_stream_param_t *cfg)
+{
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddNumberToObject(json, "version", cfg->version);
+    cJSON_AddNumberToObject(json, "resolution", cfg->resolution);
+    cJSON_AddNumberToObject(json, "bitrate_kbps", cfg->bitrate_kbps);
+    cJSON_AddNumberToObject(json, "gop_sec", cfg->gop_sec);
     return json;
 }
 
@@ -1574,6 +1619,10 @@ aicam_result_t json_config_parse_json_object(const char *json_str, aicam_global_
     if (cJSON_IsObject(capup))
         parse_capture_upload_config(capup, &config->capture_upload);
 
+    cJSON *vstream = cJSON_GetObjectItem(root, "video_stream_config");
+    if (cJSON_IsObject(vstream))
+        parse_video_stream_config(vstream, &config->video_stream);
+
     cJSON *auth_mgr = cJSON_GetObjectItem(root, "auth_mgr");
     if (cJSON_IsObject(auth_mgr))
         parse_auth_mgr(auth_mgr, &config->auth_mgr);
@@ -1623,6 +1672,7 @@ aicam_result_t json_config_serialize_json_object(const aicam_global_config_t *co
     cJSON_AddItemToObject(root, "work_mode_config", serialize_work_mode(&config->work_mode_config));
     cJSON_AddItemToObject(root, "webhook_config", serialize_webhook_config(&config->webhook_config));
     cJSON_AddItemToObject(root, "capture_upload_config", serialize_capture_upload_config(&config->capture_upload));
+    cJSON_AddItemToObject(root, "video_stream_config", serialize_video_stream_config(&config->video_stream));
     cJSON_AddItemToObject(root, "auth_mgr", serialize_auth_mgr(&config->auth_mgr));
 
     // Print to string buffer

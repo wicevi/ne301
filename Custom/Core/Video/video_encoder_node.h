@@ -27,7 +27,8 @@ typedef struct {
     uint32_t fps;                         // Frame rate
     uint32_t input_type;                  // Input format (JPEGENC_RGB565, etc.)
     uint32_t quality;                     // Encoding quality (0-100)
-    uint32_t bitrate;                     // Target bitrate (kbps)
+    uint32_t bitrate;                     // Target bitrate (kbps), 0 = derive from w*h*fps
+    uint32_t gop_len;                     // IDR interval in frames, 0 = fps-1 (1 second)
     uint32_t pipe_id;                     // Pipeline ID (1 or 2)
 } video_encoder_config_t;
 

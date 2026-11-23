@@ -59,6 +59,11 @@ typedef struct {
     uint8_t *data;
 } DRAW_Font_t;
 
+/* Sentinel for the per-command colormode overrides: "use the device-wide
+ * mode set by DRAW_CMD_SET_COLOR_MODE". Do NOT use 0 for this —
+ * DMA2D_OUTPUT_ARGB8888 is 0x00000000U and is a legitimate explicit value. */
+#define DRAW_COLOR_MODE_DEFAULT 0xFFFFFFFFU
+
 typedef struct {
     sFONT *p_font_in;
     DRAW_Font_t *p_font;
@@ -75,6 +80,7 @@ typedef struct {
     int height;          // Height of the area to fill (pixels)
     int line_width;      // line wide
     uint32_t color;      // Fill color (ARGB8888 format)
+    uint32_t out_colormode; // Optional override; DRAW_COLOR_MODE_DEFAULT = device default
 } draw_fill_param_t;
 
 // Parameters for drawing a rectangle border
@@ -88,6 +94,7 @@ typedef struct {
     int height;          // Rectangle height (pixels)
     int line_width;      // Border line  wide
     uint32_t color;      // Border color (ARGB8888 format)
+    uint32_t out_colormode; // Optional override; DRAW_COLOR_MODE_DEFAULT = device default
 } draw_rect_param_t;
 
 // Parameters for copying a rectangular area from source to destination
@@ -100,6 +107,14 @@ typedef struct {
     int src_height;      // Height of the source buffer (pixels)
     int x_offset;        // X offset in destination buffer where source will be copied
     int y_offset;        // Y offset in destination buffer where source will be copied
+    /* Optional per-command overrides of the device-wide color mode.
+     * DRAW_COLOR_MODE_DEFAULT (0xFFFFFFFF) = use the mode set by
+     * DRAW_CMD_SET_COLOR_MODE. Carrying the modes in the command keeps a
+     * SET+COPY/RECT pair from another thread (capture path vs. preview
+     * draw/conversion) from interleaving with this one. 0 is a valid
+     * explicit value (DMA2D_OUTPUT_ARGB8888). */
+    uint32_t in_colormode;  // DMA2D_INPUT_*  applied to p_src
+    uint32_t out_colormode; // DMA2D_OUTPUT_* applied to p_dst
 } draw_copy_param_t;
 
 // Parameters for drawing a formatted string to the buffer
@@ -111,6 +126,7 @@ typedef struct {
     int x_pos;           // X position to start drawing the string
     int y_pos;           // Y position to start drawing the string
     char str[MAX_LINE_CHAR];        // Null-terminated string to draw
+    uint32_t out_colormode; // Optional override; DRAW_COLOR_MODE_DEFAULT = device default
 } draw_printf_param_t;
 
 // Parameters for copying a clipped (sub) region from source to destination
@@ -138,6 +154,7 @@ typedef struct {
     int y_pos;
     int dot_width;
     uint32_t color;
+    uint32_t out_colormode; // Optional override; DRAW_COLOR_MODE_DEFAULT = device default
 } draw_dot_param_t;
 
 typedef struct {
@@ -150,6 +167,7 @@ typedef struct {
     int y2;
     int line_width;
     uint32_t color;
+    uint32_t out_colormode; // Optional override; DRAW_COLOR_MODE_DEFAULT = device default
 } draw_line_param_t;
 
 typedef struct {
@@ -178,6 +196,7 @@ typedef struct {
     int height;          // Fill block height
     uint32_t color;      // Fill color (ARGB8888 format)
     uint8_t alpha;       // Transparency (0~255)
+    uint32_t out_colormode; // Optional override; DRAW_COLOR_MODE_DEFAULT = device default
 } draw_colorrect_param_t;
 
 typedef struct {

@@ -152,7 +152,11 @@ aicam_result_t json_config_save_work_mode_config_to_nvs(const work_mode_config_t
     result = json_config_nvs_write_uint8(NVS_KEY_PIR_TRIGGER_TYPE, config->pir_trigger.trigger_type);
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save pir trigger type to NVS");
-    
+
+    result = json_config_nvs_write_uint8(NVS_KEY_PIR_DEVICE_TYPE, (uint8_t)config->pir_trigger.device_type);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save pir device type to NVS");
+
     // Save PIR sensor configuration parameters
     result = json_config_nvs_write_uint8(NVS_KEY_PIR_SENSITIVITY, config->pir_trigger.sensitivity_level);
     if (result != AICAM_OK)
@@ -496,6 +500,15 @@ aicam_result_t json_config_save_capture_upload_to_nvs(const capture_upload_confi
     r = json_config_nvs_write_uint8(NVS_KEY_CAPUP_COMM_TYPE, (uint8_t)config->upload_comm_type);
     if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save capup upload_comm_type"); result = r; }
 
+    r = json_config_nvs_write_bool(NVS_KEY_CAPUP_AI_FLT_EN, config->ai_filter_enable);
+    if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save capup ai_filter_enable"); result = r; }
+
+    r = json_config_nvs_write_uint8(NVS_KEY_CAPUP_AI_FLT_TH, config->ai_filter_threshold);
+    if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save capup ai_filter_threshold"); result = r; }
+
+    r = json_config_nvs_write_string(NVS_KEY_CAPUP_AI_FLT_LB, config->ai_filter_labels);
+    if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save capup ai_filter_labels"); result = r; }
+
     LOG_CORE_INFO("Capture-upload configuration saved to NVS");
     return result;
 }
@@ -545,6 +558,69 @@ aicam_result_t json_config_load_capture_upload_from_nvs(capture_upload_config_t 
          * default on every reboot. */
         config->upload_comm_type =
             (u8 >= (uint8_t)COMM_TYPE_MAX) ? (uint32_t)COMM_TYPE_NONE : (uint32_t)u8;
+    }
+    if (json_config_nvs_read_bool  (NVS_KEY_CAPUP_AI_FLT_EN, &b) == AICAM_OK) config->ai_filter_enable = b;
+    if (json_config_nvs_read_uint8 (NVS_KEY_CAPUP_AI_FLT_TH, &u8) == AICAM_OK) {
+        /* Same normalization as the setter: 0/out-of-range = default. */
+        if (u8 == 0 || u8 > CAPUP_AI_FILTER_TH_MAX) u8 = CAPUP_AI_FILTER_TH_DEFAULT;
+        if (u8 < CAPUP_AI_FILTER_TH_MIN) u8 = CAPUP_AI_FILTER_TH_MIN;
+        config->ai_filter_threshold = u8;
+    }
+    /* Empty string (key absent) = all labels allowed. */
+    (void)json_config_nvs_read_string(NVS_KEY_CAPUP_AI_FLT_LB,
+                                      config->ai_filter_labels,
+                                      sizeof(config->ai_filter_labels));
+
+    return AICAM_OK;
+}
+
+/* ==================== Video Stream Parameters ==================== */
+
+aicam_result_t json_config_save_video_stream_to_nvs(const video_stream_param_t *config)
+{
+    if (!config) return AICAM_ERROR_INVALID_PARAM;
+
+    aicam_result_t result = AICAM_OK;
+    aicam_result_t r;
+
+    r = json_config_nvs_write_uint32(NVS_KEY_VSTREAM_VERSION, config->version);
+    if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save vstream version"); result = r; }
+
+    r = json_config_nvs_write_uint8(NVS_KEY_VSTREAM_RESOLUTION, config->resolution);
+    if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save vstream resolution"); result = r; }
+
+    r = json_config_nvs_write_uint32(NVS_KEY_VSTREAM_BITRATE, config->bitrate_kbps);
+    if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save vstream bitrate"); result = r; }
+
+    r = json_config_nvs_write_uint8(NVS_KEY_VSTREAM_GOP_SEC, config->gop_sec);
+    if (r != AICAM_OK) { LOG_CORE_ERROR("Failed to save vstream gop"); result = r; }
+
+    LOG_CORE_INFO("Video stream parameters saved to NVS");
+    return result;
+}
+
+aicam_result_t json_config_load_video_stream_from_nvs(video_stream_param_t *config)
+{
+    if (!config) return AICAM_ERROR_INVALID_PARAM;
+
+    /* Start with defaults, then overlay anything found in NVS. */
+    json_config_video_stream_defaults(config);
+
+    uint32_t u32 = 0;
+    uint8_t  u8  = 0;
+
+    if (json_config_nvs_read_uint32(NVS_KEY_VSTREAM_VERSION, &u32) == AICAM_OK) config->version = u32;
+    if (json_config_nvs_read_uint8 (NVS_KEY_VSTREAM_RESOLUTION, &u8) == AICAM_OK &&
+        u8 <= (uint8_t)STREAM_RES_1080P) {
+        config->resolution = u8;
+    }
+    if (json_config_nvs_read_uint32(NVS_KEY_VSTREAM_BITRATE, &u32) == AICAM_OK &&
+        u32 >= VSTREAM_BITRATE_MIN_KBPS && u32 <= VSTREAM_BITRATE_MAX_KBPS) {
+        config->bitrate_kbps = u32;
+    }
+    if (json_config_nvs_read_uint8 (NVS_KEY_VSTREAM_GOP_SEC, &u8) == AICAM_OK &&
+        (u8 == 1 || u8 == 2 || u8 == 4)) {
+        config->gop_sec = u8;
     }
 
     return AICAM_OK;
@@ -695,6 +771,14 @@ aicam_result_t json_config_save_device_service_image_config_to_nvs(const image_c
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save image fast capture JPEG quality to NVS");
 
+    result = json_config_nvs_write_uint32(NVS_KEY_IMAGE_RUNTIME_SKIP_FRAMES, config->runtime_capture_skip_frames);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save runtime capture skip frames to NVS");
+
+    result = json_config_nvs_write_uint32(NVS_KEY_IMAGE_RUNTIME_JPEG_QUALITY, config->runtime_capture_jpeg_quality);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save runtime capture JPEG quality to NVS");
+
     result = json_config_nvs_write_bool(NVS_KEY_CAPTURE_DISABLE_COMM, config->capture_disable_comm);
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save capture disable comm to NVS");
@@ -702,6 +786,10 @@ aicam_result_t json_config_save_device_service_image_config_to_nvs(const image_c
     result = json_config_nvs_write_bool(NVS_KEY_CAPTURE_STORAGE_AI, config->capture_storage_ai);
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save capture storage AI to NVS");
+
+    result = json_config_nvs_write_bool(NVS_KEY_IMAGE_AI_CAPTURE, config->ai_capture_enable);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save AI capture enable to NVS");
 
     LOG_CORE_INFO("Device service image configuration saved to NVS successfully");
     return result;
@@ -1869,6 +1957,11 @@ aicam_result_t json_config_save_to_nvs(const aicam_global_config_t *config)
     if (result != AICAM_OK)
         LOG_CORE_ERROR("Failed to save capture-upload configuration to NVS");
 
+    // Save live video stream parameters
+    result = json_config_save_video_stream_to_nvs(&config->video_stream);
+    if (result != AICAM_OK)
+        LOG_CORE_ERROR("Failed to save video stream parameters to NVS");
+
     LOG_CORE_INFO("All config saved to NVS successfully");
     return AICAM_OK;
 }
@@ -2125,6 +2218,9 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
     // Load capture-upload configuration (idempotent — fills with defaults when keys missing)
     json_config_load_capture_upload_from_nvs(&config->capture_upload);
 
+    // Load live video stream parameters (idempotent — defaults when keys missing)
+    json_config_load_video_stream_from_nvs(&config->video_stream);
+
     // Load device service configuration - image config
     result = json_config_nvs_read_uint32(NVS_KEY_IMAGE_BRIGHTNESS, &temp_uint32);
     if (result == AICAM_OK)
@@ -2211,6 +2307,23 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
     else
         json_config_nvs_write_uint32(NVS_KEY_IMAGE_FAST_JPEG_QUALITY, config->device_service.image_config.fast_capture_jpeg_quality);
 
+    result = json_config_nvs_read_uint32(NVS_KEY_IMAGE_RUNTIME_SKIP_FRAMES, &temp_uint32);
+    if (result == AICAM_OK)
+        config->device_service.image_config.runtime_capture_skip_frames = temp_uint32 > 30 ? 0 : temp_uint32;
+    else {
+        config->device_service.image_config.runtime_capture_skip_frames = 0;   /* field default */
+        json_config_nvs_write_uint32(NVS_KEY_IMAGE_RUNTIME_SKIP_FRAMES, 0);
+    }
+
+    result = json_config_nvs_read_uint32(NVS_KEY_IMAGE_RUNTIME_JPEG_QUALITY, &temp_uint32);
+    if (result == AICAM_OK)
+        config->device_service.image_config.runtime_capture_jpeg_quality =
+            (temp_uint32 >= 1 && temp_uint32 <= 100) ? temp_uint32 : 60;
+    else {
+        config->device_service.image_config.runtime_capture_jpeg_quality = 60; /* field default */
+        json_config_nvs_write_uint32(NVS_KEY_IMAGE_RUNTIME_JPEG_QUALITY, 60);
+    }
+
     result = json_config_nvs_read_bool(NVS_KEY_CAPTURE_DISABLE_COMM, &temp_bool);
     if (result == AICAM_OK)
         config->device_service.image_config.capture_disable_comm = temp_bool;
@@ -2220,6 +2333,10 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
     result = json_config_nvs_read_bool(NVS_KEY_CAPTURE_STORAGE_AI, &temp_bool);
     if (result == AICAM_OK)
         config->device_service.image_config.capture_storage_ai = temp_bool;
+
+    result = json_config_nvs_read_bool(NVS_KEY_IMAGE_AI_CAPTURE, &temp_bool);
+    if (result == AICAM_OK)
+        config->device_service.image_config.ai_capture_enable = temp_bool;
     else
         json_config_nvs_write_bool(NVS_KEY_CAPTURE_STORAGE_AI, config->device_service.image_config.capture_storage_ai);
 
@@ -3209,7 +3326,15 @@ aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config)
         config->work_mode_config.pir_trigger.trigger_type = temp_uint8;
     else
         json_config_nvs_write_uint8(NVS_KEY_PIR_TRIGGER_TYPE, config->work_mode_config.pir_trigger.trigger_type);
-    
+
+    result = json_config_nvs_read_uint8(NVS_KEY_PIR_DEVICE_TYPE, &temp_uint8);
+    if (result == AICAM_OK)
+        config->work_mode_config.pir_trigger.device_type =
+            (temp_uint8 <= (uint8_t)AICAM_PIR_DEVICE_IO) ? (aicam_pir_device_type_t)temp_uint8
+                                                          : AICAM_PIR_DEVICE_PIR;
+    else
+        json_config_nvs_write_uint8(NVS_KEY_PIR_DEVICE_TYPE, (uint8_t)config->work_mode_config.pir_trigger.device_type);
+
     // Load PIR sensor configuration parameters
     result = json_config_nvs_read_uint8(NVS_KEY_PIR_SENSITIVITY, &temp_uint8);
     if (result == AICAM_OK)

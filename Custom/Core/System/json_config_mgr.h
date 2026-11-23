@@ -59,17 +59,27 @@ typedef struct {
      aicam_trigger_type_t input_trigger_type;
      aicam_trigger_type_t output_trigger_type;
  } io_trigger_config_t;
- 
+
+/** What kind of device drives the PIR wake input. */
+typedef enum {
+    AICAM_PIR_DEVICE_PIR = 0,  /* Digital PIR conditioning IC: chip-level config
+                                  (sensitivity/anti-jamming) applies, any INT
+                                  pulse means motion */
+    AICAM_PIR_DEVICE_IO  = 1,  /* Plain IO signal: no chip config, the wake edge
+                                  comes from trigger_type only */
+} aicam_pir_device_type_t;
+
  typedef struct {
      aicam_bool_t enable;
      uint32_t pin_number;
      aicam_trigger_type_t trigger_type;
-     // PIR sensor configuration parameters
+     aicam_pir_device_type_t device_type;  // PIR chip vs plain IO signal on the wake input
+     // PIR sensor configuration parameters (device_type == PIR only)
      uint8_t sensitivity_level;  // Sensitivity level (recommended >30, smaller value means more sensitive)
      uint8_t ignore_time_s;      // Ignore time after interrupt (0-15, actual time = 0.5 + 0.5 * value seconds)
      uint8_t pulse_count;        // Pulse count (1-4, actual count = value + 1)
      uint8_t window_time_s;      // Window time (0-3, actual time = 2 + 2 * value seconds)
-     aicam_bool_t disable_in_preview;  // Disable PIR capture during preview (default: true)
+     aicam_bool_t disable_in_preview;  // Disable PIR capture during preview (default: false)
 } pir_trigger_config_t;
  
  typedef struct {
@@ -472,8 +482,13 @@ typedef struct {
     uint32_t fast_capture_skip_frames;       // frames to skip for fast capture (number of skipped frames for snapshot capture)
     uint32_t fast_capture_resolution;       // 0: 1280x720, 1: 1920x1080, 2: 2688x1520
     uint32_t fast_capture_jpeg_quality;     // fast capture JPEG encoding quality (0-100)
+    uint32_t runtime_capture_skip_frames;  // frames to drop before a runtime capture (0-30)
+    uint32_t runtime_capture_jpeg_quality; // runtime capture JPEG quality (1-100)
     aicam_bool_t capture_disable_comm;      // after capture: local storage only (no comm upload)
     aicam_bool_t capture_storage_ai;        // capture extra save draw AI result picture to storage switch
+    aicam_bool_t ai_capture_enable;         // AI master switch for captures: off = capture without
+                                             // AI inference (no annotated image, no result filter);
+                                             // also gates the sleep-wake quick-snapshot path
 } image_config_t;
 
 /**
@@ -765,6 +780,25 @@ typedef struct {
      * Values = communication_type_t (communication_service.h).
      * COMM_TYPE_NONE (0) = default (use system comm-pref logic, init all). */
     uint32_t          upload_comm_type;
+
+/* AI filter allowed-labels buffer: comma-separated class names, "" = all.
+ * Sized for a handful of typical COCO-length names. */
+#define CAPUP_AI_FILTER_LABELS_MAX  (256u)
+
+    /* AI inference filter: gate the whole capture (storage AND upload) on the
+     * model having a result. INDEPENDENT of ai_debug.confidence_threshold
+     * (that one filters detections inside post-processing; this one decides
+     * whether the capture is kept at all). */
+    aicam_bool_t      ai_filter_enable;        /* default FALSE */
+    uint8_t           ai_filter_threshold;     /* 1..100, default 50; capture is
+                                                  kept only when the best
+                                                  detection confidence*100 >=
+                                                  this value */
+    /* Allowed result labels, comma-separated class names ("person,car").
+     * Empty (default) = all labels pass. Only consulted while
+     * ai_filter_enable is set; matched case-sensitively against detection
+     * class_name strings (see system_service capture gate). */
+    char              ai_filter_labels[CAPUP_AI_FILTER_LABELS_MAX];
 } capture_upload_config_t;
 
 /* Upper bound of keep_sent_hours. A value >= this means "keep forever": no
@@ -783,6 +817,44 @@ typedef struct {
 #define CAPUP_FLASH_RECORDS_MIN     (16u)
 #define CAPUP_FLASH_RECORDS_MAX     (256u)
 #define CAPUP_FLASH_RECORDS_DEFAULT (32u)
+
+/* AI inference filter threshold range/default (percent). */
+#define CAPUP_AI_FILTER_TH_MIN      (1u)
+#define CAPUP_AI_FILTER_TH_MAX      (100u)
+#define CAPUP_AI_FILTER_TH_DEFAULT  (50u)
+
+
+/* ==================== Video Stream Parameters ==================== */
+
+/** Live video stream (preview/RTSP/RTMP) resolution preset. */
+typedef enum {
+    STREAM_RES_PIPE2 = 0, /* Encode frames straight from the AI pipe (pipe2):
+                           * resolution follows the active model input; pipe1
+                           * stays free for still capture. */
+    STREAM_RES_720P  = 1, /* 1280x720 via pipe1 */
+    STREAM_RES_1080P = 2, /* 1920x1080 via pipe1 */
+} stream_resolution_t;
+
+#define VSTREAM_CFG_VERSION        (1u)
+
+/* H.264 VBR target bitrate, kbps. 256k keeps PIPE2/low-res usable, 8192k is a
+ * conservative ceiling for 1080p so an I-frame can't chronically overflow the
+ * 292KB VENC output buffer (QP escape ladder is the backstop, not the plan). */
+#define VSTREAM_BITRATE_MIN_KBPS     (256u)
+#define VSTREAM_BITRATE_MAX_KBPS     (8192u)
+#define VSTREAM_BITRATE_DEFAULT_KBPS (2000u)
+
+/* Keyframe (IDR) interval in seconds; legal values 1/2/4. */
+#define VSTREAM_GOP_SEC_MIN          (1u)
+#define VSTREAM_GOP_SEC_MAX          (4u)
+#define VSTREAM_GOP_SEC_DEFAULT      (1u)
+
+typedef struct {
+    uint32_t version;         /* schema version */
+    uint8_t  resolution;      /* stream_resolution_t */
+    uint32_t bitrate_kbps;    /* H.264 VBR target bitrate */
+    uint8_t  gop_sec;         /* keyframe interval, seconds (1/2/4) */
+} video_stream_param_t;
 
 // RTMP config is now part of video_stream_mode_config_t
 // These macros are kept for compatibility
@@ -808,6 +880,7 @@ typedef struct {
     auth_mgr_config_t auth_mgr;
     webhook_config_t webhook_config;
     capture_upload_config_t capture_upload; /* Capture/upload mode, storage, retry, schedule */
+    video_stream_param_t video_stream;      /* Live stream resolution/bitrate/gop */
     // RTMP config is now in work_mode_config.video_stream_mode
  } aicam_global_config_t;
  
@@ -1337,6 +1410,28 @@ aicam_result_t json_config_set_capture_upload_config(const capture_upload_config
  * @brief Fill capture-upload struct with safe defaults
  */
 void json_config_capture_upload_defaults(capture_upload_config_t *config);
+
+/**
+ * @brief Get live video stream parameters (resolution/bitrate/gop)
+ */
+aicam_result_t json_config_get_video_stream_param(video_stream_param_t *config);
+
+/**
+ * @brief Set live video stream parameters (persisted to NVS)
+ */
+aicam_result_t json_config_set_video_stream_param(const video_stream_param_t *config);
+
+/**
+ * @brief Fill video stream parameter struct with safe defaults
+ */
+void json_config_video_stream_defaults(video_stream_param_t *config);
+
+/**
+ * @brief Get the persisted AI-pipe (pipe2) input size in pixels
+ * @param width Output width (defaults to 224 when never synced)
+ * @param height Output height
+ */
+void json_config_get_ai_pipe_size(uint32_t *width, uint32_t *height);
 
 /**
  * @brief Create the LittleFS certificate directory (/certs) if it is missing

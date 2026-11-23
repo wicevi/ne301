@@ -19,7 +19,20 @@
 #define VENC_DEFAULT_INPUT_TYPE H264ENC_RGB565
 #define VENC_DEFAULT_BPP 2
 #define VENC_DEFAULT_RATE_CTRL_QP 25
-#define VENC_OUT_BUFFER_SIZE (292 * 1024)
+
+/* Encoder output buffer budget, derived from the stream geometry AND the
+ * configured bitrate: a large I-frame (QP floor / pre-rate-control-convergence)
+ * needs roughly 1 byte per 3 pixels - 720p ~= 307 KB, 1080p ~= 691 KB - and at
+ * high bitrates the rate controller lets a 1-second-GOP I-frame approach the
+ * whole per-second byte budget (5000 kbps ~= 625 KB even at 720p, which the
+ * geometry-only estimate under-budgeted and dropped the encoder to ~20 fps
+ * with OUTPUT_BUFFER_OVERFLOW). The budget is therefore
+ *   max(width*height/3, bitrate_kbps*1000/8) clamped to [MIN, MAX].
+ * The backing array lives in PSRAM at the worst-case size (1 MB == the UI's
+ * 8192 kbps ceiling). */
+#define VENC_OUT_BUFFER_MIN  (256u * 1024u)
+#define VENC_OUT_BUFFER_MAX  (1024u * 1024u)
+uint32_t venc_out_buffer_size_for(uint32_t width, uint32_t height, uint32_t bitrate_kbps);
 
 #define ENC_FRAME_HEADER_SIZE (1*64)
 enum {
@@ -57,6 +70,8 @@ typedef struct {
     int bpp;
     int rate_ctrl_mode;
     int rate_ctrl_dq;
+    int bitrate_kbps;   /* >0: VBR target bitrate override; 0: derive from w*h*fps */
+    int gop_len;        /* >0: IDR interval in frames override; 0: fps-1 (1 second) */
 } enc_param_t;
 typedef struct {
     bool is_init;
@@ -68,8 +83,9 @@ typedef struct {
     osMutexId_t state_mtx;   // protect state and pointer
     osMutexId_t hw_mtx;      // protect hardware/codec long time operation
     osSemaphoreId_t sem_work; // task work notification (producer->consumer)
-    osEventFlagsId_t evt_flags;  
+    osEventFlagsId_t evt_flags;
     enc_param_t params;
+    uint32_t out_buffer_size;  // adaptive budget for the current params (see VENC_OUT_BUFFER_*)
     uint8_t *in_buffer;
     enc_out_frame_t out_frame;
     int is_intra_force;

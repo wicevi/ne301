@@ -298,6 +298,13 @@ void log_message(LogLevel level, const char *module_name, const char *format, ..
 
     LOCK(log_manager);
 
+    /* Static buffers are safe here: the whole format+emit path runs inside
+     * the log_manager lock, so concurrent callers serialize before touching
+     * them (worst case without the lock would be interleaved lines, never
+     * out-of-bounds - LOG_MAX_LINE caps every write). Kept static on
+     * purpose: 2x LOG_MAX_LINE on the stack bit into deep call chains on
+     * small stacks (4KB encoder/worker threads). The actual thread-safety
+     * fix for the observed hard fault is the localtime_r below. */
     static char log_buffer[LOG_MAX_LINE];
     static char msg_buffer[LOG_MAX_LINE];
     LogLevel module_level = LOG_INFO;
@@ -320,11 +327,18 @@ void log_message(LogLevel level, const char *module_name, const char *format, ..
         return;
     }
 
-    // Format timestamp
+    // Format timestamp. localtime_r (not localtime): log_message is entered
+    // concurrently by several threads (pipeline dumps, MQTT, web) and
+    // localtime()'s internal static tm/tz state is what hard-faulted under
+    // PIPE2 preview + dump load (PC garbage, BFAR 0x4e2cxxxx). The static
+    // format buffers above were NOT the culprit - they are lock-protected.
     if (log_manager->get_time_func != NULL) {
         time_t now = log_manager->get_time_func();
-        struct tm *tm_info = localtime(&now);
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+        struct tm tm_buf;
+        struct tm *tm_info = localtime_r(&now, &tm_buf);
+        if (tm_info) {
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+        }
     }
 
     // Format message body

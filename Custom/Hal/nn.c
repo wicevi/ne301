@@ -14,6 +14,7 @@
 #include "ll_aton_reloc_network.h"
 #include "pp.h"
 #include "nn.h"
+#include "image_utils.h"
 #include "cJSON.h"
 #include "cbor_enc.h"
 #include "gauge_reading.h"
@@ -278,8 +279,13 @@ static int model_init(const uintptr_t model_ptr, nn_t *nn)
 
     LOG_DRV_INFO("Installing relocatable model...\r\r\n");
     LOG_DRV_INFO("  Model file: 0x%08lX\r\r\n", (uint32_t)model_ptr);
-    LOG_DRV_INFO("  Exec RAM: 0x%08lX (size: %lu)\r\r\n", (uint32_t)config.exec_ram_addr, config.exec_ram_size);
-    LOG_DRV_INFO("  Ext RAM: 0x%08lX (size: %u)\r\r\n", (uint32_t)config.ext_ram_addr, config.ext_ram_size);
+    /* ERROR level on purpose: memory-map forensics for the speckle bug -
+     * exec/ext RAM are allocated from the SAME PSRAM heap as the camera
+     * frame buffers; their addresses decide adjacency. */
+    LOG_DRV_INFO("nnmap exec_ram: 0x%08lX (size: %lu)",
+                  (uint32_t)config.exec_ram_addr, (unsigned long)config.exec_ram_size);
+    LOG_DRV_INFO("nnmap ext_ram: 0x%08lX (size: %u)",
+                  (uint32_t)config.ext_ram_addr, config.ext_ram_size);
     LOG_DRV_INFO("  Mode: 0x%08lX\r\r\n", config.mode);
 
     nn->nn_inst = (NN_Instance_TypeDef *)hal_mem_alloc_any(sizeof(NN_Instance_TypeDef));
@@ -308,7 +314,10 @@ static int model_init(const uintptr_t model_ptr, nn_t *nn)
         }
         nn->input_buffer[nn->input_buffer_count] = (void *)LL_Buffer_addr_start(ll_buffer);
         nn->input_buffer_size[nn->input_buffer_count] = LL_Buffer_len(ll_buffer);
-        LOG_DRV_DEBUG("input_buffer[%d]: 0x%08lX (size: %lu)\r\r\n", nn->input_buffer_count,
+        /* ERROR level on purpose: memory-map forensics for the speckle bug
+         * (correlate NN buffer addresses with camera frame buffers). */
+        LOG_DRV_INFO("nnmap input_buffer[%d]: 0x%08lX (size: %lu)",
+                      nn->input_buffer_count,
                       (uint32_t)nn->input_buffer[nn->input_buffer_count], nn->input_buffer_size[nn->input_buffer_count]);
         nn->input_buffer_count++;
     }
@@ -320,7 +329,9 @@ static int model_init(const uintptr_t model_ptr, nn_t *nn)
         }
         nn->output_buffer[nn->output_buffer_count] = (void *)LL_Buffer_addr_start(ll_buffer);
         nn->output_buffer_size[nn->output_buffer_count] = LL_Buffer_len(ll_buffer);
-        LOG_DRV_DEBUG("output_buffer[%d]: 0x%08lX (size: %lu)\r\r\n", nn->output_buffer_count,
+        /* ERROR level on purpose: memory-map forensics (see input note). */
+        LOG_DRV_INFO("nnmap output_buffer[%d]: 0x%08lX (size: %lu)",
+                      nn->output_buffer_count,
                       (uint32_t)nn->output_buffer[nn->output_buffer_count], nn->output_buffer_size[nn->output_buffer_count]);
         nn->output_buffer_count++;
     }
@@ -404,6 +415,10 @@ static int model_run(nn_t *nn, nn_result_t *result, bool is_callback)
     return -1;
 }
 
+/* Last load failure reason, surfaced by nn_get_last_error() so API callers
+ * can report WHY a model reload failed instead of a generic error. */
+static char g_nn_last_error[80] = "";
+
 static int load_model(nn_t *nn, const uintptr_t file_ptr)
 {
     if (!file_ptr) {
@@ -420,6 +435,7 @@ static int load_model(nn_t *nn, const uintptr_t file_ptr)
     /* initialize model */
     if (model_init(nn->model.model_ptr, nn) != 0) {
         LOG_DRV_ERROR("load_model: model init failed\r\r\n");
+        memset(&nn->model, 0, sizeof(nn_model_info_t));
         return -1;
     }
     
@@ -427,6 +443,16 @@ static int load_model(nn_t *nn, const uintptr_t file_ptr)
     const pp_vtable_t *pp_vt = pp_find((const char *)nn->model.postprocess_type);
     if (pp_vt == NULL) {
         LOG_DRV_ERROR("load_model: postprocess type[%s] not found\r\r\n", nn->model.postprocess_type);
+        snprintf(g_nn_last_error, sizeof(g_nn_last_error), "postprocess %s not supported by firmware", nn->model.postprocess_type);
+    /* Any failure below leaves the network initialized: roll back to the
+     * clean pre-load state. Without this a failed load (e.g. missing
+     * postprocess) keeps the network, input buffers and model info alive
+     * while the state flag stays INIT - nn_instance_unload_model then
+     * no-ops on the flag and the stale network is never freed, so the next
+     * load runs against leftover NPU state and the model never hot-swaps.
+     */
+    model_deinit(nn);
+    memset(&nn->model, 0, sizeof(nn_model_info_t));
         return -1;
     }
 
@@ -435,6 +461,16 @@ static int load_model(nn_t *nn, const uintptr_t file_ptr)
     if (pp_vt->init && pp_vt->init((const char *)nn->model.config_ptr, &nn->pp_params, nn->nn_inst) != 0) {
         storage_unlock_ext();
         LOG_DRV_ERROR("load_model: postprocess init failed\r\r\n");
+        snprintf(g_nn_last_error, sizeof(g_nn_last_error), "postprocess %s init failed", nn->model.postprocess_type);
+    /* Any failure below leaves the network initialized: roll back to the
+     * clean pre-load state. Without this a failed load (e.g. missing
+     * postprocess) keeps the network, input buffers and model info alive
+     * while the state flag stays INIT - nn_instance_unload_model then
+     * no-ops on the flag and the stale network is never freed, so the next
+     * load runs against leftover NPU state and the model never hot-swaps.
+     */
+    model_deinit(nn);
+    memset(&nn->model, 0, sizeof(nn_model_info_t));
         return -1;
     }
     storage_unlock_ext();
@@ -644,7 +680,10 @@ int nn_instance_load_model(nn_handle_t handle, const uintptr_t file_ptr)
 int nn_instance_unload_model(nn_handle_t handle)
 {
     nn_t *nn = (nn_t *)handle;
-    if (!nn || nn->state != NN_STATE_READY) {
+    /* Also run the real unload when a network is present despite the state
+     * flag (defence against historical dirty states left by a failed load).
+     */
+    if (!nn || (nn->state != NN_STATE_READY && nn->model.model_ptr == 0)) {
         LOG_DRV_WARN("model already unloaded\r\r\n");
         return 0;
     }
@@ -718,12 +757,51 @@ int nn_instance_inference_frame(nn_handle_t handle, uint8_t *input_data, uint32_
 
     /* Convert camera uint8 to model input: float32, int8, or uint8 passthrough */
     if (nn->input_buffer_size[0] != input_size) {
-        LOG_DRV_ERROR("input_buffer_size[0] != input_size\r\r\n");
-        osMutexRelease(nn->mtx_id);
-        return -1;
-    } else {
-        memcpy(nn->input_buffer[0], input_data, input_size);
+        uint32_t model_sz = nn->input_buffer_size[0];
+        /* NN bridge: pipe2's current output format (ARGB8888 = w*h*4, or
+         * RGB565 = w*h*2) with a packed-RGB888 model of the same geometry:
+         * convert a copy and run on it. Centralized here so every caller
+         * that feeds raw pipe2 frames works unchanged (preview AI node,
+         * both capture paths, quick_snapshot). */
+        if (model_sz % 3 == 0 &&
+            (input_size == (model_sz / 3) * 4 || input_size == (model_sz / 3) * 2)) {
+            uint32_t src_fmt = (input_size == (model_sz / 3) * 4)
+                                   ? DMA2D_INPUT_ARGB8888
+                                   : DMA2D_INPUT_RGB565;
+            static uint8_t *s_bridge_buf = NULL;
+            if (s_bridge_buf == NULL) {
+                s_bridge_buf = hal_mem_alloc_fast(model_sz);
+            }
+            if (s_bridge_buf == NULL ||
+                image_bridge_to_rgb888(input_data,
+                                       nn->model.input_width,
+                                       nn->model.input_height,
+                                       src_fmt, s_bridge_buf, 1) != AICAM_OK) {
+                static uint8_t bridge_fail_logged = 0;
+                if (!bridge_fail_logged) {
+                    bridge_fail_logged = 1;
+                    LOG_DRV_ERROR("nn: camera->RGB888 bridge failed - inference skipped");
+                }
+                osMutexRelease(nn->mtx_id);
+                return -1;
+            }
+            input_data = s_bridge_buf;
+            input_size = model_sz;
+        } else {
+            /* Frame geometry/format the bridge cannot handle: skip inference
+             * (logged once) rather than feeding the model garbage. */
+            static uint8_t size_mismatch_logged = 0;
+            if (!size_mismatch_logged) {
+                size_mismatch_logged = 1;
+                LOG_DRV_ERROR("nn: input size %lu != model %lu - inference disabled",
+                              (unsigned long)input_size, (unsigned long)nn->input_buffer_size[0]);
+            }
+            osMutexRelease(nn->mtx_id);
+            return -1;
+        }
     }
+
+    memcpy(nn->input_buffer[0], input_data, input_size);
 
     int ret = model_run(nn, result, false);
     osMutexRelease(nn->mtx_id);
@@ -1490,8 +1568,14 @@ void nn_unregister(void)
 /* ==================== single-instance API implementation ==================== */
 static nn_handle_t g_nn_single_instance = NULL;
 
+const char *nn_get_last_error(void)
+{
+    return g_nn_last_error;
+}
+
 int nn_load_model(const uintptr_t file_ptr)
 {
+    g_nn_last_error[0] = '\0';
     if (!g_nn_single_instance) {
         g_nn_single_instance = nn_instance_create();
     }
@@ -1530,6 +1614,68 @@ int nn_get_model_info(nn_model_info_t *model_info)
     return nn_instance_get_model_info(g_nn_single_instance, model_info);
 }
 
+cJSON* nn_get_model_labels_json(void)
+{
+    if (!g_nn_single_instance) {
+        return NULL;
+    }
+    nn_t *nn = (nn_t *)g_nn_single_instance;
+    if (nn->state != NN_STATE_READY && nn->state != NN_STATE_RUNNING) {
+        return NULL;
+    }
+
+    /* The class-name table ships inside the model package config JSON
+     * (postprocess_params.class_names) - the same blob the pp
+     * implementations read at init. Snapshot the pointer under the instance
+     * mutex (it changes on model load/unload), then parse under the
+     * storage lock like every other config_ptr reader (load_info). */
+    osMutexAcquire(nn->mtx_id, osWaitForever);
+    uintptr_t cfg_ptr = nn->model.config_ptr;
+    osMutexRelease(nn->mtx_id);
+    if (cfg_ptr == 0) {
+        return NULL;
+    }
+
+    storage_lock_ext();
+    cJSON *root = cJSON_Parse((const char *)cfg_ptr);
+    storage_unlock_ext();
+    if (!root) {
+        return NULL;
+    }
+
+    cJSON *out = cJSON_CreateArray();
+    cJSON *pp = cJSON_GetObjectItemCaseSensitive(root, "postprocess_params");
+    cJSON *names = pp ? cJSON_GetObjectItemCaseSensitive(pp, "class_names")
+                      : NULL;
+    if (out && cJSON_IsArray(names)) {
+        cJSON *e = NULL;
+        cJSON_ArrayForEach(e, names) {
+            if (cJSON_IsString(e) && e->valuestring && e->valuestring[0]) {
+                cJSON_AddItemToArray(out, cJSON_CreateString(e->valuestring));
+            }
+        }
+    }
+    cJSON_Delete(root);
+    return out;
+}
+
+uint32_t nn_expected_input_size(void)
+{
+    if (!g_nn_single_instance) {
+        return 0;
+    }
+    nn_t *nn = (nn_t *)g_nn_single_instance;
+    if (nn->state != NN_STATE_READY && nn->state != NN_STATE_RUNNING) {
+        return 0;
+    }
+    /* Readers only need the byte size the next nn_inference_frame will be
+     * checked against; it changes only on model load/unload. */
+    osMutexAcquire(nn->mtx_id, osWaitForever);
+    uint32_t size = nn->input_buffer_size[0];
+    osMutexRelease(nn->mtx_id);
+    return size;
+}
+
 int nn_start_inference(void)
 {
     if (!g_nn_single_instance) {
@@ -1538,7 +1684,12 @@ int nn_start_inference(void)
     // Note: start/stop inference is not implemented in instance API
     // This is a placeholder that maintains API compatibility
     nn_t *nn = (nn_t *)g_nn_single_instance;
-    nn->state = NN_STATE_RUNNING;
+    /* Only advance the state when a model is actually loaded: force-
+     * flipping the flag on a failed/absent load made later calls run
+     * against a stale (or missing) network with misleading errors. */
+    if (nn->model.model_ptr != 0) {
+        nn->state = NN_STATE_RUNNING;
+    }
     return 0;
 }
 
@@ -1550,7 +1701,12 @@ int nn_stop_inference(void)
     // Note: start/stop inference is not implemented in instance API
     // This is a placeholder that maintains API compatibility
     nn_t *nn = (nn_t *)g_nn_single_instance;
-    nn->state = NN_STATE_READY;
+    /* Only advance the state when a model is actually loaded: force-
+     * flipping the flag on a failed/absent load made later calls run
+     * against a stale (or missing) network with misleading errors. */
+    if (nn->model.model_ptr != 0) {
+        nn->state = NN_STATE_READY;
+    }
     return 0;
 }
 

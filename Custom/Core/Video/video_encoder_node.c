@@ -48,7 +48,8 @@ void video_encoder_get_default_config(video_encoder_config_t *config)
     config->fps = VENC_DEFAULT_FPS;
     config->input_type = VENC_DEFAULT_INPUT_TYPE;
     config->quality = 80;
-    config->bitrate = 2000;
+    config->bitrate = 0;   /* 0 = let the encoder derive from w*h*fps */
+    config->gop_len = 0;   /* 0 = fps-1 (one IDR per second) */
 }
 
 video_node_t* video_encoder_node_create(const char *name, const video_encoder_config_t *config)
@@ -97,16 +98,31 @@ video_node_t* video_encoder_node_create(const char *name, const video_encoder_co
 aicam_result_t video_encoder_node_set_config(video_node_t *node, const video_encoder_config_t *config)
 {
     if (!node || !config) return AICAM_ERROR_INVALID_PARAM;
-    
+
     video_encoder_node_data_t *data = (video_encoder_node_data_t*)video_node_get_private_data(node);
     if (!data) return AICAM_ERROR_INVALID_PARAM;
-    
-    if (data->is_running) video_encoder_stop_device(data);
-    
+
+    aicam_bool_t was_running = data->is_running;
+    if (was_running) video_encoder_stop_device(data);
+
     memcpy(&data->config, config, sizeof(video_encoder_config_t));
-    
-    if (data->is_running) return video_encoder_start_device(data);
-    
+
+    /* Push the new geometry/rate-control down to the encoder driver while the
+     * device is stopped - device_start (re)inits the codec from enc_param. */
+    if (data->is_initialized) {
+        data->enc_param.width = data->config.width;
+        data->enc_param.height = data->config.height;
+        data->enc_param.fps = data->config.fps;
+        data->enc_param.bpp = ENC_BYTES_PER_PIXEL(data->config.input_type);
+        data->enc_param.input_type = data->config.input_type;
+        data->enc_param.bitrate_kbps = data->config.bitrate;
+        data->enc_param.gop_len = data->config.gop_len;
+        (void)device_ioctl(data->encoder_dev, ENC_CMD_SET_PARAM,
+                    (uint8_t *)&data->enc_param, sizeof(enc_param_t));
+    }
+
+    if (was_running) return video_encoder_start_device(data);
+
     return AICAM_OK;
 }
 
@@ -196,6 +212,9 @@ static aicam_result_t video_encoder_node_init_callback(video_node_t *node)
     data->enc_param.fps = data->config.fps;
     data->enc_param.bpp = ENC_BYTES_PER_PIXEL(data->config.input_type);
     data->enc_param.input_type = data->config.input_type;
+    /* Web-configured stream parameters: 0 keeps the driver's derivation. */
+    data->enc_param.bitrate_kbps = data->config.bitrate;
+    data->enc_param.gop_len = data->config.gop_len;
     
     device_ioctl(data->encoder_dev, ENC_CMD_SET_PARAM, 
                 (uint8_t *)&data->enc_param, sizeof(enc_param_t));
@@ -231,7 +250,7 @@ static aicam_result_t video_encoder_node_process_callback(video_node_t *node,
     
     *output_count = 0;
     if (!data->is_running) return AICAM_OK;
-    
+
     for (uint32_t i = 0; i < input_count && i < 1; i++) {
         if (input_frames[i]) {
             video_frame_t *output_frame = NULL;
@@ -329,21 +348,29 @@ static aicam_result_t video_encoder_encode_frame_zero_copy(video_encoder_node_da
     if (!data || !input_frame || !output_frame) return AICAM_ERROR_INVALID_PARAM;
     
     // Input frame to encoder
-    aicam_result_t result = device_ioctl(data->encoder_dev, ENC_CMD_INPUT_BUFFER, 
+    aicam_result_t result = device_ioctl(data->encoder_dev, ENC_CMD_INPUT_BUFFER,
                                         input_frame->data, input_frame->info.size);
     if (result != AICAM_OK) {
         data->stats.encode_errors++;
+        /* ENC_CMD_INPUT_BUFFER rejects a size != params.w*h*bpp completely
+         * silently inside the driver - surface the mismatch (EXPERIMENT A:
+         * pipe2 RGB565 produced zero output with no clue). */
+        LOG_CORE_WARN("Encode input rejected: ret=%d, size=%lu (frame %ux%u fmt=%d)",
+                      (int)result, (unsigned long)input_frame->info.size,
+                      (unsigned)input_frame->info.width,
+                      (unsigned)input_frame->info.height,
+                      (int)input_frame->info.format);
         return result;
     }
-    
+
     // Get encoded output
     enc_out_frame_t enc_frame = {0};
     result = device_ioctl(data->encoder_dev, ENC_CMD_OUTPUT_FRAME, (uint8_t *)&enc_frame, 0);
     if (result != AICAM_OK || enc_frame.data_size == 0) {
         data->stats.encode_errors++;
-        // LOG_CORE_WARN("Encode failed: result=%d, data_size=%lu, errors=%lu", 
-        //                result, (unsigned long)enc_frame.data_size, 
-        //                (unsigned long)data->stats.encode_errors);
+        LOG_CORE_DEBUG("Encode failed: result=%d, data_size=%lu, errors=%lu",
+                        result, (unsigned long)enc_frame.data_size,
+                        (unsigned long)data->stats.encode_errors);
         return AICAM_ERROR;
     }
 
@@ -351,8 +378,13 @@ static aicam_result_t video_encoder_encode_frame_zero_copy(video_encoder_node_da
     uint8_t *frame_data = enc_frame.frame_buffer + enc_frame.header_size;
     uint32_t frame_size = enc_frame.data_size;
     
-    // Distribute via Video Hub (preferred mode)
-    if (video_hub_is_initialized() && video_hub_has_subscribers()) {
+    // Distribute via Video Hub (preferred mode). Inject even with zero
+    // subscribers: the hub learns the session's SPS/PPS from keyframes (it
+    // skips distribution when nobody watches), so the next joiner gets a
+    // join-sync matching the CURRENT resolution. Gating on subscribers here
+    // froze the cache at the previous resolution whenever the (only) client
+    // was disconnected around a stream-parameter change.
+    if (video_hub_is_initialized()) {
         result = video_hub_inject_frame(
             frame_data, frame_size,
             input_frame->info.timestamp,

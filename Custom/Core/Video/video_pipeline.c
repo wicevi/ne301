@@ -197,6 +197,25 @@ void video_node_processing_thread(void *argument)
         if (node->config.type == VIDEO_NODE_TYPE_SOURCE) {
             // Source nodes generate frames internally via process callback
             input_count = 0;
+
+            /* Pull-mode backpressure for queue-producing sources (the
+             * camera node): only fetch a NEW hardware frame when the
+             * downstream queue is empty. The DCMIPP frame pool already
+             * IS a latest-frame queue (get_latest_ready hands out the
+             * newest READY buffer; old frames recycle naturally), so an
+             * eager source merely drains the pool into its own 8-deep
+             * queue - starving DCMIPP write targets and the capture path
+             * while spinning on GET timeouts once the encoder falls
+             * behind (the 30/s GET(pipe1)-fail signature). Queue-less
+             * sources (the AI node outputs nothing) are unaffected.
+             * Latency note: the queue holds at most 1 frame this way, so
+             * this is what keeps ~15fps supply on a 3-buffer PIPE1 pool
+             * without adding pipeline latency (the 2026-11-23 latency
+             * spike was the web player's 1.0s buffer target, not this). */
+            if (node->output_queue.count > 0) {
+                VIDEO_DELAY(10);
+                continue;
+            }
         } else {
             // Non-source nodes get input frames directly from upstream nodes' output queues
             input_count = 0;
@@ -219,12 +238,11 @@ void video_node_processing_thread(void *argument)
                 if (result == AICAM_OK && frame) {
                     input_frames[input_count] = frame;
                     input_count++;
-                
-                    
+
                     // Update connection statistics
                     conn->frames_transferred++;
                     conn->bytes_transferred += frame->info.size;
-                    
+
                     break; // Get one frame for now
                 }
             }
@@ -292,12 +310,12 @@ void video_node_processing_thread(void *argument)
             continue;
         }
         
-        // Push output frames to output queue 
+        // Push output frames to output queue
         for (uint32_t i = 0; i < output_count; i++) {
             if (output_frames[i]) {
                 result = video_frame_queue_push(&node->output_queue, output_frames[i], 0); // No timeout
                 if (result != AICAM_OK) {
-                    LOG_CORE_WARN("Failed to push output frame %u for node %s: %d", 
+                    LOG_CORE_WARN("Failed to push output frame %u for node %s: %d",
                                  i, node->config.name, result);
                     node->stats.frames_dropped++;
                     node->stats.queue_overflows++;
@@ -607,9 +625,18 @@ aicam_result_t video_pipeline_stop(video_pipeline_t *pipeline)
          * still stall on the same resource; strictly better than hanging stop).
          * Signed-diff comparison handles uint32 tick wrap-around. */
         uint32_t stop_deadline = osKernelGetTickCount() + VIDEO_NODE_STOP_TIMEOUT_MS;
+        uint32_t stop_wait0 = osKernelGetTickCount();
         while (node && !node->thread_exited &&
                (int32_t)(osKernelGetTickCount() - stop_deadline) < 0) {
             osDelay(100);
+        }
+        {
+            uint32_t waited = osKernelGetTickCount() - stop_wait0;
+            if (waited > 500) {
+                LOG_SVC_ERROR("[STOP-T] node %s exit wait=%lums%s",
+                              node ? node->config.name : "?", (unsigned long)waited,
+                              node->thread_exited ? "" : " (TIMED OUT, force-kill)");
+            }
         }
         if (node && !node->thread_exited) {
             LOG_CORE_ERROR("Node %s did not exit within %ums, force-terminating",
@@ -639,6 +666,28 @@ aicam_result_t video_pipeline_stop(video_pipeline_t *pipeline)
             node->stack_memory = NULL;
         }
         node->state = VIDEO_NODE_STATE_IDLE;
+
+        /* Drain this node's output queue: zero-copy frames left in a queue
+         * at stop time were owned by the (now dead) downstream popper. Their
+         * return callbacks never run, camera buffers stay IN_USE forever and
+         * the next pipeline start starves (GET -7, dead preview until a full
+         * camera reconfigure). unref() here releases them deterministically.
+         * Frames force-killed mid-process inside a node remain unrecoverable
+         * (the pointer died with the thread) - the bounded stop wait above
+         * makes that the rare path; the queue drain covers the common one. */
+        {
+            video_frame_t *leaked = NULL;
+            uint32_t drained = 0;
+            while (video_frame_queue_pop(&node->output_queue, &leaked, 0) == AICAM_OK && leaked) {
+                video_frame_unref(leaked);
+                leaked = NULL;
+                drained++;
+            }
+            if (drained > 0) {
+                LOG_CORE_WARN("Released %lu queued frames from node %s on stop",
+                              (unsigned long)drained, node->config.name);
+            }
+        }
     }
 
     //call deinit callback for all nodes

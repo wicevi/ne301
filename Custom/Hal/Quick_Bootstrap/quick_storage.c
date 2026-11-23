@@ -557,8 +557,17 @@ int quick_storage_read_snapshot_config(qs_snapshot_config_t *snapshot_config)
 
     // result = qs_nvs_read_bool(NVS_KEY_AI_ENABLE, &temp_bool);
     // if (result == AICAM_OK) snapshot_config->ai_enabled = (uint8_t)temp_bool;
-    // Match application layer: AI enabled by default
-    snapshot_config->ai_enabled = AICAM_TRUE;
+    /* AI master switch (image_config.ai_capture_enable, written by the app):
+     * off = the wake capture runs WITHOUT AI - no inference, no annotated
+     * image, no result filter. Absent key = enabled (historical default).
+     * NOTE: NVS_KEY_AI_ENABLE above is a DIFFERENT switch (the web /ai/toggle
+     * drawing gate) and must not be used here. */
+    temp_bool = AICAM_TRUE;
+    if (qs_nvs_read_bool(NVS_KEY_IMAGE_AI_CAPTURE, &temp_bool) == AICAM_OK) {
+        snapshot_config->ai_enabled = (uint8_t)temp_bool;
+    } else {
+        snapshot_config->ai_enabled = AICAM_TRUE;
+    }
 
     if (snapshot_config->ai_enabled) {
         result = qs_nvs_read_bool(NVS_KEY_AI_1_ACTIVE, &temp_bool);

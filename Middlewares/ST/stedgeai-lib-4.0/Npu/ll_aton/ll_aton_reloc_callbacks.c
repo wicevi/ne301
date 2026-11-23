@@ -17,6 +17,7 @@
  */
 
 #include <stdint.h>
+#include "stm32n6xx_hal.h"  /* Patched (NE301): reset on assert */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,11 +32,7 @@
 #include "ll_aton_reloc_network.h"
 
 #include "ll_aton_lib.h"
-#include "ll_aton_util.h"
-
-extern struct ai_reloc_rt_ctx _network_rt_ctx;
-
-void __assert_func(const char *filename, int line, const char *assert_func, const char *expr)
+#includevoid __assert_func(const char *filename, int line, const char *assert_func, const char *expr)
 {
   volatile uint32_t _saved_r9;
   const struct ll_aton_reloc_callback *cbs = _network_rt_ctx.cbs;
@@ -44,6 +41,17 @@ void __assert_func(const char *filename, int line, const char *assert_func, cons
     __asm volatile("mov %0, r9\n\t" : "=r"(_saved_r9));
     cbs->assert_func(filename, line, assert_func, expr);
     __asm volatile("mov r9, %0\n\t" ::"r"(_saved_r9));
+  }
+  /* Patched (NE301): was a bare while(1) with IRQs enabled - a low-priority
+   * thread dying here never stopped the Realtime-priority watchdog feeder,
+   * so the IWDG never expired and the unit hung silently. Match the project
+   * assert policy (Appli/Core/Src/main.c): reset. */
+  __disable_irq();
+  HAL_NVIC_SystemReset();
+  while (1)
+    ;
+}
+latile("mov r9, %0\n\t" ::"r"(_saved_r9));
   }
   while (1)
     ;

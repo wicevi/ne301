@@ -3725,6 +3725,8 @@ static aicam_result_t list_visitor(FS_Type_t fs, const char *id, void *user)
     cJSON *t;
     t = cJSON_GetObjectItem(meta, "timestamp");  if (t) r->timestamp = (uint64_t)t->valuedouble;
     t = cJSON_GetObjectItem(meta, "size");       if (t) r->size = (uint32_t)t->valueint;
+    t = cJSON_GetObjectItem(meta, "width");      if (t) r->width = (uint32_t)t->valueint;
+    t = cJSON_GetObjectItem(meta, "height");     if (t) r->height = (uint32_t)t->valueint;
     t = cJSON_GetObjectItem(meta, "retry_count"); if (t) r->retry_count = (uint8_t)t->valueint;
     t = cJSON_GetObjectItem(meta, "trigger");
     if (t && cJSON_IsString(t)) snprintf(r->trigger, sizeof(r->trigger), "%s", t->valuestring);

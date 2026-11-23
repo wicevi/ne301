@@ -9,6 +9,7 @@
 
 #include "aicam_types.h"
 #include "service_interfaces.h"
+#include "json_config_mgr.h"   /* video_stream_param_t for apply_stream_params */
 #include "video_pipeline.h"
 #include "video_ai_node.h"
 #include "video_camera_node.h"
@@ -430,6 +431,17 @@ aicam_result_t ai_color_convert(const uint8_t *src_data,
                                 uint8_t **dst_data,
                                 uint32_t* dst_size,
                                 uint32_t dst_format);
+
+/**
+ * @brief Apply video stream parameters live (resolution / bitrate / gop)
+ * @param override When non-NULL, apply exactly this configuration (the API
+ *        handler passes the just-saved values so no NVS re-read can race a
+ *        still-persisting field and produce a mixed resolution+bitrate);
+ *        NULL reads the persisted configuration.
+ * @return aicam_result_t AICAM_OK when applied
+ */
+aicam_result_t ai_service_apply_stream_params(const video_stream_param_t *override);
+
 
 /**
  * @brief Single image inference with drawing

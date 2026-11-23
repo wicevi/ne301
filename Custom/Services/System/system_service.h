@@ -285,10 +285,17 @@ aicam_result_t system_controller_get_work_config(system_controller_t *controller
  * @brief Set work mode configuration
  * @param controller System controller handle
  * @param config Configuration to set
+ * @param pir_apply_failed Optional out: set TRUE when the PIR/IO chip-level
+ *        config could not be written (config is still persisted; it is retried
+ *        at sleep/boot). May be NULL.
+ * @param skip_pir_apply Partial-update callers (timer/remote endpoints) pass
+ *        TRUE to skip the chip-level PIR write entirely.
  * @return AICAM_OK on success
  */
 aicam_result_t system_controller_set_work_config(system_controller_t *controller,
-                                                const work_mode_config_t *config);
+                                                const work_mode_config_t *config,
+                                                aicam_bool_t *pir_apply_failed,
+                                                aicam_bool_t skip_pir_apply);
 
 /**
  * @brief Register work mode change callback
@@ -664,6 +671,9 @@ typedef struct {
 typedef struct {
     aicam_result_t result;
     uint64_t duration_ms;
+    aicam_bool_t ai_filtered;               /* TRUE: capture dropped by the
+                                                AI inference filter (policy
+                                                behavior, not an error) */
 } system_capture_response_t;
 
 /**
@@ -680,10 +690,13 @@ typedef struct {
  * @param qos MQTT QoS level (0, 1, or 2)
  * @return AICAM_OK on success, error code otherwise
  */
+/* ai_filtered_out (nullable): set TRUE when this capture was dropped by the
+ * AI inference filter, so callers can tell "captured" from "filtered". */
 aicam_result_t system_service_capture_and_upload_mqtt(aicam_bool_t enable_ai, 
                                                      uint32_t chunk_size,
                                                      aicam_bool_t store_to_sd,
-                                                     aicam_capture_trigger_t trigger_type);
+                                                     aicam_capture_trigger_t trigger_type,
+                                                     aicam_bool_t *ai_filtered_out);
 
 /**
  * @brief Unified capture request entry with defaults and concurrency guard

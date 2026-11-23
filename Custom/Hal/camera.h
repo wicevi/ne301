@@ -242,4 +242,5 @@ aicam_bool_t camera_ae_last_valid(void);
 int camera_stats_get_luma(uint8_t *luma, uint32_t *frame_id);
 int camera_ae_get_target(uint8_t *target);
 
+
 #endif

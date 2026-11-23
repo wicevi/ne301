@@ -16,6 +16,12 @@
 /* ==================== Global Variables ==================== */
 
 static ai_draw_service_t g_ai_draw_service = {0};
+/* Serializes drawing across threads: the preview camera callback and the
+ * model-validation / capture paths share one global draw config - without
+ * this lock a concurrent draw can swap p_dst mid-loop and land its label on
+ * the other caller's buffer (seen as a stray extra label on the first
+ * validation after boot while preview is running). */
+static osMutexId_t g_ai_draw_lock;
 
 /* ==================== Internal Function Declarations ==================== */
 
@@ -99,6 +105,9 @@ aicam_result_t ai_draw_service_init(const ai_draw_config_t *config)
         return result;
     }
 
+    if (g_ai_draw_lock == NULL) {
+        g_ai_draw_lock = osMutexNew(NULL);
+    }
     g_ai_draw_service.initialized = AICAM_TRUE;
     
     LOG_SVC_INFO("AI draw service initialized successfully");
@@ -151,6 +160,9 @@ aicam_result_t ai_draw_results(uint8_t *fb,
         LOG_SVC_ERROR("AI draw service not initialized");
         return AICAM_ERROR_NOT_INITIALIZED;
     }
+    if (g_ai_draw_lock != NULL) {
+        osMutexAcquire(g_ai_draw_lock, osWaitForever);
+    }
     
     aicam_result_t result_code = AICAM_OK;
     
@@ -184,6 +196,10 @@ aicam_result_t ai_draw_results(uint8_t *fb,
             LOG_SVC_WARN("Unsupported AI result type: %d", result->type);
             result_code = AICAM_ERROR_NOT_SUPPORTED;
             break;
+    }
+    
+    if (g_ai_draw_lock != NULL) {
+        osMutexRelease(g_ai_draw_lock);
     }
     
     return result_code;
@@ -534,8 +550,13 @@ static aicam_result_t ai_draw_configure_od_drawing(void)
     g_ai_draw_service.od_draw_conf.image_width = g_ai_draw_service.config.image_width;
     g_ai_draw_service.od_draw_conf.image_height = g_ai_draw_service.config.image_height;
     g_ai_draw_service.od_draw_conf.line_width = g_ai_draw_service.config.line_width;
-    g_ai_draw_service.od_draw_conf.font = g_ai_draw_service.font_12;
-    
+    /* Leave the conf font zeroed: od_draw_init frees any preset font.data
+     * and sets up its OWN font - copying the shared font_12 here made that
+     * free release font_12's data (then re-freed by mpe_draw_init and by
+     * ai_draw_deinit_fonts: a double/triple free that corrupted the heap,
+     * after which model-swap allocations landed on the OD font bitmap and
+     * labels rendered as colored speckle noise). */
+
     // Initialize OD drawing
     aicam_result_t result = od_draw_init(&g_ai_draw_service.od_draw_conf);
     if (result != 0) {
@@ -558,8 +579,8 @@ static aicam_result_t ai_draw_configure_mpe_drawing(void)
     g_ai_draw_service.mpe_draw_conf.line_width = g_ai_draw_service.config.line_width;
     g_ai_draw_service.mpe_draw_conf.box_line_width = g_ai_draw_service.config.box_line_width;
     g_ai_draw_service.mpe_draw_conf.dot_width = g_ai_draw_service.config.dot_width;
-    g_ai_draw_service.mpe_draw_conf.font = g_ai_draw_service.font_12;
-    
+    /* Same as OD above: mpe_draw_init owns and sets up its own font. */
+
     // Initialize MPE drawing
     aicam_result_t result = mpe_draw_init(&g_ai_draw_service.mpe_draw_conf);
     if (result != 0) {

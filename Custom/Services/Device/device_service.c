@@ -346,8 +346,11 @@ static void init_default_camera_config(camera_config_t *config)
     config->image_config.fast_capture_skip_frames = image_config.fast_capture_skip_frames;
     config->image_config.fast_capture_resolution = image_config.fast_capture_resolution;
     config->image_config.fast_capture_jpeg_quality = image_config.fast_capture_jpeg_quality;
+    config->image_config.runtime_capture_skip_frames = image_config.runtime_capture_skip_frames;
+    config->image_config.runtime_capture_jpeg_quality = image_config.runtime_capture_jpeg_quality;
     config->image_config.capture_disable_comm = image_config.capture_disable_comm;
     config->image_config.capture_storage_ai = image_config.capture_storage_ai;
+    config->image_config.ai_capture_enable = image_config.ai_capture_enable;
     config->image_config.isp_mode = image_config.isp_mode;
 
     LOG_SVC_DEBUG("Image configuration updated: brightness=%u, contrast=%u, h_flip=%d, v_flip=%d, aec=%d, isp_mode=%u, startup_skip=%u, fast_skip=%u, fast_res=%u, fast_jpeg_q=%u, cap_dis_comm=%d, cap_stor_ai=%d",
@@ -901,17 +904,60 @@ static void fill_light_task(void *argument)
  *          - AP off (slow blink): Take photo, maintain slow blink
  *          - AP on (solid): Take photo, maintain solid
  */
+/* Button capture runs on ONE persistent worker: the capture+MQTT-upload
+ * chain blocks for tens of seconds when the network is down (connect
+ * retries plus the PUBACK wait), which would freeze the key-scan thread
+ * and swallow every further key event for that whole window. The worker
+ * is created lazily on the first press and never torn down (no per-press
+ * thread create/destroy); presses during an in-flight capture coalesce
+ * into a single pending token. The service's g_capture_in_progress guard
+ * still serializes against other capture callers. */
+static osThreadId_t button_capture_thread = NULL;
+static osSemaphoreId_t button_capture_sem = NULL;
+/* Static stack (codebase convention): the RTOS thread pool cannot satisfy
+ * a dynamic 16KB stack allocation - osThreadNew(NULL, ...) failed on-device
+ * ("Button capture worker unavailable") and every press was dropped. */
+static uint8_t button_capture_stack[1024 * 16] ALIGN_32 IN_PSRAM;
+
+static void button_capture_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        osSemaphoreAcquire(button_capture_sem, osWaitForever);
+        aicam_result_t result = system_service_capture_and_upload_mqtt(AICAM_TRUE, 0, AICAM_TRUE, AICAM_CAPTURE_TRIGGER_BUTTON, NULL);
+        if(result != AICAM_OK){
+            LOG_SVC_ERROR("Upload image to mqtt failed :%d\r\n",result);
+        }
+    }
+}
+
 static void single_press_callback(void *user_data)
 {
+    (void)user_data;
     LOG_SVC_INFO("Single press callback - taking photo\r\n");
-    
+
     // LED state is maintained (no change needed)
     // - If AP is on, LED stays solid
     // - If AP is off, LED stays slow blink
-    
-    aicam_result_t result = system_service_capture_and_upload_mqtt(AICAM_TRUE, 0, AICAM_TRUE, AICAM_CAPTURE_TRIGGER_BUTTON);
-    if(result != AICAM_OK){
-        LOG_SVC_ERROR("Upload image to mqtt failed :%d\r\n",result);
+
+    if (button_capture_thread == NULL) {
+        static const osThreadAttr_t button_capture_attr = {
+            .name = "btnCap",
+            .stack_mem = button_capture_stack,
+            .stack_size = sizeof(button_capture_stack),
+            .priority = osPriorityBelowNormal,
+        };
+        button_capture_sem = osSemaphoreNew(1, 0, NULL);
+        if (button_capture_sem != NULL) {
+            button_capture_thread = osThreadNew(button_capture_worker, NULL, &button_capture_attr);
+            if (button_capture_thread == NULL) {
+                osSemaphoreDelete(button_capture_sem);
+                button_capture_sem = NULL;
+            }
+        }
+    }
+    if (button_capture_thread == NULL || osSemaphoreRelease(button_capture_sem) != osOK) {
+        LOG_SVC_ERROR("Button capture worker unavailable\r\n");
     }
 }
 
@@ -2131,17 +2177,29 @@ aicam_result_t device_service_image_set_config(const image_config_t *config)
 
 
     /* IR board: isp_mode changes route through the day/night state machine
-     * (manual DAY/NIGHT applies optics immediately; AUTO arms the task) and
-     * are persisted there. Standard board keeps the direct apply below. */
+     * (manual DAY/NIGHT applies optics immediately; AUTO arms the task).
+     * The SENSOR-level parameters (brightness / contrast / mirror-flip /
+     * AEC) still must reach the hardware: this branch used to return right
+     * after the day/night call, so flips never reached the sensor on IR
+     * boards (saved but never applied). ISP IQ stays owned by the day/night
+     * machine - not hot-swapped here. */
     if (board_is_ir() == AICAM_TRUE) {
         if (g_device_service.day_night_initialized) {
             aicam_result_t r = device_service_day_night_set_mode(config->isp_mode);
             if (r != AICAM_OK) {
                 return r;
             }
-        } else {
-            (void)json_config_set_device_service_image_config(&g_device_service.camera_config.image_config);
         }
+
+        if (g_device_service.camera_initialized && g_device_service.camera_device) {
+            aicam_result_t result = apply_camera_config_to_hardware(&g_device_service.camera_config);
+            if (result != AICAM_OK) {
+                LOG_SVC_ERROR("Failed to apply camera configuration to hardware: %d", result);
+                return result;
+            }
+        }
+
+        (void)json_config_set_device_service_image_config(&g_device_service.camera_config.image_config);
         LOG_SVC_INFO("Image configuration applied: brightness=%u, contrast=%u, h_flip=%d, v_flip=%d, isp_mode=%u",
                     config->brightness, config->contrast, config->horizontal_flip, config->vertical_flip,
                     config->isp_mode);
@@ -2585,10 +2643,44 @@ aicam_result_t device_service_camera_capture(uint8_t **buffer, int *out_len,
     }
 
     // 3. get frame buffer with frame ID
+    /* Runtime capture skip frames (web-configurable 0-30): discard N fresh
+     * frames before the real one so the captured image settles from any
+     * motion/AF transient at the trigger moment. Implemented by waiting N
+     * frame PERIODS, NOT a get-return loop: right after RETURN the same
+     * buffer is still the newest READY frame, so an immediate re-GET
+     * re-acquires the SAME frame - the old loop skipped nothing while
+     * hammering the pool (and each round could hit the transient
+     * all-buffers-busy window). */
+    {
+        uint32_t skip = g_device_service.camera_config.image_config.runtime_capture_skip_frames;
+        if (skip > 0) {
+            uint32_t fps = 30;
+            pipe_params_t p1;
+            memset(&p1, 0, sizeof(p1));
+            if (device_ioctl(g_device_service.camera_device, CAM_CMD_GET_PIPE1_PARAM,
+                             (uint8_t *)&p1, sizeof(p1)) == AICAM_OK && p1.fps > 0) {
+                fps = p1.fps;
+            }
+            uint32_t frame_ms = 1000 / fps;
+            osDelay(skip * frame_ms + frame_ms / 2);
+        }
+    }
     uint32_t captured_frame_id = 0;
     camera_buffer_with_frame_id_t buffer_with_id = {0};
-    aicam_result_t buffer_result = device_ioctl(g_device_service.camera_device, CAM_CMD_GET_PIPE1_BUFFER_WITH_FRAME_ID,
-                                                 (uint8_t *)&buffer_with_id, 0);
+    aicam_result_t buffer_result = AICAM_ERROR;
+    for (uint32_t attempt = 0; attempt < 3; attempt++) {
+        buffer_result = device_ioctl(g_device_service.camera_device, CAM_CMD_GET_PIPE1_BUFFER_WITH_FRAME_ID,
+                                     (uint8_t *)&buffer_with_id, 0);
+        if (buffer_result == AICAM_OK && buffer_with_id.buffer != NULL && buffer_with_id.size > 0) {
+            break;
+        }
+        /* Transient pool window (two buffers mid-write + the third locked
+         * for overlay): retry shortly instead of failing the whole capture.
+         * The GET handler already waits on the frame semaphore internally;
+         * this outer retry covers the case where the woken frame gets taken
+         * by the encoder thread first. */
+        osDelay(15);
+    }
     if (buffer_result == AICAM_OK && buffer_with_id.buffer != NULL && buffer_with_id.size > 0) {
         fb = buffer_with_id.buffer;
         fb_len = buffer_with_id.size;
@@ -2632,7 +2724,13 @@ aicam_result_t device_service_camera_capture(uint8_t **buffer, int *out_len,
     jpeg_param.ImageWidth = pipe_param.width;
     jpeg_param.ImageHeight = pipe_param.height;
     jpeg_param.ChromaSubsampling = JPEG_420_SUBSAMPLING;
-    jpeg_param.ImageQuality = 60;
+    /* Web-configurable runtime capture quality (1-100); guard against a
+     * zero/uninitialized value (NVS backfill writes the raw struct default
+     * on first boot after upgrade) - fall back to the historical 60. */
+    {
+        uint32_t q = g_device_service.camera_config.image_config.runtime_capture_jpeg_quality;
+        jpeg_param.ImageQuality = (q >= 1 && q <= 100) ? q : 60;
+    }
     ret = device_ioctl(g_device_service.jpeg_device, JPEGC_CMD_SET_ENC_PARAM, (uint8_t *)&jpeg_param, sizeof(jpegc_params_t));
     if (ret != 0)
     {

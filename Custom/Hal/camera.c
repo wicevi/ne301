@@ -121,6 +121,7 @@ static int pipe_buffer_acquire(pipe_buffer_t *pipe_buffer, pipe_params_t *pipe_p
 static int pipe_buffer_release(pipe_buffer_t *pipe_buffer, pipe_params_t *pipe_param, camera_dq_t *dq);
 
 static camera_t g_camera = {0};
+
 const osThreadAttr_t cameraTask_attributes = {
     .name = "cameraTask",
     .priority = (osPriority_t) osPriorityRealtime,
@@ -221,6 +222,7 @@ pipe_buffer_t* buffer_get_latest_ready(pipe_buffer_t *bufs, int nb, camera_dq_t 
     pipe_buffer_t* latest = NULL;
     uint32_t max_frame_id = 0;
 
+
     for (int i = 0; i < nb; ++i) {
         if (bufs[i].state >= BUFFER_READY && !bufs[i].is_locked) {
             if (latest == NULL || bufs[i].frame_id > max_frame_id) {
@@ -250,6 +252,8 @@ pipe_buffer_t* buffer_get_latest_ready(pipe_buffer_t *bufs, int nb, camera_dq_t 
         }
         if (latest != NULL) latest->owner_count++;
     }
+
+
     // printf("latest buffer(%p) frame_id=%ld, owner_count=%d, requester=%p\r\n", latest, latest ? latest->frame_id : -1, latest ? latest->owner_count : -1, requester);
     return latest;
 }
@@ -547,7 +551,12 @@ static int DCMIPP_Pipe2Init(camera_t *camera)
     dcmipp_conf.output_format = camera->pipe2_param.format;
     dcmipp_conf.output_bpp = camera->pipe2_param.bpp;
     dcmipp_conf.mode = CMW_Aspect_ratio_manual_roi;
-    dcmipp_conf.enable_swap = 1;
+    /* Byte swap is only meaningful for the packed-RGB888 pipe2 format
+     * (yields B-G-R bytes the downstream chain is calibrated against). The
+     * product pipe2 format is RGB565 - swap OFF (swap was cleared of any
+     * role in the write-contention corruption either way). */
+    dcmipp_conf.enable_swap =
+        (camera->pipe2_param.format == DCMIPP_PIXEL_PACKER_FORMAT_RGB888_YUV444_1) ? 1 : 0;
     /* -1: leave per-pipe gamma to ISP_SVC_ISP_SetGamma (both pipes).
     Passing 0 would DisableGammaConversion here and desync Pipe2 after
     model reload, because camera_start no longer re-runs ISP_Start. */
@@ -565,6 +574,11 @@ static int DCMIPP_IpPlugInit(DCMIPP_HandleTypeDef *hdcmipp)
     DCMIPP_IPPlugConfTypeDef ipplug_conf = { 0 };
     int ret;
 
+    /* STOCK configuration - do not retune without hardware documentation:
+     * an experiment giving CLIENT5 (PIPE1) a line-sized FIFO region and
+     * near-equal WLRU weights produced full-screen horizontal stripes on the
+     * PIPE2 preview; the DPREG word size / arbitration semantics evidently
+     * differ from the assumption used. */
     ipplug_conf.MemoryPageSize = DCMIPP_MEMORY_PAGE_SIZE_256BYTES;
 
     ipplug_conf.Client = DCMIPP_CLIENT2; /* aux pipe */
@@ -681,13 +695,18 @@ static void main_pipe_frame_event()
         }else{
             buffer_release_isr(buffer, &g_camera.pipe1_dq);
         }
-    }else if(buffer1 != NULL && buffer1->data != NULL){
+    }else if(buffer1 != NULL && buffer1->data != NULL && buffer1->state == BUFFER_READY){
         /*
          * buffer1 was marked BUFFER_READY above but the DCMIPP is about to
          * DMA into it; demote it so it cannot be handed out mid-write. Only
          * when buffer == NULL: otherwise buffer_acquire already promoted a
          * different buffer, and a second PROCESSING buffer would break
          * find_processing_buffer.
+         * STATE GUARD: a consumer may have grabbed buffer1 (IN_USE) between
+         * the set_ready above and here - DMAing into a held buffer is exactly
+         * the tearing the dual-snapshot forensics caught (97% of the frame
+         * replaced while the pipeline thread was dumping). If it was taken,
+         * DROP this frame instead of tearing a consumer's buffer.
          */
         if (buffer == NULL)
             buffer1->state = BUFFER_PROCESSING;
@@ -706,6 +725,17 @@ static void ancillary_pipe_frame_event()
     pipe_buffer_t *buffer,*buffer1;
     int ret;
     bool frame_is_valid = (g_camera.skip_frame_counter == 0);
+
+
+    /* The shared startup skip counter is normally burned by PIPE1's frame
+     * events. With PIPE1 fully stopped (EXPERIMENT C), pipe2 must burn it
+     * itself or skip never reaches 0 and every pipe2 frame is discarded as
+     * an invalid startup frame - no buffer is ever published and the preview
+     * starves. Guarded on pipe1 being stopped so normal dual-pipe mode keeps
+     * the exact original skip pacing. */
+    if (g_camera.state.pipe1_state != PIPE_START && g_camera.skip_frame_counter > 0){
+        g_camera.skip_frame_counter--;
+    }
 
     // check pipe state and buffer validity
     if(g_camera.pipe2_buffer == NULL || g_camera.state.pipe2_state != PIPE_START){
@@ -734,8 +764,9 @@ static void ancillary_pipe_frame_event()
         }else{
             buffer_release_isr(buffer, &g_camera.pipe2_dq);
         }
-    }else if(buffer1 != NULL && buffer1->data != NULL){
-        /* Same demote as main_pipe_frame_event above. */
+    }else if(buffer1 != NULL && buffer1->data != NULL && buffer1->state == BUFFER_READY){
+        /* Same demote as main_pipe_frame_event above, incl. the IN_USE
+         * guard: never DMA into a buffer a consumer already holds. */
         if (buffer == NULL)
             buffer1->state = BUFFER_PROCESSING;
         ret = HAL_DCMIPP_PIPE_SetMemoryAddress(CMW_CAMERA_GetDCMIPPHandle(), DCMIPP_PIPE2,
@@ -1383,11 +1414,12 @@ static int camera_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsig
             break;
 
         case CAM_CMD_RETURN_PIPE1_BUFFER:
-            if(camera->state.pipe1_state != PIPE_START){
+            if (camera->state.pipe1_state != PIPE_START){
                 ret = AICAM_ERROR_NOT_FOUND;
                 break;
             }
             // printf("Return PIPE1 buffer: 0x%p, osThreadGetId: 0x%p\r\n", ubuf, osThreadGetId());
+            ret = AICAM_ERROR_NOT_FOUND; /* caller can fall back to the other pipe's pool */
             for (i = 0; i < camera->pipe1_param.buffer_nb; ++i) {
                 if (camera->pipe1_buffer[i].data == ubuf) {
                     camera->pipe1_buffer[i].return_count++;
@@ -1401,11 +1433,12 @@ static int camera_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsig
             break;
 
         case CAM_CMD_RETURN_PIPE2_BUFFER:
-            if(camera->state.pipe2_state != PIPE_START){
+            if (camera->state.pipe2_state != PIPE_START){
                 ret = AICAM_ERROR_NOT_FOUND;
                 break;
             }
             // printf("Return PIPE2 buffer: 0x%p, osThreadGetId: 0x%p\r\n", ubuf, osThreadGetId());
+            ret = AICAM_ERROR_NOT_FOUND; /* caller can fall back to the other pipe's pool */
             for (i = 0; i < camera->pipe2_param.buffer_nb; ++i) {
                 if (camera->pipe2_buffer[i].data == ubuf) {
                     camera->pipe2_buffer[i].return_count++;

@@ -259,6 +259,8 @@ int nn_instance_set_callback(nn_handle_t handle, nn_callback_t callback, void *u
 * output: 0 success, -1 failed
 */
 int nn_load_model(const uintptr_t file_ptr);
+/** Last model-load failure reason ("" if none or load succeeded). */
+const char *nn_get_last_error(void);
 
 /*
 * description: unload model
@@ -288,6 +290,14 @@ int nn_get_model_output_buffer(uint8_t **buffer, uint32_t *size);
 */
 int nn_get_model_info(nn_model_info_t *model_info);
 
+/*
+* description: get the loaded model's class-name list as a cJSON string
+*              array (from postprocess_params.class_names in the model
+*              config). Caller owns and must cJSON_Delete the array.
+* output: array (possibly empty), NULL when no model is loaded
+*/
+cJSON* nn_get_model_labels_json(void);
+
 // AI inference control (default instance)
 
 /*
@@ -312,6 +322,13 @@ int nn_stop_inference(void);
 * output: 0 success, -1 failed
 */
 int nn_inference_frame(uint8_t *input_data, uint32_t input_size, nn_result_t *result);
+
+/*
+* description: byte size the active model expects as nn_inference_frame input
+* input: none
+* output: expected bytes, 0 when no model is loaded
+*/
+uint32_t nn_expected_input_size(void);
 
 /*
 * description: set confidence threshold for postprocess
