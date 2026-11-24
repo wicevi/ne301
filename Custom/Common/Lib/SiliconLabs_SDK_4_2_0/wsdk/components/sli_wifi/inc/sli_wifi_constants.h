@@ -346,8 +346,10 @@ typedef enum { SLI_WIFI_NO_ENCRYPTION, SLI_WIFI_TKIP_ENCRYPTION, SLI_WIFI_CCMP_E
 #define SLI_WIFI_RSP_SET_TRANSCEIVER_CHANNEL_WAIT_TIME \
   ((SLI_WIFI_INTERNAL_COMMANDS_BASE_VALUE * SL_WIFI_INTERNAL_COMMANDS_TIMEOUT_SF) + (SLI_DEFAULT_TIMEOUT))
 /// Timeout value to get Full Firmware Version response command
-#define SLI_WIFI_RSP_FULL_FW_VERSION_WAIT_TIME \
-  ((SLI_WIFI_INTERNAL_COMMANDS_BASE_VALUE * SL_WIFI_INTERNAL_COMMANDS_TIMEOUT_SF) + (SLI_DEFAULT_TIMEOUT))
+/// NE301: trivial one-shot version query — 3s is ample when the NWP is alive;
+/// the stock ~31s only delayed wedged-NWP detection (the timeout now also
+/// feeds sli_firmware_error_callback, see sl_si91x_get_firmware_version).
+#define SLI_WIFI_RSP_FULL_FW_VERSION_WAIT_TIME (3000 & SLI_WIFI_WAIT_TIME_BIT_MASK)
 /// Timeout value for sending IP address info command
 #define SLI_WIFI_RSP_SEND_IP_ADDRESS_INFO_WAIT_TIME (200 & SLI_WIFI_WAIT_TIME_BIT_MASK)
 
