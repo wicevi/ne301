@@ -476,14 +476,14 @@ int modem_device_wait_sim_ready(uint32_t timeout_ms)
                 return MODEM_OK;
             } else if (strstr(rsp_bufs[0], "SIM PIN") != NULL) {
                 snprintf(cmd_buf, sizeof(cmd_buf), "AT+CPIN=%s\r\n", g_modem_config.pin);
-                ret = modem_at_cmd_wait_ok(&modem_at_handle, cmd_buf, 500);
+                ret = modem_at_cmd_wait_ok(&modem_at_handle, cmd_buf, 5000);
                 if (ret != MODEM_OK) {
                     modem_device_free_rsp_bufs(rsp_bufs, 2);
                     return ret;
                 }
             } else if (strstr(rsp_bufs[0], "SIM PUK") != NULL) {
                 snprintf(cmd_buf, sizeof(cmd_buf), "AT+CPIN=\"%s\",\"%s\"\r\n", g_modem_config.puk, g_modem_config.pin);
-                ret = modem_at_cmd_wait_ok(&modem_at_handle, cmd_buf, 500);
+                ret = modem_at_cmd_wait_ok(&modem_at_handle, cmd_buf, 5000);
                 if (ret != MODEM_OK) {
                     modem_device_free_rsp_bufs(rsp_bufs, 2);
                     return ret;
@@ -548,7 +548,7 @@ modem_operator_t modem_device_get_operator(void)
     /* 1. Prefer AT+CIMI to read IMSI and use the first 5/6 digits (MCC+MNC) to determine the operator */
     rsp_bufs = modem_device_malloc_rsp_bufs(2);
     if (rsp_bufs != NULL) {
-        ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CIMI\r\n", rsp_bufs, 2, 500);
+        ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CIMI\r\n", rsp_bufs, 2, 2000);
         if (ret == 2 && strstr(rsp_bufs[1], "OK") != NULL) {
             len = strlen(rsp_bufs[0]);
             if (len >= 5) {
@@ -599,7 +599,7 @@ modem_operator_t modem_device_get_operator(void)
     rsp_bufs = modem_device_malloc_rsp_bufs(2);
     if (rsp_bufs == NULL) return MODEM_OPERATOR_UNKNOWN;
 
-    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+COPS?\r\n", rsp_bufs, 2, 500);
+    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+COPS?\r\n", rsp_bufs, 2, 5000);
     if (ret != 2 || strstr(rsp_bufs[1], "OK") == NULL) {
         modem_device_free_rsp_bufs(rsp_bufs, 2);
         return MODEM_OPERATOR_UNKNOWN;
@@ -816,7 +816,7 @@ static int modem_device_activate_network(void)
 #if MODEM_IS_CHECK_NETWORK_TYPE
     rsp_bufs = modem_device_malloc_rsp_bufs(2);
     if (rsp_bufs == NULL) return MODEM_ERR_MEM;
-    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+COPS?\r\n", rsp_bufs, 2, 500);
+    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+COPS?\r\n", rsp_bufs, 2, 5000);
     if (ret == 2 && strstr(rsp_bufs[1], "OK") != NULL) {
         if (strstr(rsp_bufs[0], "+COPS:") != NULL) {
             value_ptr = strstr(rsp_bufs[0], "\",");
@@ -969,7 +969,7 @@ int modem_device_get_info(modem_info_t *info, uint8_t is_update_all)
     } else strncpy(info->sim_status, "Unknown", sizeof(info->sim_status) - 1);
 
     if (strstr(info->sim_status, "READY") != NULL) {
-        ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CIMI\r\n", rsp_bufs, 2, 500);
+        ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+CIMI\r\n", rsp_bufs, 2, 2000);
         if (ret == 2) {
             ret = MODEM_OK;
             if (strstr(rsp_bufs[1], "OK") == NULL) ret = MODEM_ERR_FAILED;
@@ -1026,7 +1026,7 @@ int modem_device_get_info(modem_info_t *info, uint8_t is_update_all)
     }
 
     // Get Operator
-    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+COPS?\r\n", rsp_bufs, 2, 500);
+    ret = modem_at_cmd_wait_rsp(&modem_at_handle, "AT+COPS?\r\n", rsp_bufs, 2, 5000);
     if (ret == 2) {
         ret = MODEM_OK;
         if (strstr(rsp_bufs[1], "OK") == NULL) ret = MODEM_ERR_FAILED;
@@ -1148,11 +1148,11 @@ int modem_device_set_config(const modem_config_t *config)
     if (strcmp(config->plmn, g_modem_config.plmn) != 0) {
         MODEM_LOGD("Set Modem PLMN: %s => %s.", g_modem_config.plmn, config->plmn);
         if (config->plmn[0] == 0) {
-            ret = modem_at_cmd_wait_ok(&modem_at_handle, "AT+COPS=0\r\n", 500);
+            ret = modem_at_cmd_wait_ok(&modem_at_handle, "AT+COPS=0\r\n", 5000);
             if (ret != MODEM_OK) return ret;
         } else {
             snprintf(at_cmd, sizeof(at_cmd), "AT+COPS=1,2,\"%s\"\r\n", config->plmn);
-            ret = modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 500);
+            ret = modem_at_cmd_wait_ok(&modem_at_handle, at_cmd, 5000);
             if (ret != MODEM_OK) return ret;
         }
         strncpy(g_modem_config.plmn, config->plmn, sizeof(g_modem_config.plmn) - 1);
@@ -1410,10 +1410,10 @@ int modem_device_into_ppp(modem_net_ppp_callback_t recv_callback)
     if (ret != MODEM_OK) return ret;
 
     if (g_modem_config.ppp_context_id == 0) {
-        ret = modem_at_cmd_wait_str(&modem_at_handle, "ATD*99#\r", "CONNECT|OK", 500);
+        ret = modem_at_cmd_wait_str(&modem_at_handle, "ATD*99#\r", "CONNECT|OK", 3000);
     } else {
         snprintf(at_cmd, sizeof(at_cmd), "ATD*99***%d#\r", g_modem_config.ppp_context_id);
-        ret = modem_at_cmd_wait_str(&modem_at_handle, at_cmd, "CONNECT|OK", 500);
+        ret = modem_at_cmd_wait_str(&modem_at_handle, at_cmd, "CONNECT|OK", 3000);
     }
     if (ret == MODEM_OK) {
         xSemaphoreTake(recv_mutex, portMAX_DELAY);

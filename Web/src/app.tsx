@@ -18,18 +18,12 @@ export default function App() {
     }, 1000 * 60 * 10);
     return timer;
   }
-  const setSystemTime = async () => {
+  const setSystemTime = () => {
     try {
-      // When NTP sync is enabled on the device, the device keeps its own
-      // clock — pushing browser time here would fight (and often regress)
-      // the NTP-synced time. Only sync from the browser when NTP is off.
-      try {
-        const ntpRes = await systemApis.getNtpConfigReq({ skipErrorToast: true });
-        if (ntpRes?.data?.enable) return;
-      } catch {
-        // NTP config unreachable (old firmware / transient error): fall
-        // through to browser sync, matching the previous behavior.
-      }
+      // Push browser time on every page load. The firmware's rtc_set_timeStamp
+      // skips sub-2s steps, so against an already-synced clock this is a
+      // no-op; it is also the only time source when the device has no
+      // outbound network for NTP (fresh boot over USB/AP-only).
       // Get current UTC time in seconds timestamp
       const timestamp = Math.floor(Date.now() / 1000)
       const offsetMinutes = new Date().getTimezoneOffset()
