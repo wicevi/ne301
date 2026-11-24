@@ -15,6 +15,7 @@ import hardwareManagement, {
   ISP_MODE_AUTO,
   ISP_MODE_CUSTOM,
   type DayNightConfig,
+  type SetHardwareInfoReq,
 } from '@/services/api/hardware-management';
 import DayNightLogicConfig from './day-night-auto';
 import SvgIcon from '@/components/svg-icon';
@@ -56,6 +57,9 @@ export default function Graphics() {
   const [contrast, setContrast] = useState(0);
   const [flipHorizontal, setFlipHorizontal] = useState(false);
   const [flipVertical, setFlipVertical] = useState(false);
+  /* Motion-blur suppression: ON = AE exposure cap 10ms (live + persisted via
+   * image config exposure_cap_us), OFF = sensor default. */
+  const [antiBlur, setAntiBlur] = useState(false);
   const [aec, setAec] = useState(0);
   const [cameraSectionOpen, setCameraSectionOpen] = useState(true);
   /* IR board (day/night-capable): the ISP selector becomes the day/night
@@ -147,6 +151,9 @@ export default function Graphics() {
       setContrast(res.data.contrast);
       setFlipHorizontal(res.data.horizontal_flip);
       setFlipVertical(res.data.vertical_flip);
+      setAntiBlur(
+        typeof res.data.exposure_cap_us === 'number' && res.data.exposure_cap_us > 0
+      );
       setAec(res.data.aec);
       if (typeof res.data.isp_mode === 'number') {
         setIspMode(res.data.isp_mode);
@@ -247,6 +254,20 @@ export default function Graphics() {
     }
   };
 
+  const handleAntiBlurChange = async (on: boolean) => {
+    setAntiBlur(on);
+    try {
+      await setHardwareInfoReq({
+        exposure_cap_us: on ? 10000 : 0,
+      } as SetHardwareInfoReq);
+      toast.success(i18n._('sys.hardware_management.anti_blur_applied'));
+    } catch (error) {
+      console.error('handleAntiBlurChange', error);
+      setAntiBlur(!on);
+      toast.error('Save failed');
+    }
+  };
+
   // const handleIspExposureModeChange = (auto: boolean) => {
   //   setIspExposureModeAuto(auto);
   // };
@@ -328,6 +349,28 @@ export default function Graphics() {
                                 flipVertical ? 1 : 0
                               )}
                           />
+                        </div>
+                        <Separator />
+                        {/* Motion-blur suppression (AE exposure cap 10ms) */}
+                        <div className="flex items-center justify-between">
+                          <Label className="inline-flex min-w-0 shrink-0 items-center gap-1 text-sm text-text-primary">
+                            {i18n._('sys.hardware_management.anti_blur')}
+                            <Tooltip mbEnhance>
+                              <TooltipTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="inline-flex size-4 shrink-0 items-center justify-center text-gray-500"
+                                  aria-label={i18n._('common.tip')}
+                                >
+                                  <SvgIcon className="size-4 text-gray-500" icon="info" />
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-80 text-pretty">
+                                <p>{i18n._('sys.hardware_management.anti_blur_tip')}</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </Label>
+                          <Switch checked={antiBlur} onCheckedChange={handleAntiBlurChange} />
                         </div>
                         <Separator />
                         <div className="flex justify-between gap-4 items-center">
