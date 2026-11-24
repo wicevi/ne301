@@ -1144,7 +1144,7 @@
     },
     "work_mode": {
       "source": "Custom/Services/Web/api/api_work_mode_module.c",
-      "source_sha256": "c9ddaedac30efcbc",
+      "source_sha256": "cc32dd4ce5f81d3d",
       "routes": [
         {
           "method": "GET",

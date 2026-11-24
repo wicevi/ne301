@@ -69,7 +69,7 @@ export interface PirConfigReq {
     ignore_time_s: number; // 0-15 (register; seconds = 0.5 + 0.5*value)
     pulse_count: number; // 1-4
     window_time_s: number; // 0-3 (register; seconds = 2 + 2*value)
-    disable_in_preview: boolean; // Disable PIR capture during preview (default: true)
+    disable_in_preview: boolean; // Disable PIR capture during preview (default: false)
   };
   timer_trigger?: {
     enable: boolean;

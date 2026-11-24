@@ -1019,10 +1019,14 @@ static aicam_result_t work_mode_triggers_set_handler(http_handler_context_t* ctx
             }
         }
 
-        // Parse disable_in_preview (default: true)
+        // disable_in_preview is optional like the fields above: keep the stored
+        // value when absent or not a bool. (It used to be forced to true here,
+        // silently overriding the "default off" config default for any client
+        // that omitted it.)
         cJSON* disable_in_preview_item = cJSON_GetObjectItem(pir_trigger, "disable_in_preview");
-        config.pir_trigger.disable_in_preview = (disable_in_preview_item && cJSON_IsBool(disable_in_preview_item))
-            ? cJSON_IsTrue(disable_in_preview_item) : AICAM_TRUE;
+        if (disable_in_preview_item && cJSON_IsBool(disable_in_preview_item)) {
+            config.pir_trigger.disable_in_preview = cJSON_IsTrue(disable_in_preview_item);
+        }
     }
 
     // Parse Remote trigger settings

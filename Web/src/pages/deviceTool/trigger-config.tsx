@@ -147,9 +147,8 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
   const [anchorInput, setAnchorInput] = useState(() => toHHMM(new Date()));
   const [savePirTriggerLoading, setSavePirTriggerLoading] = useState(false);
   const [PIRLoading, setPIRLoading] = useState(false);
-  // Advanced PIR options (SENS register / disable-in-preview) hidden for now —
-  // re-enable when field tuning needs them again.
-  // const [pirAdvancedOpen, setPirAdvancedOpen] = useState(false);
+  // Advanced PIR options (disable-in-preview) — collapsed by default.
+  const [pirAdvancedOpen, setPirAdvancedOpen] = useState(false);
   const [savedNextCaptureAt, setSavedNextCaptureAt] = useState<number | null>(
     null
   );
@@ -1034,8 +1033,9 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
                         </SelectContent>
                       </Select>
                     </div>
-                    {/* Advanced PIR options (SENS register + disable-in-preview)
-                     * hidden for now — re-enable when field tuning needs them.
+                    {/* Advanced PIR options. Only disable-in-preview is live (a
+                     * setting carried over from v4.3.1); the raw SENS register
+                     * input below stays commented until field tuning needs it. */}
                     <div className="flex flex-col gap-2">
                       <button
                         type="button"
@@ -1050,6 +1050,7 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
                       </button>
                       {pirAdvancedOpen && (
                         <div className="border border-gray-200 border-solid p-3 rounded-md flex flex-col gap-3">
+                          {/* Raw SENS register input — kept commented.
                           <div className="flex justify-between gap-2 flex-1 pr-0">
                             <Label className="text-sm text-text-primary shrink-0">
                               {i18n._('sys.device_tool.sens_register')}
@@ -1068,6 +1069,7 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
                               })}
                             />
                           </div>
+                          */}
                           <div className="flex justify-between gap-2 flex-1 pr-0">
                             <div className="flex items-center gap-2">
                               <Label className="text-sm text-text-primary shrink-0">
@@ -1116,7 +1118,6 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
                         </div>
                       )}
                     </div>
-                    */}
                       </>
                     )}
                     <div className="flex justify-end mt-2">
