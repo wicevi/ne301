@@ -352,6 +352,15 @@ static void init_default_camera_config(camera_config_t *config)
     config->image_config.capture_storage_ai = image_config.capture_storage_ai;
     config->image_config.ai_capture_enable = image_config.ai_capture_enable;
     config->image_config.isp_mode = image_config.isp_mode;
+    config->image_config.exposure_cap_us = image_config.exposure_cap_us;
+
+    /* Re-apply the persisted motion-blur exposure cap. camera_init runs in
+     * driver_core_init (boot Step 3), BEFORE json_config_mgr_init (Step 4),
+     * so its early read of the config fails and leaves the override at the
+     * default — this spot (device service init, after the config system is
+     * up) is the authoritative boot-time apply. No consumer races it: the
+     * camera only reads sensorInfo when streaming starts, later in boot. */
+    (void)camera_exposure_cap_set(config->image_config.exposure_cap_us);
 
     LOG_SVC_DEBUG("Image configuration updated: brightness=%u, contrast=%u, h_flip=%d, v_flip=%d, aec=%d, isp_mode=%u, startup_skip=%u, fast_skip=%u, fast_res=%u, fast_jpeg_q=%u, cap_dis_comm=%d, cap_stor_ai=%d",
                 config->image_config.brightness,
@@ -1345,10 +1354,11 @@ static void day_night_init(void)
     g_device_service.lightsensor_device = device_find_pattern(LIGHT_DEVICE_NAME, DEV_TYPE_MISC);
 
     /* Resolve configured mode: AUTO stays auto; DAY/NIGHT applied immediately.
-     * Boot-time effective mode defaults to DAY — the cameraProcess homing
-     * edge pulls PE9 LOW (= day) on every boot — so the first
-     * day_night_apply only actuates the filter when the evaluation says
-     * NIGHT (single switch at most). */
+     * The LOGICAL effective mode defaults to DAY for evaluation, while the
+     * cameraProcess homing edge pulls PE9 LOW (= NIGHT with the new filter)
+     * on every boot — so the first day_night_apply actuates the filter only
+     * when the evaluation says DAY (one edge); a NIGHT result is already
+     * homed (single switch at most). */
     g_device_service.day_night_effective_mode = IMAGE_ISP_MODE_DAY;
     g_device_service.day_night_control = DAY_NIGHT_CONTROL_AUTO;
     g_device_service.day_night_initialized = AICAM_TRUE;
@@ -1811,10 +1821,10 @@ aicam_result_t device_service_start(void)
         } else {
             /* AUTO: control stays AUTO for the day/night task — but do an
              * immediate one-shot evaluation NOW (light sensor / time). The
-             * boot homing edge already leaves the filter in DAY; this only
-             * actuates when the evaluation says NIGHT, and the debounced
-             * task logic takes over from the next tick with full
-             * poll/confirm/min-hold. */
+             * boot homing edge already leaves the filter in NIGHT (new
+             * filter polarity); this only actuates when the evaluation says
+             * DAY, and the debounced task logic takes over from the next
+             * tick with full poll/confirm/min-hold. */
             if (osMutexAcquire(g_device_service.day_night_mtx, osWaitForever) == osOK) {
                 day_night_apply(dn_eval_startup_target());
                 g_device_service.day_night_control = DAY_NIGHT_CONTROL_AUTO;

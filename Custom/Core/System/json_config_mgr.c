@@ -144,7 +144,8 @@
              .runtime_capture_jpeg_quality = 60,
              .ai_capture_enable = AICAM_TRUE,
              .capture_disable_comm = AICAM_FALSE,
-             .capture_storage_ai = AICAM_FALSE
+             .capture_storage_ai = AICAM_FALSE,
+             .exposure_cap_us = 0,   // 0 = sensor default (anti-blur off)
          },
          .light_config = {
              .connected = AICAM_FALSE,

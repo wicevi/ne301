@@ -281,6 +281,7 @@ static void parse_device_service(cJSON *json, device_service_config_t *cfg)
         /* "grayscale" field removed with the IR-board adaptation; imports
          * carrying it are ignored. */
         json_get_uint32(img_cfg, "fast_capture_skip_frames", &cfg->image_config.fast_capture_skip_frames);
+        json_get_uint32(img_cfg, "exposure_cap_us", &cfg->image_config.exposure_cap_us);
         json_get_uint32(img_cfg, "fast_capture_resolution", &cfg->image_config.fast_capture_resolution);
         json_get_uint32(img_cfg, "fast_capture_jpeg_quality", &cfg->image_config.fast_capture_jpeg_quality);
         json_get_uint32(img_cfg, "runtime_capture_skip_frames", &cfg->image_config.runtime_capture_skip_frames);
@@ -1105,6 +1106,7 @@ static cJSON *serialize_device_service(const device_service_config_t *cfg)
     cJSON_AddNumberToObject(img_cfg, "aec", cfg->image_config.aec);
     cJSON_AddNumberToObject(img_cfg, "isp_mode", cfg->image_config.isp_mode);
     cJSON_AddNumberToObject(img_cfg, "fast_capture_skip_frames", cfg->image_config.fast_capture_skip_frames);
+    cJSON_AddNumberToObject(img_cfg, "exposure_cap_us", cfg->image_config.exposure_cap_us);
     cJSON_AddNumberToObject(img_cfg, "fast_capture_resolution", cfg->image_config.fast_capture_resolution);
     cJSON_AddNumberToObject(img_cfg, "fast_capture_jpeg_quality", cfg->image_config.fast_capture_jpeg_quality);
     cJSON_AddNumberToObject(img_cfg, "runtime_capture_skip_frames", cfg->image_config.runtime_capture_skip_frames);

@@ -489,6 +489,7 @@ typedef struct {
     aicam_bool_t ai_capture_enable;         // AI master switch for captures: off = capture without
                                              // AI inference (no annotated image, no result filter);
                                              // also gates the sleep-wake quick-snapshot path
+    uint32_t exposure_cap_us;               // motion-blur suppression: AE exposure ceiling in us (0 = sensor default; 10000 = anti-blur). Applied at camera_init and on config PUT
 } image_config_t;
 
 /**
