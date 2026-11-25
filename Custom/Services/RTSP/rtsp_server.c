@@ -112,6 +112,26 @@ aicam_result_t rtsp_parse_client_port(const char *transport_hdr,
     return AICAM_ERROR;
 }
 
+/* Parse "interleaved=a-b" from a Transport header (RTP/AVP/TCP mode).
+ * Returns AICAM_OK only when the parameter is present and well-formed. */
+aicam_result_t rtsp_parse_interleaved(const char *transport_hdr,
+                                      uint8_t *rtp_ch, uint8_t *rtcp_ch)
+{
+    if (!transport_hdr) return AICAM_ERROR;
+
+    const char *il = strstr(transport_hdr, "interleaved=");
+    if (!il) return AICAM_ERROR;
+    il += strlen("interleaved=");
+
+    int rtp = -1, rtcp = -1;
+    if (sscanf(il, "%d-%d", &rtp, &rtcp) >= 1 && rtp >= 0 && rtp <= 255) {
+        *rtp_ch = (uint8_t)rtp;
+        *rtcp_ch = (rtcp >= 0 && rtcp <= 255) ? (uint8_t)rtcp : (uint8_t)(rtp + 1);
+        return AICAM_OK;
+    }
+    return AICAM_ERROR;
+}
+
 /* ==================== Response Helpers ==================== */
 
 static int send_response(int sock, const char *response, uint32_t len)
@@ -390,6 +410,35 @@ static aicam_result_t handle_setup(rtsp_client_t *client, const char *cseq,
 
     LOG_SVC_INFO("RTSP: SETUP Transport: %s", transport);
 
+    /* RTP/AVP/TCP (interleaved): RTP packets are '$'-framed over the RTSP
+     * TCP connection - no client_port and no UDP socket. UDP mode keeps
+     * the client_port requirement below. */
+    uint8_t il_rtp_ch = 0, il_rtcp_ch = 1;
+    if (rtsp_parse_interleaved(transport, &il_rtp_ch, &il_rtcp_ch) == AICAM_OK) {
+        if (client->session_id[0] == '\0') {
+            snprintf(client->session_id, sizeof(client->session_id),
+                     "%08lX%08lX", (unsigned long)rand(), (unsigned long)rand());
+        }
+        client->interleaved = AICAM_TRUE;
+        client->interleave_rtp_channel = il_rtp_ch;
+        client->interleave_rtcp_channel = il_rtcp_ch;
+
+        static char resp_il[384];
+        int len = snprintf(resp_il, sizeof(resp_il),
+            "RTSP/1.0 200 OK\r\n"
+            "CSeq: %s\r\n"
+            "Session: %s;timeout=%d\r\n"
+            "Transport: RTP/AVP/TCP;unicast;interleaved=%u-%u;ssrc=%08lX;mode=\"PLAY\"\r\n"
+            "\r\n",
+            cseq ? cseq : "0",
+            client->session_id, RTSP_SESSION_TIMEOUT,
+            il_rtp_ch, il_rtcp_ch, (unsigned long)client->ssrc);
+        send_response(client->tcp_socket, resp_il, len);
+        LOG_SVC_INFO("RTSP SETUP OK (interleaved %u-%u) session=%s",
+                     il_rtp_ch, il_rtcp_ch, client->session_id);
+        return AICAM_OK;
+    }
+
     /* Parse client RTP/RTCP ports */
     uint16_t client_rtp_port = 0, client_rtcp_port = 0;
     if (rtsp_parse_client_port(transport, &client_rtp_port, &client_rtcp_port) != AICAM_OK) {
@@ -455,7 +504,7 @@ static aicam_result_t handle_play(rtsp_client_t *client, const char *cseq)
         return AICAM_OK;
     }
 
-    if (client->session_id[0] == '\0' || client->client_rtp_port == 0) {
+    if (client->session_id[0] == '\0' || (!client->interleaved && client->client_rtp_port == 0)) {
         LOG_SVC_WARN("RTSP: PLAY rejected - no session (session=%s rtp_port=%u)",
                      client->session_id, client->client_rtp_port);
         send_simple_response(client->tcp_socket, 454, "Session Not Found", cseq, NULL);

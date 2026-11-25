@@ -116,11 +116,12 @@
             .enable = AICAM_FALSE,
             .pin_number = 2,
             .trigger_type = AICAM_TRIGGER_TYPE_RISING,
+            .device_type = AICAM_PIR_DEVICE_PIR,
             .sensitivity_level = 30,    // Default sensitivity level
             .ignore_time_s = 7,         // Default ignore time (4 seconds)
             .pulse_count = 1,            // Default pulse count (2 pulses)
             .window_time_s = 0,          // Default window time (2 seconds)
-            .disable_in_preview = AICAM_TRUE // Default: disable PIR capture during preview
+            .disable_in_preview = AICAM_FALSE // Default: keep PIR capture active during preview
         },
         .remote_trigger = {
             .enable = AICAM_FALSE
@@ -139,8 +140,12 @@
              .fast_capture_skip_frames = 10,
              .fast_capture_resolution = 0,   // 0: 1280x720
              .fast_capture_jpeg_quality = 60,
+             .runtime_capture_skip_frames = 0,
+             .runtime_capture_jpeg_quality = 60,
+             .ai_capture_enable = AICAM_TRUE,
              .capture_disable_comm = AICAM_FALSE,
-             .capture_storage_ai = AICAM_FALSE
+             .capture_storage_ai = AICAM_FALSE,
+             .exposure_cap_us = 0,   // 0 = sensor default (anti-blur off)
          },
          .light_config = {
              .connected = AICAM_FALSE,
@@ -161,7 +166,7 @@
              .time_end_hour = 6,
              .time_end_minute = 0,
              .light_sensor_night_threshold = 20,
-             .light_sensor_day_threshold = 40,
+             .light_sensor_day_threshold = 80,
              .isp_night_enter_lux = 50,
              .isp_day_enter_lux = 150,
              .isp_night_enter_exposure_us = 20000,
@@ -175,7 +180,17 @@
              .ir_brightness = 50
          }
      },
-     
+
+     .usb_config = {
+         /* NE301 defaults to USB OFF for power saving (NE302 defaults ON);
+          * the web switch enables it persistently via NVS usb_dev_en. */
+         .device_enable = AICAM_FALSE,
+         .follow_ap = AICAM_TRUE,
+         .ip = "192.168.20.1",        /* custom-mode default: classic
+                                       * standalone USB subnet */
+         .netmask = "255.255.255.0"
+     },
+
      .network_service = {
          .ap_sleep_time = 0,        // Default AP sleep time (0 = no sleep)
          .ap_channel = 0,           // Default AP channel (0 = auto)
@@ -225,6 +240,13 @@
              .last_status = POE_STATUS_OFFLINE,          // Initial status
              .last_error_time = 0,
              .last_error_msg = ""
+         },
+
+         // NTP time-sync defaults (3 built-in servers + 1 free slot)
+         .ntp = {
+             .enable = AICAM_TRUE,
+             .server_count = 3,
+             .servers = {"time.windows.com", "pool.ntp.org", "time1.google.com", ""}
          }
      },
      
@@ -504,6 +526,7 @@
 
      /* Fields not covered by the static default_config table */
      json_config_capture_upload_defaults(&config->capture_upload);
+     json_config_video_stream_defaults(&config->video_stream);
 
      // Delegate checksum calculation
      aicam_result_t result = json_config_calculate_checksum(config, &config->checksum);
@@ -1265,6 +1288,44 @@ aicam_result_t json_config_set_day_night_config(const day_night_config_t *day_ni
     return AICAM_OK;
 }
 
+/*=================== USB Configuration API Implementation ====================*/
+aicam_result_t json_config_get_usb_config(usb_config_t *usb_config)
+{
+    if (!usb_config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+    if (!g_json_config_ctx.initialized)
+    {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+    *usb_config = g_json_config_ctx.current_config.usb_config;
+    return AICAM_OK;
+}
+
+aicam_result_t json_config_set_usb_config(const usb_config_t *usb_config)
+{
+    if (!usb_config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    if (usb_config != &g_json_config_ctx.current_config.usb_config)
+    {
+        memcpy(&g_json_config_ctx.current_config.usb_config, usb_config, sizeof(usb_config_t));
+    }
+
+    // update to NVS
+    aicam_result_t result = json_config_save_usb_config_to_nvs(usb_config);
+    if (result != AICAM_OK) {
+        LOG_CORE_ERROR("Failed to save USB configuration to NVS");
+        return result;
+    }
+
+    LOG_CORE_INFO("USB configuration updated: device_enable=%u", usb_config->device_enable);
+    return AICAM_OK;
+}
+
 /*=================== ISP Configuration API Implementation ====================*/
 aicam_result_t json_config_get_isp_config(isp_config_t *isp_config)
 {
@@ -1676,6 +1737,57 @@ poe_ip_mode_t json_config_get_poe_ip_mode(void)
     return g_json_config_ctx.current_config.network_service.poe.ip_mode;
 }
 
+aicam_result_t json_config_get_ntp_config(ntp_config_persist_t *ntp_config)
+{
+    if (!ntp_config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    if (!g_json_config_ctx.initialized)
+    {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    *ntp_config = g_json_config_ctx.current_config.network_service.ntp;
+    return AICAM_OK;
+}
+
+aicam_result_t json_config_set_ntp_config(const ntp_config_persist_t *ntp_config)
+{
+    if (!ntp_config)
+    {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    if (!g_json_config_ctx.initialized)
+    {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (ntp_config->enable && ntp_config->server_count == 0)
+    {
+        return AICAM_ERROR_INVALID_PARAM;  // enabled sync needs at least one server
+    }
+
+    if (ntp_config != &g_json_config_ctx.current_config.network_service.ntp)
+    {
+        memcpy(&g_json_config_ctx.current_config.network_service.ntp, ntp_config, sizeof(ntp_config_persist_t));
+    }
+
+    // Save to NVS
+    aicam_result_t result = json_config_save_ntp_config_to_nvs(ntp_config);
+    if (result != AICAM_OK)
+    {
+        LOG_CORE_ERROR("Failed to save NTP configuration to NVS");
+        return result;
+    }
+
+    LOG_CORE_INFO("NTP configuration updated: enable=%d, servers=%u",
+                  ntp_config->enable, ntp_config->server_count);
+    return AICAM_OK;
+}
+
 aicam_result_t json_config_set_poe_ip_mode(poe_ip_mode_t mode)
 {
     if (!g_json_config_ctx.initialized)
@@ -1775,6 +1887,9 @@ void json_config_capture_upload_defaults(capture_upload_config_t *config)
     config->max_pending_records  = 200;
     config->flash_max_records    = CAPUP_FLASH_RECORDS_DEFAULT; /* total cap across all states */
     config->upload_comm_type     = 0;  /* COMM_TYPE_NONE = default logic */
+    config->ai_filter_enable     = AICAM_FALSE;               /* keep every capture by default */
+    config->ai_filter_threshold  = CAPUP_AI_FILTER_TH_DEFAULT;
+    config->ai_filter_labels[0]  = '\0';                       /* empty list = all labels */
 }
 
 void json_config_capture_upload_normalize(capture_upload_config_t *norm)
@@ -1809,6 +1924,17 @@ void json_config_capture_upload_normalize(capture_upload_config_t *norm)
         norm->flash_max_records = CAPUP_FLASH_RECORDS_MIN;
     }
 
+    /* AI inference filter threshold: 0 or out-of-range = default, clamp at bounds */
+    if (norm->ai_filter_threshold == 0 ||
+        norm->ai_filter_threshold > CAPUP_AI_FILTER_TH_MAX) {
+        norm->ai_filter_threshold = CAPUP_AI_FILTER_TH_DEFAULT;
+    }
+    if (norm->ai_filter_threshold < CAPUP_AI_FILTER_TH_MIN) {
+        norm->ai_filter_threshold = CAPUP_AI_FILTER_TH_MIN;
+    }
+    /* Labels come from external JSON/NVS input: always force termination. */
+    norm->ai_filter_labels[CAPUP_AI_FILTER_LABELS_MAX - 1] = '\0';
+
     /* Cross-field constraints */
     if (norm->storage == CAPTURE_STORE_NONE && norm->mode != CAPTURE_MODE_INSTANT) {
         /* "none" only allowed with INSTANT; downgrade to AUTO. */
@@ -1841,4 +1967,74 @@ aicam_result_t json_config_set_capture_upload_config(const capture_upload_config
         memcpy(&g_json_config_ctx.current_config.capture_upload, &norm, sizeof(capture_upload_config_t));
     }
     return result;
+}
+
+/* ==================== Video Stream Parameters ==================== */
+
+void json_config_video_stream_defaults(video_stream_param_t *config)
+{
+    if (!config) return;
+    memset(config, 0, sizeof(*config));
+    config->version      = VSTREAM_CFG_VERSION;
+    config->resolution   = STREAM_RES_720P;
+    config->bitrate_kbps = VSTREAM_BITRATE_DEFAULT_KBPS;
+    config->gop_sec      = VSTREAM_GOP_SEC_DEFAULT;
+}
+
+static void json_config_video_stream_normalize(video_stream_param_t *norm)
+{
+    if (!norm) return;
+
+    if (norm->version == 0) norm->version = VSTREAM_CFG_VERSION;
+    if (norm->resolution > STREAM_RES_1080P) norm->resolution = STREAM_RES_720P;
+    /* 0 or out-of-range bitrate = default; clamp inside range */
+    if (norm->bitrate_kbps == 0 ||
+        norm->bitrate_kbps > VSTREAM_BITRATE_MAX_KBPS) {
+        norm->bitrate_kbps = VSTREAM_BITRATE_DEFAULT_KBPS;
+    }
+    if (norm->bitrate_kbps < VSTREAM_BITRATE_MIN_KBPS) {
+        norm->bitrate_kbps = VSTREAM_BITRATE_MIN_KBPS;
+    }
+    /* gop: only 1/2/4 are offered; anything else falls back to default */
+    if (norm->gop_sec != 1 && norm->gop_sec != 2 && norm->gop_sec != 4) {
+        norm->gop_sec = VSTREAM_GOP_SEC_DEFAULT;
+    }
+}
+
+aicam_result_t json_config_get_video_stream_param(video_stream_param_t *config)
+{
+    if (!config) return AICAM_ERROR_INVALID_PARAM;
+    return json_config_load_video_stream_from_nvs(config);
+}
+
+aicam_result_t json_config_set_video_stream_param(const video_stream_param_t *config)
+{
+    if (!config) return AICAM_ERROR_INVALID_PARAM;
+
+    video_stream_param_t norm = *config;
+    json_config_video_stream_normalize(&norm);
+
+    aicam_result_t result = json_config_save_video_stream_to_nvs(&norm);
+    if (result == AICAM_OK) {
+        memcpy(&g_json_config_ctx.current_config.video_stream, &norm, sizeof(video_stream_param_t));
+    }
+    return result;
+}
+
+void json_config_get_ai_pipe_size(uint32_t *width, uint32_t *height)
+{
+    /* Mirrors camera.h PIPE2_DEFAULT_* / PIPE2_MAX_* without a HAL include. */
+    const uint32_t def_w = 224, def_h = 224, max_w = 480, max_h = 480;
+    if (width) *width = def_w;
+    if (height) *height = def_h;
+
+    uint32_t u32 = 0;
+    if (json_config_nvs_read_uint32(NVS_KEY_AI_PIPE_WIDTH, &u32) == AICAM_OK &&
+        u32 > 0 && u32 <= max_w) {
+        if (width) *width = u32;
+    }
+    if (json_config_nvs_read_uint32(NVS_KEY_AI_PIPE_HEIGHT, &u32) == AICAM_OK &&
+        u32 > 0 && u32 <= max_h) {
+        if (height) *height = u32;
+    }
 }

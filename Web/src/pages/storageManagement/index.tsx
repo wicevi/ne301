@@ -137,6 +137,9 @@ function FileBrowserModal({ fsType, onClose, availableMB, onStorageChange }: { f
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [batchDeleteConfirm, setBatchDeleteConfirm] = useState<string | null>(null);
 
+  // batch download progress — sequential, files only (dirs are skipped)
+  const [batchDl, setBatchDl] = useState<{ active: boolean; cur: number; total: number }>({ active: false, cur: 0, total: 0 });
+
   // delete in-progress (single or batch) — drives a blocking overlay so the
   // user can't navigate/operate while files are being removed
   const [deleting, setDeleting] = useState(false);
@@ -322,6 +325,42 @@ fp,
       a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch { toast.error(t('download_failed')); setDownloadProgress(null); }
+  };
+
+  /* Batch download: sequentially stream the selected FILE entries through the
+   * existing single-file download path (the device has no zip support, so the
+   * browser saves them one by one and may ask once for multi-download
+   * permission). Directories in the selection are skipped and reported. */
+  const handleBatchDownload = async () => {
+    if (selected.size === 0 || batchDl.active) return;
+    const names = Array.from(selected);
+    const fileEntries = names
+      .map(n => entries.find(e => e.name === n))
+      .filter((e): e is FileEntry => !!e && e.type === 'file');
+    if (fileEntries.length === 0) {
+      toast.error(t('batch_download_no_files'));
+      return;
+    }
+    setBatchDl({ active: true, cur: 0, total: fileEntries.length });
+    let ok = 0;
+    for (let i = 0; i < fileEntries.length; i++) {
+      setBatchDl({ active: true, cur: i + 1, total: fileEntries.length });
+      // eslint-disable-next-line no-await-in-loop
+      await handleDownload(fileEntries[i]);
+      ok++;
+      if (i < fileEntries.length - 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise(res => { setTimeout(res, 400); });
+      }
+    }
+    setBatchDl({ active: false, cur: fileEntries.length, total: fileEntries.length });
+    const skipped = names.length - fileEntries.length;
+    const msg = t('batch_download_done').replace('{ok}', String(ok)).replace('{total}', String(fileEntries.length));
+    if (skipped > 0) {
+      toast.warning(`${msg} (${t('batch_download_skip_dirs').replace('{n}', String(skipped))})`);
+    } else {
+      toast.success(msg);
+    }
   };
 
   // delete
@@ -574,6 +613,18 @@ file,
                 📄 {t('new_file')}
               </Button>
             </>
+          )}
+          {selected.size > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleBatchDownload}
+              disabled={batchDl.active}
+            >
+              ⬇ {batchDl.active
+                ? t('batch_download_progress').replace('{cur}', String(batchDl.cur)).replace('{total}', String(batchDl.total))
+                : `${t('batch_download')} (${selected.size})`}
+            </Button>
           )}
           {selected.size > 0 && !inCaptures && (
             <Button

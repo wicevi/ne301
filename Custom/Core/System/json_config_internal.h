@@ -100,12 +100,16 @@
  #define NVS_KEY_IMAGE_ISP_MODE          "img_isp_mode"
  #define NVS_KEY_IMAGE_SKIP_FRAMES       "img_skip"
  #define NVS_KEY_IMAGE_FAST_SKIP_FRAMES  "img_fast_skip"
+ #define NVS_KEY_IMAGE_EXPOSURE_CAP      "img_exp_cap"  /* motion-blur: AE exposure ceiling us (0=default) */
 /* QS AE fast convergence: last verified exposure/gain seed (AE77 magic) */
 #define NVS_KEY_AE_LAST_STATE           "ae_state"
  #define NVS_KEY_IMAGE_FAST_RESOLUTION   "img_fast_res"
  #define NVS_KEY_IMAGE_FAST_JPEG_QUALITY "img_fast_jq"
+ #define NVS_KEY_IMAGE_RUNTIME_SKIP_FRAMES "img_rt_skip"
+ #define NVS_KEY_IMAGE_RUNTIME_JPEG_QUALITY "img_rt_jq"
  #define NVS_KEY_CAPTURE_DISABLE_COMM    "capture_un_comm"
  #define NVS_KEY_CAPTURE_STORAGE_AI      "capture_stor_ai"
+ #define NVS_KEY_IMAGE_AI_CAPTURE        "img_ai_cap_en"
  #define NVS_KEY_CAPTURE_QUICK_MODE      "capture_qmode"
  #define NVS_KEY_LIGHT_CONNECTED         "light_conn"
  #define NVS_KEY_LIGHT_MODE              "light_mode"
@@ -137,6 +141,12 @@
  #define NVS_KEY_DN_ISP_EMA_NUM          "dn_ema_n"
  #define NVS_KEY_DN_ISP_EMA_DEN          "dn_ema_d"
  #define NVS_KEY_DN_IR_BRIGHTNESS        "dn_ir_brt"
+
+// USB device configuration key names
+#define NVS_KEY_USB_DEVICE_ENABLE       "usb_dev_en"
+#define NVS_KEY_USB_FOLLOW_AP           "usb_follow"
+#define NVS_KEY_USB_IP                  "usb_ip"
+#define NVS_KEY_USB_NETMASK             "usb_mask"
 
 // ISP configuration key names
 #define NVS_KEY_ISP_VALID               "isp_valid"
@@ -254,6 +264,14 @@
 #define NVS_KEY_POE_VALIDATE_GATEWAY    "poe_val_gw"
 #define NVS_KEY_POE_DETECT_CONFLICT     "poe_det_conf"
 
+// NTP time-sync configuration key names
+#define NVS_KEY_NTP_ENABLE              "ntp_en"
+#define NVS_KEY_NTP_SERVER_COUNT        "ntp_cnt"
+#define NVS_KEY_NTP_SERVER_0            "ntp_s0"
+#define NVS_KEY_NTP_SERVER_1            "ntp_s1"
+#define NVS_KEY_NTP_SERVER_2            "ntp_s2"
+#define NVS_KEY_NTP_SERVER_3            "ntp_s3"
+
 // MQTT service configuration key names
 // Basic connection
 #define NVS_KEY_MQTT_PROTOCOL_VER       "mqtt_proto"
@@ -349,6 +367,7 @@
 #define NVS_KEY_PIR_ENABLE          "pir_enable"
 #define NVS_KEY_PIR_PIN             "pir_pin"
 #define NVS_KEY_PIR_TRIGGER_TYPE    "pir_type"
+#define NVS_KEY_PIR_DEVICE_TYPE     "pir_dev_type"
 #define NVS_KEY_PIR_SENSITIVITY     "pir_sens"
 #define NVS_KEY_PIR_IGNORE_TIME     "pir_ignore"
 #define NVS_KEY_PIR_PULSE_COUNT     "pir_pulse"
@@ -412,6 +431,15 @@
 #define NVS_KEY_CAPUP_MAX_PENDING   "cu_max_pd"
 #define NVS_KEY_CAPUP_FLASH_MAX     "cu_fl_max"
 #define NVS_KEY_CAPUP_COMM_TYPE     "cu_comm"
+#define NVS_KEY_CAPUP_AI_FLT_EN     "cu_ai_flt_en"
+#define NVS_KEY_CAPUP_AI_FLT_TH     "cu_ai_flt_th"
+#define NVS_KEY_CAPUP_AI_FLT_LB     "cu_ai_flt_lb"
+
+// Live video stream parameter key names
+#define NVS_KEY_VSTREAM_VERSION     "vs_ver"
+#define NVS_KEY_VSTREAM_RESOLUTION  "vs_res"
+#define NVS_KEY_VSTREAM_BITRATE     "vs_br"
+#define NVS_KEY_VSTREAM_GOP_SEC     "vs_gop"
 
 
  /* ==================== Internal Function Prototypes ==================== */
@@ -425,10 +453,13 @@ aicam_result_t json_config_save_device_info_config_to_nvs(const device_info_conf
 aicam_result_t json_config_save_device_service_image_config_to_nvs(const image_config_t *config);
 aicam_result_t json_config_save_device_service_light_config_to_nvs(const light_config_t *config);
 aicam_result_t json_config_save_day_night_config_to_nvs(const day_night_config_t *config);
+aicam_result_t json_config_save_usb_config_to_nvs(const usb_config_t *config);
 aicam_result_t json_config_save_isp_config_to_nvs(const isp_config_t *config);
 aicam_result_t json_config_save_network_service_config_to_nvs(const network_service_config_t *config);
 aicam_result_t json_config_save_poe_config_to_nvs(const poe_config_persist_t *config);
 aicam_result_t json_config_load_poe_config_from_nvs(poe_config_persist_t *config);
+aicam_result_t json_config_save_ntp_config_to_nvs(const ntp_config_persist_t *config);
+aicam_result_t json_config_load_ntp_config_from_nvs(ntp_config_persist_t *config);
 aicam_result_t json_config_save_mqtt_service_config_to_nvs(const mqtt_service_config_t *config);
 // RTMP config now part of video_stream_mode, use json_config_get/set_video_stream_mode()
 aicam_result_t json_config_save_auth_mgr_config_to_nvs(const auth_mgr_config_t *config);
@@ -436,6 +467,8 @@ aicam_result_t json_config_save_webhook_config_to_nvs(const webhook_config_t *co
 aicam_result_t json_config_load_webhook_from_nvs(webhook_config_t *config);
 aicam_result_t json_config_save_capture_upload_to_nvs(const capture_upload_config_t *config);
 aicam_result_t json_config_load_capture_upload_from_nvs(capture_upload_config_t *config);
+aicam_result_t json_config_save_video_stream_to_nvs(const video_stream_param_t *config);
+aicam_result_t json_config_load_video_stream_from_nvs(video_stream_param_t *config);
  aicam_result_t json_config_save_to_nvs(const aicam_global_config_t *config);
  aicam_result_t json_config_load_from_nvs(aicam_global_config_t *config);
  

@@ -150,6 +150,12 @@ static aicam_result_t upload_config_get(http_handler_context_t *ctx)
     cJSON_AddStringToObject(resp, "upload_network",
         cfg.upload_comm_type == 0 /*COMM_TYPE_NONE*/ ? "default"
                                                      : communication_type_to_string((communication_type_t)cfg.upload_comm_type));
+    /* AI inference filter: independent from the debug-page confidence
+     * threshold - gates whether a capture is stored/uploaded at all. */
+    cJSON_AddBoolToObject  (resp, "ai_filter_enable", cfg.ai_filter_enable);
+    cJSON_AddNumberToObject(resp, "ai_filter_threshold", cfg.ai_filter_threshold);
+    /* Comma-separated class names; empty string = all labels allowed. */
+    cJSON_AddStringToObject(resp, "ai_filter_labels", cfg.ai_filter_labels);
 
     char *json = cJSON_Print(resp);
     cJSON_Delete(resp);
@@ -225,6 +231,32 @@ static aicam_result_t upload_config_set(http_handler_context_t *ctx)
              * real type (not NONE) to avoid silently falling back to default. */
             if (t != COMM_TYPE_NONE) cfg.upload_comm_type = (uint32_t)t;
         }
+    }
+
+    if ((item = cJSON_GetObjectItem(req, "ai_filter_enable")) && cJSON_IsBool(item))
+        cfg.ai_filter_enable = cJSON_IsTrue(item) ? AICAM_TRUE : AICAM_FALSE;
+
+    if ((item = cJSON_GetObjectItem(req, "ai_filter_threshold")) && cJSON_IsNumber(item)) {
+        int v = item->valueint;
+        if (v < (int)CAPUP_AI_FILTER_TH_MIN || v > (int)CAPUP_AI_FILTER_TH_MAX) {
+            cJSON_Delete(req);
+            return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                "ai_filter_threshold must be between 1 and 100");
+        }
+        cfg.ai_filter_threshold = (uint8_t)v;
+    }
+
+    if ((item = cJSON_GetObjectItem(req, "ai_filter_labels")) && cJSON_IsString(item)) {
+        /* Comma-separated class names; "" = all. Reject overlong input
+         * outright so the user notices instead of a silent truncation. */
+        if (strlen(item->valuestring) >= CAPUP_AI_FILTER_LABELS_MAX) {
+            cJSON_Delete(req);
+            return api_response_error(ctx, API_ERROR_INVALID_REQUEST,
+                "ai_filter_labels too long (max 255 chars)");
+        }
+        memset(cfg.ai_filter_labels, 0, sizeof(cfg.ai_filter_labels));
+        strncpy(cfg.ai_filter_labels, item->valuestring,
+                sizeof(cfg.ai_filter_labels) - 1);
     }
 
     cJSON_Delete(req);
@@ -340,6 +372,8 @@ static aicam_result_t records_get(http_handler_context_t *ctx)
         cJSON_AddStringToObject(r, "state", state_str(recs[i].state));
         cJSON_AddNumberToObject(r, "timestamp",   (double)recs[i].timestamp);
         cJSON_AddNumberToObject(r, "size",        recs[i].size);
+        cJSON_AddNumberToObject(r, "width",       recs[i].width);
+        cJSON_AddNumberToObject(r, "height",      recs[i].height);
         cJSON_AddNumberToObject(r, "retry_count", recs[i].retry_count);
         cJSON_AddStringToObject(r, "trigger",     recs[i].trigger);
         cJSON_AddStringToObject(r, "last_error",  recs[i].last_error);

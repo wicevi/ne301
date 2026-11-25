@@ -69,7 +69,7 @@ static void draw_dma2d_error_cb(DMA2D_HandleTypeDef *hdma2d)
 }
 
 static int draw_copy_hw(uint8_t *p_dst, int dst_width, int dst_height, uint8_t *p_src, int src_width,
-                              int src_height, int x_offset, int y_offset, uint32_t src_colormode)
+                              int src_height, int x_offset, int y_offset, uint32_t src_colormode, uint32_t out_colormode)
 {
     DMA2D_HandleTypeDef hdma2d = { 0 };
     uint32_t dst_addr;
@@ -77,7 +77,7 @@ static int draw_copy_hw(uint8_t *p_dst, int dst_width, int dst_height, uint8_t *
 
     hdma2d.Instance            = DMA2D;
     hdma2d.Init.Mode           = DMA2D_M2M_BLEND;
-    hdma2d.Init.ColorMode      = g_draw.colormode_param.out_colormode;
+    hdma2d.Init.ColorMode      = out_colormode;
     hdma2d.Init.OutputOffset   = dst_width - src_width;
     hdma2d.Init.AlphaInverted  = DMA2D_REGULAR_ALPHA;
     hdma2d.Init.RedBlueSwap    = DMA2D_RB_REGULAR;
@@ -94,7 +94,10 @@ static int draw_copy_hw(uint8_t *p_dst, int dst_width, int dst_height, uint8_t *
 
     /* background layer come from dest buffer */
     hdma2d.LayerCfg[0].InputAlpha     = 0xFF;
-    hdma2d.LayerCfg[0].InputColorMode = g_draw.colormode_param.in_colormode;
+    /* Background layer reads the destination buffer, so its format is the
+     * OUTPUT format (matches draw_blend_colorrect_hw); the foreground src
+     * format comes in as src_colormode. */
+    hdma2d.LayerCfg[0].InputColorMode = out_colormode;
     hdma2d.LayerCfg[0].InputOffset    = dst_width - src_width;
     hdma2d.LayerCfg[0].AlphaInverted  = DMA2D_REGULAR_ALPHA;
     hdma2d.LayerCfg[0].RedBlueSwap    = DMA2D_RB_REGULAR;
@@ -123,7 +126,7 @@ static int draw_copy_hw(uint8_t *p_dst, int dst_width, int dst_height, uint8_t *
     hdma2d.XferErrorCallback = draw_dma2d_error_cb;
 
     uint8_t bytes_per_pixel;
-    switch (g_draw.colormode_param.out_colormode) {
+    switch (out_colormode) {
         case DMA2D_OUTPUT_ARGB8888:
             bytes_per_pixel = 4;
             break;
@@ -524,25 +527,25 @@ static int draw_font_setup_with_memory(sFONT *p_font_in, DRAW_Font_t *p_font, vo
 }
 
 static int draw_draw_char_hw(DRAW_Font_t *p_font, uint8_t *p_dst, int dst_width, int dst_height, int x_pos,
-                                   int y_pos, uint8_t *data)
+                                   int y_pos, uint8_t *data, uint32_t out_colormode)
 {
-    return draw_copy_hw(p_dst, dst_width, dst_height, data, p_font->width, p_font->height, x_pos, y_pos, DMA2D_INPUT_ARGB8888);
+    return draw_copy_hw(p_dst, dst_width, dst_height, data, p_font->width, p_font->height, x_pos, y_pos, DMA2D_INPUT_ARGB8888, out_colormode);
 }
 
 static int draw_display_char_hw(DRAW_Font_t *p_font, uint8_t *p_dst, int dst_width, int dst_height, int x_pos,
-                                      int y_pos, char c)
+                                      int y_pos, char c, uint32_t out_colormode)
 {
     int char_size = p_font->height * p_font->width * 4;
 
-    return draw_draw_char_hw(p_font, p_dst, dst_width, dst_height, x_pos, y_pos, &p_font->data[(c - ' ') * char_size]);
+    return draw_draw_char_hw(p_font, p_dst, dst_width, dst_height, x_pos, y_pos, &p_font->data[(c - ' ') * char_size], out_colormode);
 }
 
 static int draw_puts_hw(DRAW_Font_t *p_font, uint8_t *p_dst, int dst_width, int dst_height, int x_pos, int y_pos,
-                              char *line)
+                              char *line, uint32_t out_colormode)
 {
     int ret;
     while (*line != '\0') {
-        ret = draw_display_char_hw(p_font, p_dst, dst_width, dst_height, x_pos, y_pos, *line);
+        ret = draw_display_char_hw(p_font, p_dst, dst_width, dst_height, x_pos, y_pos, *line, out_colormode);
         if(ret != HAL_OK)
             return ret;
         x_pos += p_font->width;
@@ -579,9 +582,9 @@ static int DRAW_FillHw(uint8_t *p_dst, int dst_width, int dst_height, int x_pos,
 }
 
 static int DRAW_PrintfHw(DRAW_Font_t *p_font, uint8_t *p_dst, int dst_width, int dst_height, int x_pos, int y_pos,
-                       char * str)
+                       char * str, uint32_t out_colormode)
 {
-    return draw_puts_hw(p_font, p_dst, dst_width, dst_height, x_pos, y_pos, str);
+    return draw_puts_hw(p_font, p_dst, dst_width, dst_height, x_pos, y_pos, str, out_colormode);
 }
 
 static int DMA2D_CopyClip(uint8_t *p_dst, int dst_width, int dst_height,
@@ -595,7 +598,7 @@ static int DMA2D_CopyClip(uint8_t *p_dst, int dst_width, int dst_height,
 
     return draw_copy_hw(p_dst, dst_width, dst_height,
                       p_src_clip, clip_width, clip_height,
-                      dst_x, dst_y, src_colormode);
+                      dst_x, dst_y, src_colormode, g_draw.colormode_param.out_colormode);
 }
 
 static inline int abs_sw(int x) {
@@ -772,7 +775,8 @@ static int draw_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsigne
                 ret = AICAM_ERROR_INVALID_PARAM;
                 break;
             }
-            DRAW_FillHw(p->p_dst, p->dst_width, p->dst_height, p->x_pos, p->y_pos, p->width, p->height, p->color, draw->colormode_param.out_colormode);
+            DRAW_FillHw(p->p_dst, p->dst_width, p->dst_height, p->x_pos, p->y_pos, p->width, p->height, p->color,
+                        p->out_colormode != DRAW_COLOR_MODE_DEFAULT ? p->out_colormode : draw->colormode_param.out_colormode);
             ret = AICAM_OK;
             break;
         }
@@ -792,7 +796,8 @@ static int draw_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsigne
                 break;
             }
 
-            DRAW_RectHw(p->p_dst, p->dst_width, p->dst_height, p->x_pos, p->y_pos, p->width, p->height, p->line_width, p->color, draw->colormode_param.out_colormode);
+            DRAW_RectHw(p->p_dst, p->dst_width, p->dst_height, p->x_pos, p->y_pos, p->width, p->height, p->line_width, p->color,
+                        p->out_colormode != DRAW_COLOR_MODE_DEFAULT ? p->out_colormode : draw->colormode_param.out_colormode);
             ret = AICAM_OK;
             break;
         }
@@ -809,7 +814,9 @@ static int draw_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsigne
                 ret = AICAM_ERROR_INVALID_PARAM;
                 break;
             }
-            draw_copy_hw(p->p_dst, p->dst_width, p->dst_height, p->p_src, p->src_width, p->src_height, p->x_offset, p->y_offset, draw->colormode_param.in_colormode);
+            draw_copy_hw(p->p_dst, p->dst_width, p->dst_height, p->p_src, p->src_width, p->src_height, p->x_offset, p->y_offset,
+                         p->in_colormode != DRAW_COLOR_MODE_DEFAULT ? p->in_colormode : draw->colormode_param.in_colormode,
+                         p->out_colormode != DRAW_COLOR_MODE_DEFAULT ? p->out_colormode : draw->colormode_param.out_colormode);
             ret = AICAM_OK;
             break;
         }
@@ -824,7 +831,8 @@ static int draw_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsigne
                 ret = AICAM_ERROR_INVALID_PARAM;
                 break;
             }
-            DRAW_PrintfHw(p->p_font, p->p_dst, p->dst_width, p->dst_height, p->x_pos, p->y_pos, p->str);
+            DRAW_PrintfHw(p->p_font, p->p_dst, p->dst_width, p->dst_height, p->x_pos, p->y_pos, p->str,
+                          p->out_colormode != DRAW_COLOR_MODE_DEFAULT ? p->out_colormode : draw->colormode_param.out_colormode);
             ret = AICAM_OK;
             break;
         }
@@ -876,7 +884,8 @@ static int draw_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsigne
                 ret = AICAM_ERROR_INVALID_PARAM;
                 break;
             }
-            draw_dot_hw(p->p_dst, p->dst_width, p->dst_height, p->x_pos, p->y_pos, p->dot_width, p->color, draw->colormode_param.out_colormode);
+            draw_dot_hw(p->p_dst, p->dst_width, p->dst_height, p->x_pos, p->y_pos, p->dot_width, p->color,
+                        p->out_colormode != DRAW_COLOR_MODE_DEFAULT ? p->out_colormode : draw->colormode_param.out_colormode);
             ret = AICAM_OK;
             break;
         }
@@ -895,7 +904,8 @@ static int draw_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsigne
                 ret = AICAM_ERROR_INVALID_PARAM;
                 break;
             }
-            draw_line_hw(p->p_dst, p->dst_width, p->dst_height, p->x1, p->y1, p->x2, p->y2, p->line_width, p->color, draw->colormode_param.out_colormode);
+            draw_line_hw(p->p_dst, p->dst_width, p->dst_height, p->x1, p->y1, p->x2, p->y2, p->line_width, p->color,
+                         p->out_colormode != DRAW_COLOR_MODE_DEFAULT ? p->out_colormode : draw->colormode_param.out_colormode);
             ret = AICAM_OK;
             break;
         }
@@ -912,7 +922,8 @@ static int draw_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsigne
                 break;
             }
             ret = draw_blend_colorrect_hw(p->p_dst, p->dst_width, p->dst_height, p->x_pos, p->y_pos,
-                                        p->width, p->height, p->color, p->alpha, draw->colormode_param.out_colormode);
+                                        p->width, p->height, p->color, p->alpha,
+                                        p->out_colormode != DRAW_COLOR_MODE_DEFAULT ? p->out_colormode : draw->colormode_param.out_colormode);
             ret = (ret == HAL_OK) ? AICAM_OK : AICAM_ERROR_UNKNOWN;
             break;
         }

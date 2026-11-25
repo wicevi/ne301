@@ -32,8 +32,12 @@
 #define PWR_ALL_SWITCH_BIT              (PWR_3V3_SWITCH_BIT | PWR_WIFI_SWITCH_BIT | PWR_AON_SWITCH_BIT | PWR_N6_SWITCH_BIT | PWR_EXT_SWITCH_BIT) // all power switch bits
 #define PWR_DEFAULT_SWITCH_BITS         (PWR_3V3_SWITCH_BIT | PWR_AON_SWITCH_BIT | PWR_N6_SWITCH_BIT) // default power switch bits
 
-#define PIR_CONFIG_RETRY_TIMES          5               // retry times
-#define PIR_CONFIG_RETRY_DELAY_MS       200             // retry delay 200ms
+/* PIR config retry budget. An absent PIR sensor is a NORMAL bench state:
+ * the U0 still answers each bridge round-trip quickly, so a short retry
+ * budget suffices; the config is persisted by the caller regardless of the
+ * chip outcome (retried at sleep/boot). */
+#define PIR_CONFIG_RETRY_TIMES          3               // retry times
+#define PIR_CONFIG_RETRY_DELAY_MS       100             // retry delay 100ms
 
 /// @brief u0 module register
 void u0_module_register(void);

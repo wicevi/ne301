@@ -1646,6 +1646,14 @@ sl_status_t sl_si91x_get_firmware_version(sl_si91x_firmware_version_t *version)
   if ((status != SL_STATUS_OK) && (buffer != NULL)) {
     sli_buffer_manager_free_buffer(buffer);
   }
+  // NE301: a timeout on this trivial query means the NWP stopped answering.
+  // The bus-level C1/C2 error path never fires for silently dead responses,
+  // so escalate to the host recovery hook (netif deinit + re-init) instead of
+  // just returning the error after the wait. Suppressed during remote wakeup
+  // by the callback's own guard.
+  if (status == SL_STATUS_TIMEOUT) {
+    sli_firmware_error_callback((int)status);
+  }
   VERIFY_STATUS_AND_RETURN(status);
 
   const sl_wifi_system_packet_t *packet =

@@ -4037,7 +4037,8 @@ aicam_result_t mqtt_service_execute_control_cmd(const mqtt_control_cmd_t *cmd)
                 cmd->params.capture.enable_ai,
                 cmd->params.capture.chunk_size,
                 cmd->params.capture.store_to_sd,
-                AICAM_CAPTURE_TRIGGER_REMOTE
+                AICAM_CAPTURE_TRIGGER_REMOTE,
+                NULL
             );
             
             if (result != AICAM_OK) {

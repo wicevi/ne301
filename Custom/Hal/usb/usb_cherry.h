@@ -1,10 +1,11 @@
 /**
  * @file    usb_cherry.h
- * @brief   CherryUSB host bring-up seam for NE301 (USB2_OTG_HS).
+ * @brief   CherryUSB bring-up seam for NE301: host on USB2_OTG_HS, device
+ *          on USB1_OTG_HS.
  *
- * Replaces the former usb_host_ecm wrapper as the single app-side entry to
- * the USB host stack. Class-level consumers (CDC-ECM / RNDIS netif, UVC,
- * ...) are re-added on top of this once the port is verified in the field.
+ * Replaces the former usb_host_ecm/usbx wrappers as the single app-side
+ * entry to the USB stacks. Class-level consumers (RNDIS netif, UVC, ...)
+ * sit on top of this.
  */
 #ifndef USB_CHERRY_H
 #define USB_CHERRY_H
@@ -41,11 +42,55 @@ int usb_cherry_host_deinit(void);
 /** @brief Non-zero while the host stack is running. */
 int usb_cherry_host_is_inited(void);
 
-/* Composite device (RNDIS NIC + CDC-ACM console) on USB1_OTG_HS (J21
- * Type-C) — Custom/Hal/usb/usb_device_composite.c */
+/* USB device (CDC-ACM console [+ RNDIS NIC]) on USB1_OTG_HS (J21 Type-C) —
+ * Custom/Hal/usb/usb_device_composite.c */
+
+/**
+ * @brief Start the USB device with a selectable function set.
+ * @param with_rndis 1: RNDIS NIC + CDC console composite; 0: CDC console
+ *                   only (no lwip netif / DHCP server / tx thread)
+ * @return 0 on success
+ */
+int usb_cherry_device_init_ex(int with_rndis);
+
+/** @brief Full composite (RNDIS + CDC console); CLI / "ud" netif entry. */
 int usb_cherry_device_init(void);
+
+/**
+ * @brief Switch the RNDIS function on/off at runtime.
+ * Re-enumerates the bus when the function set actually changes.
+ * @return 0 on success
+ */
+int usb_cherry_device_set_rndis(int enable);
+
+/** @brief Validate a dotted-quad ip/netmask pair for the custom USB subnet
+ *         (parses, non-zero mask, ip has usable host bits). */
+int usb_cherry_device_ip_config_valid(const char *ip, const char *netmask);
+
+/**
+ * @brief Re-resolve the RNDIS netif addressing from usb_config and bounce
+ *        the USB device so the host re-enumerates and re-leases. No-op
+ *        when the device is not running (next boot picks it up).
+ */
+int usb_cherry_device_apply_ip_config(void);
+
+/** @brief Non-zero while the RNDIS function is in the active config. */
+int usb_cherry_device_rndis_is_active(void);
+
+/**
+ * @brief Boot-time start: CDC console on every boot, RNDIS added only on
+ * the configuration-mode path (sleep fast-boot wakes stay CDC-only).
+ * Offloads the init to a low-priority one-shot thread (non-blocking).
+ * @return 0 if the boot task was scheduled
+ */
+int usb_cherry_device_boot_start(void);
+
 int usb_cherry_device_deinit(void);
 int usb_cherry_device_is_inited(void);
+
+/** @brief Non-zero when ip_str equals the fixed IP leased to the USB PC
+ *         (request arrived over the RNDIS link; shared-subnet plan). */
+int usb_cherry_device_request_from_client(const char *ip_str);
 /** One-line runtime diagnostics (rx/tx counters, netif ip) for the CLI. */
 void usb_cherry_device_diag(char *buf, int buflen);
 

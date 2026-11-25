@@ -90,6 +90,30 @@ aicam_result_t image_crop_roi(
 );
 
 /**
+ * @brief NN bridge: convert a camera frame (pipe2 output) to packed RGB888
+ *        for RGB888-input models.
+ *
+ *        DMA2D does the bulk conversion (~5 ms at 320x320); a short CPU pass
+ *        restores the historical B,G,R byte order (the model was fed pipe2
+ *        RGB888 + swap before pipe2 moved away from that format). dst must
+ *        hold w*h*3 bytes and is CPU-coherent (cache invalidated) on return.
+ *
+ * @param src_image Source buffer (w*h*src_bpp bytes)
+ * @param width Frame width in pixels
+ * @param height Frame height in pixels
+ * @param src_dma2d_format DMA2D input format (DMA2D_INPUT_ARGB8888 or
+ *                         DMA2D_INPUT_RGB565)
+ * @param dst_buffer Pre-allocated packed-RGB888 output (w*h*3 bytes)
+ * @param swap_rb 1 = emit B,G,R bytes (historical model order), 0 = R,G,B
+ * @return aicam_result_t AICAM_OK on success, error code on failure
+ */
+aicam_result_t image_bridge_to_rgb888(const uint8_t *src_image,
+                                      uint32_t width, uint32_t height,
+                                      uint32_t src_dma2d_format,
+                                      uint8_t *dst_buffer,
+                                      uint8_t swap_rb);
+
+/**
  * @brief Resize image using CPU bilinear interpolation
  * 
  * @param src_image Source image buffer

@@ -151,6 +151,8 @@ typedef struct {
     record_state_t state;
     uint64_t timestamp;             /* capture wall-clock */
     uint32_t size;                  /* primary image bytes */
+    uint32_t width;                 /* primary image width (0 = unknown) */
+    uint32_t height;                /* primary image height (0 = unknown) */
     uint8_t  retry_count;
     char     trigger[16];           /* "pir" "button" ... */
     char     last_error[64];        /* may be empty */

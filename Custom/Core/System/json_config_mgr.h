@@ -59,17 +59,27 @@ typedef struct {
      aicam_trigger_type_t input_trigger_type;
      aicam_trigger_type_t output_trigger_type;
  } io_trigger_config_t;
- 
+
+/** What kind of device drives the PIR wake input. */
+typedef enum {
+    AICAM_PIR_DEVICE_PIR = 0,  /* Digital PIR conditioning IC: chip-level config
+                                  (sensitivity/anti-jamming) applies, any INT
+                                  pulse means motion */
+    AICAM_PIR_DEVICE_IO  = 1,  /* Plain IO signal: no chip config, the wake edge
+                                  comes from trigger_type only */
+} aicam_pir_device_type_t;
+
  typedef struct {
      aicam_bool_t enable;
      uint32_t pin_number;
      aicam_trigger_type_t trigger_type;
-     // PIR sensor configuration parameters
+     aicam_pir_device_type_t device_type;  // PIR chip vs plain IO signal on the wake input
+     // PIR sensor configuration parameters (device_type == PIR only)
      uint8_t sensitivity_level;  // Sensitivity level (recommended >30, smaller value means more sensitive)
      uint8_t ignore_time_s;      // Ignore time after interrupt (0-15, actual time = 0.5 + 0.5 * value seconds)
      uint8_t pulse_count;        // Pulse count (1-4, actual count = value + 1)
      uint8_t window_time_s;      // Window time (0-3, actual time = 2 + 2 * value seconds)
-     aicam_bool_t disable_in_preview;  // Disable PIR capture during preview (default: true)
+     aicam_bool_t disable_in_preview;  // Disable PIR capture during preview (default: false)
 } pir_trigger_config_t;
  
  typedef struct {
@@ -233,6 +243,20 @@ typedef struct {
     char last_error_msg[64];                // Last error message
 } poe_config_persist_t;
 
+/* NTP server slot count (keep in sync with SNTP_MAX_SERVERS in lwipopts.h) */
+#define NTP_SERVER_MAX_COUNT        4
+/* Max NTP server name length incl. NUL (must also fit an IPv4/IPv6 literal) */
+#define NTP_SERVER_NAME_MAX_LEN     64
+
+/**
+ * @brief NTP (SNTP) time-sync configuration for persistent storage
+ */
+typedef struct {
+    aicam_bool_t enable;                    // NTP sync switch (AICAM_TRUE = sync enabled)
+    uint8_t server_count;                   // Valid server entries (1..NTP_SERVER_MAX_COUNT)
+    char servers[NTP_SERVER_MAX_COUNT][NTP_SERVER_NAME_MAX_LEN]; // Server names/IPs, empty slot = ""
+} ntp_config_persist_t;
+
 /**
  * @brief Network service configuration structure
  */
@@ -280,6 +304,9 @@ typedef struct {
     uint8_t halow_ps_mode;
     /** Auto-learned HaLow S1G join channel for selective scan (0: off). Not user-facing. */
     uint8_t halow_join_channel;
+
+    // NTP time-sync settings
+    ntp_config_persist_t ntp;               // NTP configuration
 } network_service_config_t;
  
  // Power mode configuration structure
@@ -456,8 +483,14 @@ typedef struct {
     uint32_t fast_capture_skip_frames;       // frames to skip for fast capture (number of skipped frames for snapshot capture)
     uint32_t fast_capture_resolution;       // 0: 1280x720, 1: 1920x1080, 2: 2688x1520
     uint32_t fast_capture_jpeg_quality;     // fast capture JPEG encoding quality (0-100)
+    uint32_t runtime_capture_skip_frames;  // frames to drop before a runtime capture (0-30)
+    uint32_t runtime_capture_jpeg_quality; // runtime capture JPEG quality (1-100)
     aicam_bool_t capture_disable_comm;      // after capture: local storage only (no comm upload)
     aicam_bool_t capture_storage_ai;        // capture extra save draw AI result picture to storage switch
+    aicam_bool_t ai_capture_enable;         // AI master switch for captures: off = capture without
+                                             // AI inference (no annotated image, no result filter);
+                                             // also gates the sleep-wake quick-snapshot path
+    uint32_t exposure_cap_us;               // motion-blur suppression: AE exposure ceiling in us (0 = sensor default; 10000 = anti-blur). Applied at camera_init and on config PUT
 } image_config_t;
 
 /**
@@ -640,6 +673,27 @@ typedef struct {
     day_night_config_t day_night_config;
 } device_service_config_t;
 
+/* ==================== USB Configuration ==================== */
+
+#define USB_IP_STR_LEN 16    /* dotted quad + NUL */
+
+typedef struct {
+    aicam_bool_t device_enable;   /* Master switch for the USB device (CDC
+                                   * console + RNDIS NIC). OFF (default is
+                                   * ON): nothing on the USB device side is
+                                   * initialized at boot — no composite
+                                   * device, no DWC2 IRQ, saves power. The
+                                   * host sees no enumeration at all. */
+    /* RNDIS ("ud") netif addressing. follow_ap = TRUE (default): share the
+     * hotspot address 192.168.10.10/24 — one web address for both links,
+     * the USB PC leases .251 (outside the AP DHCP pool). FALSE: use the
+     * static ip/netmask below; the USB PC then leases <ip host+1> with the
+     * device as router/DNS. */
+    aicam_bool_t follow_ap;
+    char ip[USB_IP_STR_LEN];        /* device IP, e.g. "192.168.20.1" */
+    char netmask[USB_IP_STR_LEN];   /* e.g. "255.255.255.0" */
+} usb_config_t;
+
 typedef struct {
     uint32_t session_timeout_ms;                       // Session timeout in milliseconds
     aicam_bool_t enable_session_timeout;               // Enable session timeout
@@ -728,6 +782,25 @@ typedef struct {
      * Values = communication_type_t (communication_service.h).
      * COMM_TYPE_NONE (0) = default (use system comm-pref logic, init all). */
     uint32_t          upload_comm_type;
+
+/* AI filter allowed-labels buffer: comma-separated class names, "" = all.
+ * Sized for a handful of typical COCO-length names. */
+#define CAPUP_AI_FILTER_LABELS_MAX  (256u)
+
+    /* AI inference filter: gate the whole capture (storage AND upload) on the
+     * model having a result. INDEPENDENT of ai_debug.confidence_threshold
+     * (that one filters detections inside post-processing; this one decides
+     * whether the capture is kept at all). */
+    aicam_bool_t      ai_filter_enable;        /* default FALSE */
+    uint8_t           ai_filter_threshold;     /* 1..100, default 50; capture is
+                                                  kept only when the best
+                                                  detection confidence*100 >=
+                                                  this value */
+    /* Allowed result labels, comma-separated class names ("person,car").
+     * Empty (default) = all labels pass. Only consulted while
+     * ai_filter_enable is set; matched case-sensitively against detection
+     * class_name strings (see system_service capture gate). */
+    char              ai_filter_labels[CAPUP_AI_FILTER_LABELS_MAX];
 } capture_upload_config_t;
 
 /* Upper bound of keep_sent_hours. A value >= this means "keep forever": no
@@ -747,6 +820,44 @@ typedef struct {
 #define CAPUP_FLASH_RECORDS_MAX     (256u)
 #define CAPUP_FLASH_RECORDS_DEFAULT (32u)
 
+/* AI inference filter threshold range/default (percent). */
+#define CAPUP_AI_FILTER_TH_MIN      (1u)
+#define CAPUP_AI_FILTER_TH_MAX      (100u)
+#define CAPUP_AI_FILTER_TH_DEFAULT  (50u)
+
+
+/* ==================== Video Stream Parameters ==================== */
+
+/** Live video stream (preview/RTSP/RTMP) resolution preset. */
+typedef enum {
+    STREAM_RES_PIPE2 = 0, /* Encode frames straight from the AI pipe (pipe2):
+                           * resolution follows the active model input; pipe1
+                           * stays free for still capture. */
+    STREAM_RES_720P  = 1, /* 1280x720 via pipe1 */
+    STREAM_RES_1080P = 2, /* 1920x1080 via pipe1 */
+} stream_resolution_t;
+
+#define VSTREAM_CFG_VERSION        (1u)
+
+/* H.264 VBR target bitrate, kbps. 256k keeps PIPE2/low-res usable, 8192k is a
+ * conservative ceiling for 1080p so an I-frame can't chronically overflow the
+ * 292KB VENC output buffer (QP escape ladder is the backstop, not the plan). */
+#define VSTREAM_BITRATE_MIN_KBPS     (256u)
+#define VSTREAM_BITRATE_MAX_KBPS     (8192u)
+#define VSTREAM_BITRATE_DEFAULT_KBPS (2000u)
+
+/* Keyframe (IDR) interval in seconds; legal values 1/2/4. */
+#define VSTREAM_GOP_SEC_MIN          (1u)
+#define VSTREAM_GOP_SEC_MAX          (4u)
+#define VSTREAM_GOP_SEC_DEFAULT      (1u)
+
+typedef struct {
+    uint32_t version;         /* schema version */
+    uint8_t  resolution;      /* stream_resolution_t */
+    uint32_t bitrate_kbps;    /* H.264 VBR target bitrate */
+    uint8_t  gop_sec;         /* keyframe interval, seconds (1/2/4) */
+} video_stream_param_t;
+
 // RTMP config is now part of video_stream_mode_config_t
 // These macros are kept for compatibility
 #define RTMP_CONFIG_MAX_URL_LENGTH         256
@@ -765,11 +876,13 @@ typedef struct {
     power_mode_config_t power_mode_config; // Power mode configuration
     device_info_config_t device_info;
     device_service_config_t device_service;
+    usb_config_t usb_config;               // USB device configuration
     network_service_config_t network_service;
     mqtt_service_config_t mqtt_service;
     auth_mgr_config_t auth_mgr;
     webhook_config_t webhook_config;
     capture_upload_config_t capture_upload; /* Capture/upload mode, storage, retry, schedule */
+    video_stream_param_t video_stream;      /* Live stream resolution/bitrate/gop */
     // RTMP config is now in work_mode_config.video_stream_mode
  } aicam_global_config_t;
  
@@ -1148,6 +1261,19 @@ aicam_result_t json_config_get_day_night_config(day_night_config_t *day_night_co
  * @return aicam_result_t Operation result
  */
 aicam_result_t json_config_set_day_night_config(const day_night_config_t *day_night_config);
+/**
+ * @brief Get USB device configuration
+ * @param usb_config USB configuration structure pointer
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_get_usb_config(usb_config_t *usb_config);
+
+/**
+ * @brief Set USB device configuration (persisted to NVS immediately)
+ * @param usb_config USB configuration structure pointer
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_set_usb_config(const usb_config_t *usb_config);
 
 /**
  * @brief Get ISP configuration
@@ -1200,6 +1326,23 @@ aicam_result_t json_config_set_poe_config(const poe_config_persist_t *poe_config
  * @return poe_ip_mode_t IP mode
  */
 poe_ip_mode_t json_config_get_poe_ip_mode(void);
+
+/* ==================== NTP Configuration API ==================== */
+
+/**
+ * @brief Get NTP time-sync configuration
+ * @param ntp_config NTP configuration structure pointer
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_get_ntp_config(ntp_config_persist_t *ntp_config);
+
+/**
+ * @brief Set NTP time-sync configuration (persists to NVS; the caller applies
+ *        it at runtime via nm_sntp_apply_config())
+ * @param ntp_config NTP configuration structure pointer
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t json_config_set_ntp_config(const ntp_config_persist_t *ntp_config);
 
 /**
  * @brief Set PoE IP mode
@@ -1269,6 +1412,28 @@ aicam_result_t json_config_set_capture_upload_config(const capture_upload_config
  * @brief Fill capture-upload struct with safe defaults
  */
 void json_config_capture_upload_defaults(capture_upload_config_t *config);
+
+/**
+ * @brief Get live video stream parameters (resolution/bitrate/gop)
+ */
+aicam_result_t json_config_get_video_stream_param(video_stream_param_t *config);
+
+/**
+ * @brief Set live video stream parameters (persisted to NVS)
+ */
+aicam_result_t json_config_set_video_stream_param(const video_stream_param_t *config);
+
+/**
+ * @brief Fill video stream parameter struct with safe defaults
+ */
+void json_config_video_stream_defaults(video_stream_param_t *config);
+
+/**
+ * @brief Get the persisted AI-pipe (pipe2) input size in pixels
+ * @param width Output width (defaults to 224 when never synced)
+ * @param height Output height
+ */
+void json_config_get_ai_pipe_size(uint32_t *width, uint32_t *height);
 
 /**
  * @brief Create the LittleFS certificate directory (/certs) if it is missing

@@ -505,14 +505,21 @@ static void mm_halow_link_status_callback(const struct mmipal_link_status *link_
     }
 
     if (link_status->link_state == MMIPAL_LINK_UP) {
+        uint8_t was_down = (halow_state != NETIF_STATE_UP);
         halow_state = NETIF_STATE_UP;
         if (halow_link_sem != NULL) {
             mmosal_semb_give(halow_link_sem);
         }
         LOG_DRV_INFO("HaLow link up, IP: %s", link_status->ip_addr);
+        if (was_down) {
+            nm_report_netif_event(NETIF_NAME_WIFI_HALOW, NETIF_EVT_LINK_UP, NULL);
+        }
     } else {
         if (halow_state == NETIF_STATE_UP) {
             halow_state = NETIF_STATE_DOWN;
+            /* AP gone / link dropped: report only on the UP→DOWN transition,
+             * from the mmipal callback context (no halow_mutex held here). */
+            nm_report_netif_event(NETIF_NAME_WIFI_HALOW, NETIF_EVT_LINK_DOWN, NULL);
         }
         LOG_DRV_INFO("HaLow link down");
     }

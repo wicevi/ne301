@@ -30,6 +30,9 @@ typedef struct {
     uint32_t bpp;                         // Bytes per pixel
     uint32_t ai_enabled;                  // AI processing enabled
     uint32_t overlay_results;             // Draw AI results onto captured frames
+    uint32_t pipe_id;                     // Source pipe: 1 = main pipe (default),
+                                          // 2 = AI pipe (encode its frames directly,
+                                          // freeing pipe1 for still capture)
 } video_camera_config_t;
 
 /**
@@ -152,8 +155,8 @@ aicam_bool_t video_camera_node_is_running(video_node_t *node);
  * @param user_data User data to pass to callback
  * @return Operation result
  */
-aicam_result_t video_camera_node_set_ai_callback(video_node_t *node, 
-                                                ai_draw_callback_t callback, 
+aicam_result_t video_camera_node_set_ai_callback(video_node_t *node,
+                                                ai_draw_callback_t callback,
                                                 void *user_data);
 
 /* ==================== Control Commands ==================== */

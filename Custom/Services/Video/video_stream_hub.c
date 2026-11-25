@@ -45,6 +45,11 @@ typedef struct {
 
 static video_hub_ctx_t g_hub = {0};
 
+/* NO osTimer here: its callback thread has a tiny stack and running the log
+ * path (or pipeline teardown) from it overflows and hard-faults with wild
+ * PC/BFAR - bitten multiple times. Pipeline shutdown is owned solely by
+ * preview/stop and stream-config applies, both on well-stacked threads. */
+
 /* ==================== Internal Functions ==================== */
 
 static int extract_sps_pps(const uint8_t *data, uint32_t size,
@@ -213,7 +218,7 @@ video_hub_subscriber_id_t video_hub_subscribe(
     slot->user_data = user_data;
     slot->active = AICAM_TRUE;
     slot->sps_pps_sent = AICAM_FALSE;
-    
+
     g_hub.subscriber_count++;
     video_hub_subscriber_id_t id = slot->id;
     
@@ -245,37 +250,29 @@ video_hub_subscriber_id_t video_hub_subscribe(
 aicam_result_t video_hub_unsubscribe(video_hub_subscriber_id_t subscriber_id)
 {
     if (!g_hub.initialized) return AICAM_ERROR_NOT_INITIALIZED;
-    
+
     osMutexAcquire(g_hub.mutex, osWaitForever);
-    
+
     aicam_bool_t found = AICAM_FALSE;
-    aicam_bool_t need_stop_pipeline = AICAM_FALSE;
-    
+
     for (uint32_t i = 0; i < VIDEO_HUB_MAX_SUBSCRIBERS; i++) {
         if (g_hub.subscribers[i].active && g_hub.subscribers[i].id == subscriber_id) {
             g_hub.subscribers[i].active = AICAM_FALSE;
             g_hub.subscriber_count--;
             found = AICAM_TRUE;
-            
-            // Last subscriber removed: mark for pipeline stop
-            if (g_hub.subscriber_count == 0) {
-                need_stop_pipeline = AICAM_TRUE;
-            }
             break;
         }
     }
-    
+
     osMutexRelease(g_hub.mutex);
-    
+
+    /* NO auto-stop on the last unsubscribe (see the osTimer note above): the
+     * pipeline keeps running until preview/stop or a stream-config apply
+     * tears it down on a well-stacked thread. A player remount reconnects
+     * seamlessly because nothing was torn down under it. */
     if (found) {
         LOG_SVC_INFO("Hub: subscriber %ld removed (remaining=%lu)",
                      (long)subscriber_id, (unsigned long)g_hub.subscriber_count);
-        
-        // No subscribers: auto-stop AI pipeline
-        if (need_stop_pipeline && ai_pipeline_is_running()) {
-            LOG_SVC_INFO("Hub: no subscribers, stopping AI pipeline");
-            ai_pipeline_stop();
-        }
     }
     return found ? AICAM_OK : AICAM_ERROR_NOT_FOUND;
 }
@@ -288,29 +285,49 @@ aicam_result_t video_hub_inject_frame(const uint8_t *data, uint32_t size,
     if (!g_hub.initialized || !data || size == 0) {
         return AICAM_ERROR_INVALID_PARAM;
     }
-    
-    if (g_hub.subscriber_count == 0) return AICAM_OK;
-    
-    // Extract SPS/PPS from first I-frame
-    if (!g_hub.sps_pps_valid && is_keyframe) {
+
+    // Re-extract SPS/PPS on every keyframe and update the cache whenever it
+    // CHANGES (not only when empty), and do so BEFORE the no-subscriber early
+    // return: during a resolution switch the (only) client may be gone for a
+    // moment (front-end unmounts the player around the save), and if the new
+    // session's parameter set is not learned while nobody watches, the next
+    // joiner is served a stale join-sync one resolution behind. A trailing
+    // keyframe of the OLD session can likewise re-populate the cache after a
+    // pipeline stop - comparing on every keyframe self-heals that too.
+    if (is_keyframe) {
         uint8_t *sps = NULL, *pps = NULL;
         uint32_t sps_len = 0, pps_len = 0;
-        
+
         if (extract_sps_pps(data, size, &sps, &sps_len, &pps, &pps_len) == 0) {
+            aicam_bool_t changed;
             osMutexAcquire(g_hub.mutex, osWaitForever);
-            if (g_hub.sps_data) hal_mem_free(g_hub.sps_data);
-            if (g_hub.pps_data) hal_mem_free(g_hub.pps_data);
-            g_hub.sps_data = sps;
-            g_hub.sps_size = sps_len;
-            g_hub.pps_data = pps;
-            g_hub.pps_size = pps_len;
-            g_hub.sps_pps_valid = AICAM_TRUE;
+            changed = (aicam_bool_t)(!g_hub.sps_pps_valid ||
+                         g_hub.sps_size != sps_len || g_hub.pps_size != pps_len ||
+                         (g_hub.sps_data && memcmp(g_hub.sps_data, sps, sps_len) != 0) ||
+                         (g_hub.pps_data && memcmp(g_hub.pps_data, pps, pps_len) != 0));
+            if (changed) {
+                if (g_hub.sps_data) hal_mem_free(g_hub.sps_data);
+                if (g_hub.pps_data) hal_mem_free(g_hub.pps_data);
+                g_hub.sps_data = sps;
+                g_hub.sps_size = sps_len;
+                g_hub.pps_data = pps;
+                g_hub.pps_size = pps_len;
+                g_hub.sps_pps_valid = AICAM_TRUE;
+            }
             osMutexRelease(g_hub.mutex);
-            
-            notify_sps_pps();
+
+            if (changed) {
+                notify_sps_pps();
+            } else {
+                /* unchanged: free the redundant extraction */
+                hal_mem_free(sps);
+                hal_mem_free(pps);
+            }
         }
     }
     
+    if (g_hub.subscriber_count == 0) return AICAM_OK;
+
     // Distribute frame to subscribers
     static uint32_t frame_id = 0;
     video_hub_frame_t frame = {

@@ -254,10 +254,10 @@ export default function RtmpConfig() {
     <div>
       <div className="flex items-center  justify-between">
         <div className="flex items-center gap-2">
-          <Label className="text-sm text-text-primary">
+          <p className="text-sm font-semibold text-text-primary">
             {' '}
             {i18n._('sys.device_tool.media_stream_settings')}
-          </Label>
+          </p>
         </div>
         <Select
           value={currentMode}
@@ -464,7 +464,7 @@ export default function RtmpConfig() {
               </>
             )}
 
-            <div className="flex justify-end gap-2 mt-2">
+            <div className="flex justify-end gap-2 mt-4">
               <Button
                 variant="primary"
                 disabled={configLoading || !rtmpConfig.config.enable}

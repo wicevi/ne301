@@ -76,6 +76,10 @@ aicam_result_t rtsp_parse_uri(const char *request, char *uri, uint32_t uri_size)
 aicam_result_t rtsp_parse_client_port(const char *transport_hdr,
                                        uint16_t *rtp_port, uint16_t *rtcp_port);
 
+/* Parse "interleaved=a-b" (RTP/AVP/TCP mode) from a Transport header. */
+aicam_result_t rtsp_parse_interleaved(const char *transport_hdr,
+                                      uint8_t *rtp_ch, uint8_t *rtcp_ch);
+
 /**
  * @brief Handle a complete RTSP request for a client
  * @param client Client context

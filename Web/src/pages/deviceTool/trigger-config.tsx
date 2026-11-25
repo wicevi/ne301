@@ -18,12 +18,14 @@ import {
 } from '@/components/ui/select';
 import { useLingui } from '@lingui/react';
 import SvgIcon from '@/components/svg-icon';
+import Slider from '@/components/slider';
 import deviceTool, { type PirConfigReq } from '@/services/api/deviceTool';
 import { toast } from 'sonner';
 
 type TriggerConfigType = {
   pir_trigger: {
     enable: boolean;
+    device_type?: 'pir' | 'io';
     trigger_type:
     | 'rising_edge'
     | 'falling_edge'
@@ -72,6 +74,50 @@ const hhmmToSec = (s: string) => {
   return (h || 0) * 3600 + (m || 0) * 60;
 };
 
+/* ==================== PIR helpers ==================== */
+
+// Sensitivity register range on the PIR conditioning IC (smaller = more
+// sensitive). Values above ~120 are effectively saturated (insensitive), so
+// the UI maps 1..100 onto 120..10. Register values outside the range (old NVS
+// data) clamp to the nearest end.
+const SENS_REG_MIN = 10;
+const SENS_REG_MAX = 120;
+const sensClamp = (reg: number) => Math.min(SENS_REG_MAX, Math.max(SENS_REG_MIN, reg));
+const sensRegToUi = (reg: number) => {
+  const r = sensClamp(reg);
+  return Math.round(1 + ((SENS_REG_MAX - r) * 99) / (SENS_REG_MAX - SENS_REG_MIN));
+};
+const sensUiToReg = (ui: number) => Math.round(SENS_REG_MAX - ((ui - 1) * (SENS_REG_MAX - SENS_REG_MIN)) / 99);
+
+// Window register 0-3 -> actual seconds 2/4/6/8 (2 + 2*reg)
+const PIR_WINDOW_SECONDS = [2, 4, 6, 8] as const;
+// Ignore-time register 0-15 -> actual seconds 0.5..8.0 (0.5 + 0.5*reg)
+const pirIgnoreSeconds = (reg: number) => 0.5 + 0.5 * reg;
+
+// Quick presets - register values from the sensor vendor's recommended
+// engineering table (theoretical starting points, to be tuned by field tests).
+// sens = SENS register, pulse = actual pulse count (1-4), window = seconds.
+/* Four scenarios matching the approved product prototype. SENS register
+ * values converted with the PROTOTYPE's mapping (>=50%: 60-(p-50), <50%:
+ * 255-(p/50)*195): 80%→30, 50%→60, 88%→22, 70%→40. pulse = actual pulse
+ * count (1-4), window = seconds, ignore = cooldown seconds. */
+const PIR_PRESETS = [
+  { key: 'indoor', sens: 30, pulse: 2, window: 2, ignore: 4 },
+  { key: 'outdoor', sens: 60, pulse: 3, window: 2, ignore: 6 },
+  { key: 'fast', sens: 22, pulse: 1, window: 2, ignore: 3 },
+  { key: 'power', sens: 40, pulse: 2, window: 2, ignore: 8 },
+] as const;
+
+/* Sensitivity tier + estimated detection distance for the hint line under
+ * the slider (field estimate, mirroring the vendor's reference table). */
+const sensTierKey = (uiPct: number) => {
+  if (uiPct >= 85) return 'sys.device_tool.sens_tier_ultra';
+  if (uiPct >= 65) return 'sys.device_tool.sens_tier_high';
+  if (uiPct >= 40) return 'sys.device_tool.sens_tier_mid';
+  return 'sys.device_tool.sens_tier_low';
+};
+const sensEstDistance = (uiPct: number) => 1.5 + (uiPct / 100) * 8.5;
+
 function PIRSkeleton() {
   return (
     <div className="flex flex-col gap-2 justify-between items-center">
@@ -85,7 +131,7 @@ function PIRSkeleton() {
 
 export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
   const { i18n } = useLingui();
-  const { configTriggerConfigReq, getTriggerConfigReq } = deviceTool;
+  const { configTriggerConfigReq, configTimerTriggerReq, configRemoteTriggerReq, getTriggerConfigReq } = deviceTool;
   const [intervalCaptureTime, setIntervalCaptureTime] = useState(10);
   const [intervalCaptureTimeUnit, setIntervalCaptureTimeUnit] = useState('hour');
   // Raw text while editing the interval field; null = not editing (show the
@@ -101,6 +147,8 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
   const [anchorInput, setAnchorInput] = useState(() => toHHMM(new Date()));
   const [savePirTriggerLoading, setSavePirTriggerLoading] = useState(false);
   const [PIRLoading, setPIRLoading] = useState(false);
+  // Advanced PIR options (disable-in-preview) — collapsed by default.
+  const [pirAdvancedOpen, setPirAdvancedOpen] = useState(false);
   const [savedNextCaptureAt, setSavedNextCaptureAt] = useState<number | null>(
     null
   );
@@ -128,7 +176,7 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
       ignore_time_s: 7,
       pulse_count: 1,
       window_time_s: 0,
-      disable_in_preview: true,
+      disable_in_preview: false,
     },
     timer_trigger: {
       enable: false,
@@ -319,11 +367,7 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
         // Daily grid anchor "HH:MM" (a time-of-day, no date component)
         tt.anchor = anchorInput;
       }
-      const newConfig = {
-        ...triggerConfig,
-        timer_trigger: tt,
-      };
-      await setTriggerConfigApi(newConfig);
+      await setTimerTriggerApi(tt);
       toast.success(i18n._('common.configSuccess'));
     } catch (error) {
       console.error('handleIntervalCapture', error);
@@ -333,26 +377,57 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
   const handleFixedCapture = async () => {
     if (!triggerConfig.timer_trigger) return;
     try {
-      const newConfig = {
-        ...triggerConfig,
-        timer_trigger: { ...triggerConfig.timer_trigger, capture_mode: 'once' },
-      };
-      await setTriggerConfigApi(newConfig);
+      await setTimerTriggerApi({ ...triggerConfig.timer_trigger, capture_mode: 'once' });
       toast.success(i18n._('common.configSuccess'));
     } catch (error) {
       console.error('handleFixedCapture', error);
       throw error;
     }
   };
-  const setTriggerConfigApi = async (config = triggerConfig) => {
+  const setTriggerConfigApi = async (config = triggerConfig): Promise<boolean> => {
+    let applyFailed = false;
     try {
-      await configTriggerConfigReq(config as unknown as PirConfigReq);
+      const res = await configTriggerConfigReq(config as unknown as PirConfigReq);
+      // PIR chip-level write failure: config IS saved (retried at sleep/boot),
+      // but the sensor didn't take it - warn the user instead of staying silent.
+      if (res.data?.pir_apply_failed) {
+        applyFailed = true;
+        toast.warning(i18n._('sys.device_tool.pir_apply_failed'));
+      }
       // Re-fetch from server to get computed fields like next_capture_at
-      const res = await getTriggerConfigReq();
-      setTriggerConfig(res.data);
-      setSavedNextCaptureAt(res.data.timer_trigger?.next_capture_at ?? null);
+      const res2 = await getTriggerConfigReq();
+      setTriggerConfig(res2.data);
+      setSavedNextCaptureAt(res2.data.timer_trigger?.next_capture_at ?? null);
     } catch (error) {
       console.error('setImageTrigger', error);
+      throw error;
+    }
+    return applyFailed;
+  };
+
+  /* Timer / remote use the PARTIAL endpoints: they skip the chip-level PIR
+   * write (a seconds-long retry loop with an absent sensor) that the combined
+   * endpoint always runs. Same refetch afterwards for computed fields. */
+  const setTimerTriggerApi = async (timer_trigger: NonNullable<TriggerConfigType['timer_trigger']>) => {
+    try {
+      await configTimerTriggerReq(timer_trigger);
+      const res2 = await getTriggerConfigReq();
+      setTriggerConfig(res2.data);
+      setSavedNextCaptureAt(res2.data.timer_trigger?.next_capture_at ?? null);
+    } catch (error) {
+      console.error('setTimerTrigger', error);
+      throw error;
+    }
+  };
+
+  const setRemoteTriggerApi = async (enable: boolean) => {
+    try {
+      await configRemoteTriggerReq(enable);
+      const res2 = await getTriggerConfigReq();
+      setTriggerConfig(res2.data);
+      setSavedNextCaptureAt(res2.data.timer_trigger?.next_capture_at ?? null);
+    } catch (error) {
+      console.error('setRemoteTrigger', error);
       throw error;
     }
   };
@@ -364,8 +439,10 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
         ...triggerConfig,
         pir_trigger: { ...triggerConfig.pir_trigger },
       };
-      await setTriggerConfigApi(newConfig);
-      toast.success(i18n._('common.configSuccess'));
+      const applyFailed = await setTriggerConfigApi(newConfig);
+      if (!applyFailed) {
+        toast.success(i18n._('common.configSuccess'));
+      }
     } catch (error) {
       console.error('handlePirTriggerSave', error);
       throw error;
@@ -384,19 +461,10 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
   };
   const handleTimerTriggerChange = (value: boolean) => {
     if (!triggerConfig.timer_trigger) return;
-    const newConfig = {
-      ...triggerConfig,
-      timer_trigger: { ...triggerConfig.timer_trigger, enable: value },
-    };
-    setTriggerConfigApi(newConfig);
+    setTimerTriggerApi({ ...triggerConfig.timer_trigger, enable: value });
   };
   const handleRemoteTriggerChange = (value: boolean) => {
-    if (!triggerConfig.remote_trigger) return;
-    const newConfig = {
-      ...triggerConfig,
-      remote_trigger: { ...triggerConfig.remote_trigger, enable: value },
-    };
-    setTriggerConfigApi(newConfig);
+    setRemoteTriggerApi(value);
   };
 
   // Live preview of the next capture node from the PENDING (edited) config
@@ -695,84 +763,239 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
                   <PIRSkeleton />
                 ) : (
                   <>
+                    {/* Device type on the wake input: PIR chip or plain IO */}
                     <div className="flex justify-between gap-2 flex-1 pr-0">
                       <Label className="text-sm text-text-primary shrink-0">
-                        {' '}
-                        {i18n._('sys.device_tool.trigger_type')}
+                        {i18n._('sys.device_tool.pir_device_type')}
                       </Label>
                       <Select
-                        value={
-                          triggerConfig.pir_trigger?.trigger_type
-                          || 'rising_edge'
-                        }
+                        value={triggerConfig.pir_trigger?.device_type ?? 'pir'}
                         onValueChange={value => setTriggerConfig({
                           ...triggerConfig,
                           pir_trigger: {
                             ...triggerConfig.pir_trigger,
-                            trigger_type: value as
-                              | 'rising_edge'
-                              | 'falling_edge'
-                              | 'both_edges'
-                              | 'high_level'
-                              | 'low_level',
+                            device_type: value as 'pir' | 'io',
                           },
                         })}
                       >
                         <SelectTrigger className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-transparent">
                           <SelectValue
-                            placeholder={i18n._('sys.device_tool.trigger_in')}
+                            placeholder={i18n._('sys.device_tool.pir_device_type')}
                           />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="rising_edge">
-                            {i18n._('sys.device_tool.rising_edge')}
+                          <SelectItem value="pir">
+                            {i18n._('sys.device_tool.pir_type_pir')}
                           </SelectItem>
-                          <SelectItem value="falling_edge">
-                            {i18n._('sys.device_tool.falling_edge')}
+                          <SelectItem value="io">
+                            {i18n._('sys.device_tool.pir_type_io')}
                           </SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className="flex justify-between gap-2 flex-1 pr-0">
-                      <div className="flex items-center gap-2">
+                    {/* Plain IO signal: only the wake edge matters */}
+                    {(triggerConfig.pir_trigger?.device_type ?? 'pir') === 'io' && (
+                      <div className="flex justify-between gap-2 flex-1 pr-0">
                         <Label className="text-sm text-text-primary shrink-0">
-                          {' '}
-                          {i18n._('sys.device_tool.sensitivity_level')}
+                          {i18n._('sys.device_tool.trigger_type')}
                         </Label>
-                        <Tooltip mbEnhance>
-                          <TooltipTrigger>
-                            <div className="w-4 flex justify-center items-center">
-                              <SvgIcon className="w-4 h-4" icon="info" />
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent className="max-w-80 text-pretty">
-                            <p className="max-w-80 text-pretty">
-                              {i18n._('sys.device_tool.sensitivity_level_note')}
-                            </p>
-                          </TooltipContent>
-                        </Tooltip>
-                      </div>
-                      {/* Draft-based number input: the 1s now-tick re-renders
-                          every second, so a blur-only controlled input would
-                          snap back to the committed value mid-typing */}
-                      <NumberField
-                        className="w-20"
-                        min={10}
-                        max={255}
-                        value={triggerConfig.pir_trigger?.sensitivity_level ?? 10}
-                        onCommit={v => setTriggerConfig({
+                        <Select
+                          value={
+                            triggerConfig.pir_trigger?.trigger_type
+                            || 'rising_edge'
+                          }
+                          onValueChange={value => setTriggerConfig({
                             ...triggerConfig,
                             pir_trigger: {
                               ...triggerConfig.pir_trigger,
-                              sensitivity_level: v,
+                              trigger_type: value as
+                                | 'rising_edge'
+                                | 'falling_edge'
+                                | 'both_edges'
+                                | 'high_level'
+                                | 'low_level',
                             },
                           })}
-                      />
+                        >
+                          <SelectTrigger className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-transparent">
+                            <SelectValue
+                              placeholder={i18n._('sys.device_tool.trigger_in')}
+                            />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="rising_edge">
+                              {i18n._('sys.device_tool.rising_edge')}
+                            </SelectItem>
+                            <SelectItem value="falling_edge">
+                              {i18n._('sys.device_tool.falling_edge')}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                    {(triggerConfig.pir_trigger?.device_type ?? 'pir') !== 'io' && (
+                      <>
+                        {/* Quick recommended presets — label left, chips right,
+                         * vertically centered like the other rows */}
+                        <div className="flex justify-between items-center gap-2 flex-1 pr-0 my-4">
+                          <Label className="text-sm text-text-primary shrink-0">
+                            {i18n._('sys.device_tool.pir_presets')}
+                          </Label>
+                          <div className="flex flex-wrap gap-2 justify-end">
+                            {PIR_PRESETS.map(preset => {
+                              const pir = triggerConfig.pir_trigger;
+                              const active = pir
+                                && pir.sensitivity_level === preset.sens
+                                && pir.pulse_count === preset.pulse
+                                && PIR_WINDOW_SECONDS[pir.window_time_s ?? 0] === preset.window
+                                && pirIgnoreSeconds(pir.ignore_time_s ?? 0) === preset.ignore;
+                              return (
+                                <Button
+                                  key={preset.key}
+                                  className="h-7 px-2 text-xs"
+                                  variant={active ? 'primary' : 'outline'}
+                                  onClick={() => setTriggerConfig({
+                                    ...triggerConfig,
+                                    pir_trigger: {
+                                      ...triggerConfig.pir_trigger,
+                                      sensitivity_level: preset.sens,
+                                      pulse_count: preset.pulse,
+                                      window_time_s: (preset.window - 2) / 2,
+                                      ignore_time_s: (preset.ignore - 0.5) / 0.5,
+                                    },
+                                  })}
+                                >
+                                  {i18n._(`sys.device_tool.pir_preset_${preset.key}`)}
+                                </Button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        {/* Sensitivity: UI 1-100 mapped onto register 120-20 */}
+                        <div className="w-full flex flex-col gap-1 flex-1 pr-0 my-4">
+                          <div className="flex items-center justify-between gap-4">
+                            <Label className="text-sm text-text-primary shrink-0">
+                              {i18n._('sys.device_tool.sensitivity_level')}
+                            </Label>
+                            <div className="flex items-center gap-2 flex-1">
+                              <Slider
+                                className="flex-1 min-w-16"
+                                value={sensRegToUi(triggerConfig.pir_trigger?.sensitivity_level ?? 30)}
+                                max={100}
+                                step={1}
+                                min={1}
+                                onChange={value => setTriggerConfig({
+                                  ...triggerConfig,
+                                  pir_trigger: {
+                                    ...triggerConfig.pir_trigger,
+                                    sensitivity_level: sensUiToReg(value),
+                                  },
+                                })}
+                              />
+                              {/* Draft-based number input: the 1s now-tick re-renders
+                                  every second, so a blur-only controlled input would
+                                  snap back to the committed value mid-typing */}
+                              <div className="flex items-center gap-1">
+                                <NumberField
+                                  className="w-16 text-right"
+                                  min={1}
+                                  max={100}
+                                  value={sensRegToUi(triggerConfig.pir_trigger?.sensitivity_level ?? 30)}
+                                  onCommit={v => setTriggerConfig({
+                                    ...triggerConfig,
+                                    pir_trigger: {
+                                      ...triggerConfig.pir_trigger,
+                                      sensitivity_level: sensUiToReg(v),
+                                    },
+                                  })}
+                                />
+                                <span className="text-sm text-text-secondary">%</span>
+                              </div>
+                            </div>
+                          </div>
+                          {/* Tier + estimated range + live SENS register hint */}
+                          {(() => {
+                            const reg = sensClamp(triggerConfig.pir_trigger?.sensitivity_level ?? 30);
+                            const uiPct = sensRegToUi(reg);
+                            return (
+                              <p className="text-xs text-text-secondary self-end flex items-center gap-2">
+                                <span>
+                                  {i18n._(sensTierKey(uiPct))}
+                                  {' · '}
+                                  {i18n._('sys.device_tool.sens_est_dist').replace('{dist}', sensEstDistance(uiPct).toFixed(1))}
+                                </span>
+                                <span className="text-gray-400 font-mono">
+                                  {i18n._('sys.device_tool.sens_register_value').replace('{reg}', String(reg))}
+                                </span>
+                              </p>
+                            );
+                          })()}
+                        </div>
+                    {/* Anti-jamming: N valid pulses within the window trigger a wake.
+                        Units stay OUTSIDE the dropdowns (bare numbers inside) so
+                        the selects stay narrow and the sentence flows. Label on
+                        the left like the presets row; the config cluster wraps
+                        within the right side (English no longer pushes values
+                        to a misaligned far-right edge). */}
+                    <div className="flex flex-col sm:flex-row sm:justify-between gap-2 flex-1 pr-0 my-4">
+                      <Label className="text-sm text-text-primary shrink-0">
+                        {i18n._('sys.device_tool.anti_jamming')}
+                      </Label>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0 justify-start sm:justify-end text-sm text-text-secondary">
+                        <span>{i18n._('sys.device_tool.anti_within')}</span>
+                        <Select
+                          value={String(PIR_WINDOW_SECONDS[triggerConfig.pir_trigger?.window_time_s ?? 0])}
+                          onValueChange={value => setTriggerConfig({
+                            ...triggerConfig,
+                            pir_trigger: {
+                              ...triggerConfig.pir_trigger,
+                              window_time_s: (Number(value) - 2) / 2,
+                            },
+                          })}
+                        >
+                          <SelectTrigger size="sm" className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-transparent w-11 px-1 data-[size=sm]:h-5">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {PIR_WINDOW_SECONDS.map(sec => (
+                              <SelectItem key={sec} value={String(sec)}>
+                                {sec}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <span>{i18n._('sys.device_tool.anti_seconds_unit')}</span>
+                        <span>{i18n._('sys.device_tool.anti_detect')}</span>
+                        <Select
+                          value={String(triggerConfig.pir_trigger?.pulse_count ?? 1)}
+                          onValueChange={value => setTriggerConfig({
+                            ...triggerConfig,
+                            pir_trigger: {
+                              ...triggerConfig.pir_trigger,
+                              pulse_count: Number(value),
+                            },
+                          })}
+                        >
+                          <SelectTrigger size="sm" className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-transparent w-11 px-1 data-[size=sm]:h-5">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {[1, 2, 3, 4].map(n => (
+                              <SelectItem key={n} value={String(n)}>
+                                {n}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <span>{i18n._('sys.device_tool.anti_trigger')}</span>
+                      </div>
                     </div>
-                    <div className="flex justify-between gap-2 flex-1 pr-0">
+                    {/* Cooldown (ignore time): pulled out of the advanced
+                     * section — it pairs directly with the trigger rhythm
+                     * above and is tuned per site. */}
+                    <div className="flex justify-between gap-2 flex-1 pr-0 my-4">
                       <div className="flex items-center gap-2">
                         <Label className="text-sm text-text-primary shrink-0">
-                          {' '}
                           {i18n._('sys.device_tool.ignore_time')}
                         </Label>
                         <Tooltip mbEnhance>
@@ -782,16 +1005,12 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
                             </div>
                           </TooltipTrigger>
                           <TooltipContent className="max-w-80 text-pretty">
-                            <p className="max-w-80 text-pretty">
-                              {i18n._('sys.device_tool.ignore_time_note')}
-                            </p>
+                            <p>{i18n._('sys.device_tool.ignore_time_note')}</p>
                           </TooltipContent>
                         </Tooltip>
                       </div>
                       <Select
-                        value={(
-                          triggerConfig.pir_trigger?.ignore_time_s || 0
-                        ).toString()}
+                        value={String(triggerConfig.pir_trigger?.ignore_time_s ?? 7)}
                         onValueChange={value => setTriggerConfig({
                           ...triggerConfig,
                           pir_trigger: {
@@ -808,149 +1027,99 @@ export default function TriggerConfig({ childeRef }: TriggerConfigProps) {
                         <SelectContent>
                           {Array.from({ length: 16 }).map((_, index) => (
                             <SelectItem key={index} value={index.toString()}>
-                              {index}
+                              {pirIgnoreSeconds(index).toFixed(1)}{i18n._('sys.device_tool.anti_seconds_unit')}
                             </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className="flex justify-between gap-2 flex-1 pr-0">
-                      <div className="flex items-center gap-2">
-                        <Label className="text-sm text-text-primary shrink-0">
-                          {' '}
-                          {i18n._('sys.device_tool.pulse_count')}
-                        </Label>
-                        <Tooltip mbEnhance>
-                          <TooltipTrigger>
-                            <div className="w-4 flex justify-center items-center">
-                              <SvgIcon className="w-4 h-4" icon="info" />
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent className="max-w-80 text-pretty">
-                            <p className="max-w-80 text-pretty">
-                              {i18n._('sys.device_tool.pulse_count_note')}
-                            </p>
-                          </TooltipContent>
-                        </Tooltip>
-                      </div>
-                      <Select
-                        value={(
-                          triggerConfig.pir_trigger?.pulse_count || 1
-                        ).toString()}
-                        onValueChange={value => setTriggerConfig({
-                          ...triggerConfig,
-                          pir_trigger: {
-                            ...triggerConfig.pir_trigger,
-                            pulse_count: Number(value),
-                          },
-                        })}
+                    {/* Advanced PIR options. Only disable-in-preview is live (a
+                     * setting carried over from v4.3.1); the raw SENS register
+                     * input below stays commented until field tuning needs it. */}
+                    <div className="flex flex-col gap-2">
+                      <button
+                        type="button"
+                        className="flex items-center gap-1 text-sm text-text-secondary self-start"
+                        onClick={() => setPirAdvancedOpen(open => !open)}
                       >
-                        <SelectTrigger className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-transparent">
-                          <SelectValue
-                            placeholder={i18n._('sys.device_tool.trigger_in')}
-                          />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {Array.from({ length: 4 }).map((_, index) => (
-                            <SelectItem
-                              key={index + 1}
-                              value={(index + 1).toString()}
+                        <SvgIcon
+                          icon="right"
+                          className={`h-4 w-4 transition-transform ${pirAdvancedOpen ? 'rotate-90' : ''}`}
+                        />
+                        {i18n._('sys.device_tool.advanced_options')}
+                      </button>
+                      {pirAdvancedOpen && (
+                        <div className="border border-gray-200 border-solid p-3 rounded-md flex flex-col gap-3">
+                          {/* Raw SENS register input — kept commented.
+                          <div className="flex justify-between gap-2 flex-1 pr-0">
+                            <Label className="text-sm text-text-primary shrink-0">
+                              {i18n._('sys.device_tool.sens_register')}
+                            </Label>
+                            <NumberField
+                              className="w-20 text-right"
+                              min={10}
+                              max={255}
+                              value={triggerConfig.pir_trigger?.sensitivity_level ?? 30}
+                              onCommit={v => setTriggerConfig({
+                                ...triggerConfig,
+                                pir_trigger: {
+                                  ...triggerConfig.pir_trigger,
+                                  sensitivity_level: v,
+                                },
+                              })}
+                            />
+                          </div>
+                          */}
+                          <div className="flex justify-between gap-2 flex-1 pr-0">
+                            <div className="flex items-center gap-2">
+                              <Label className="text-sm text-text-primary shrink-0">
+                                {i18n._('sys.device_tool.disable_pir_in_preview')}
+                              </Label>
+                              <Tooltip mbEnhance>
+                                <TooltipTrigger>
+                                  <div className="w-4 flex justify-center items-center">
+                                    <SvgIcon className="w-4 h-4" icon="info" />
+                                  </div>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-80 text-pretty">
+                                  <p>{i18n._('sys.device_tool.disable_pir_in_preview_note')}</p>
+                                </TooltipContent>
+                              </Tooltip>
+                            </div>
+                            <Select
+                              value={
+                                (triggerConfig.pir_trigger?.disable_in_preview ?? false)
+                                  ? 'yes'
+                                  : 'no'
+                              }
+                              onValueChange={value => setTriggerConfig({
+                                ...triggerConfig,
+                                pir_trigger: {
+                                  ...triggerConfig.pir_trigger,
+                                  disable_in_preview: value === 'yes',
+                                },
+                              })}
                             >
-                              {index + 1}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                              <SelectTrigger className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-transparent">
+                                <SelectValue
+                                  placeholder={i18n._('sys.device_tool.trigger_in')}
+                                />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="yes">
+                                  {i18n._('common.yes')}
+                                </SelectItem>
+                                <SelectItem value="no">
+                                  {i18n._('common.no')}
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <div className="flex justify-between gap-2 flex-1 pr-0">
-                      <div className="flex items-center gap-2">
-                        <Label className="text-sm text-text-primary shrink-0">
-                          {' '}
-                          {i18n._('sys.device_tool.window_time')}
-                        </Label>
-                        <Tooltip mbEnhance>
-                          <TooltipTrigger>
-                            <div className="w-4 flex justify-center items-center">
-                              <SvgIcon className="w-4 h-4" icon="info" />
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent className="max-w-80 text-pretty">
-                            <p>{i18n._('sys.device_tool.window_time_note')}</p>
-                          </TooltipContent>
-                        </Tooltip>
-                      </div>
-                      <Select
-                        value={(
-                          triggerConfig.pir_trigger?.window_time_s || 0
-                        ).toString()}
-                        onValueChange={value => setTriggerConfig({
-                          ...triggerConfig,
-                          pir_trigger: {
-                            ...triggerConfig.pir_trigger,
-                            window_time_s: Number(value),
-                          },
-                        })}
-                      >
-                        <SelectTrigger className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-transparent">
-                          <SelectValue
-                            placeholder={i18n._('sys.device_tool.trigger_in')}
-                          />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {Array.from({ length: 4 }).map((_, index) => (
-                            <SelectItem key={index} value={index.toString()}>
-                              {index}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="flex justify-between gap-2 flex-1 pr-0">
-                      <div className="flex items-center gap-2">
-                        <Label className="text-sm text-text-primary shrink-0">
-                          {' '}
-                          {i18n._('sys.device_tool.disable_pir_in_preview')}
-                        </Label>
-                        <Tooltip mbEnhance>
-                          <TooltipTrigger>
-                            <div className="w-4 flex justify-center items-center">
-                              <SvgIcon className="w-4 h-4" icon="info" />
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent className="max-w-80 text-pretty">
-                            <p>{i18n._('sys.device_tool.disable_pir_in_preview_note')}</p>
-                          </TooltipContent>
-                        </Tooltip>
-                      </div>
-                      <Select
-                        value={
-                          (triggerConfig.pir_trigger?.disable_in_preview ?? true)
-                            ? 'yes'
-                            : 'no'
-                        }
-                        onValueChange={value => setTriggerConfig({
-                          ...triggerConfig,
-                          pir_trigger: {
-                            ...triggerConfig.pir_trigger,
-                            disable_in_preview: value === 'yes',
-                          },
-                        })}
-                      >
-                        <SelectTrigger className="border-0 shadow-none focus-visible:ring-0 focus-visible:border-transparent">
-                          <SelectValue
-                            placeholder={i18n._('sys.device_tool.trigger_in')}
-                          />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="yes">
-                            {i18n._('common.yes')}
-                          </SelectItem>
-                          <SelectItem value="no">
-                            {i18n._('common.no')}
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
+                      </>
+                    )}
                     <div className="flex justify-end mt-2">
                       <Button
                         variant="primary"

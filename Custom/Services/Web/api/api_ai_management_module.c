@@ -80,6 +80,13 @@ static aicam_result_t ai_management_status_handler(http_handler_context_t* ctx) 
         cJSON_AddNumberToObject(model, "input_channels", model_info.input_channels);
         cJSON_AddNumberToObject(model, "model_size", model_info.model_size);
         cJSON_AddStringToObject(model, "status",  "loaded");
+        /* Class-name list from the model package
+         * (postprocess_params.class_names): drives the capture-settings
+         * "allowed result labels" picker. Empty array when the model
+         * carries no label table. */
+        cJSON *labels = nn_get_model_labels_json();
+        cJSON_AddItemToObject(model, "labels",
+                               labels ? labels : cJSON_CreateArray());
     } else {
         cJSON_AddStringToObject(model, "status", "unloaded");
     }
@@ -91,24 +98,26 @@ static aicam_result_t ai_management_status_handler(http_handler_context_t* ctx) 
     cJSON_AddStringToObject(pipeline, "status", pipeline_running ? "running" : "stopped");
     cJSON_AddItemToObject(data, "pipeline", pipeline);
     
-    // Add statistics
-    // cJSON* stats = cJSON_CreateObject();
-    // ai_service_stats_t service_stats;
-    // if (ai_service_get_stats(&service_stats) == AICAM_OK) {
-    //     cJSON_AddNumberToObject(stats, "total_frames_processed", service_stats.total_frames_processed);
-    //     cJSON_AddNumberToObject(stats, "total_inferences", service_stats.total_inferences);
-    //     cJSON_AddNumberToObject(stats, "average_inference_time_ms", service_stats.average_inference_time_ms);
-    //     cJSON_AddNumberToObject(stats, "error_count", service_stats.error_count);
-    //     cJSON_AddNumberToObject(stats, "uptime_seconds", service_stats.uptime_seconds);
-    // } else {
-    //     cJSON_AddNumberToObject(stats, "total_frames_processed", 0);
-    //     cJSON_AddNumberToObject(stats, "total_inferences", 0);
-    //     cJSON_AddNumberToObject(stats, "average_inference_time_ms", 0.0);
-    //     cJSON_AddNumberToObject(stats, "error_count", 0);
-    //     cJSON_AddNumberToObject(stats, "uptime_seconds", 0);
-    // }
-    // cJSON_AddItemToObject(data, "statistics", stats);
-    
+    // Statistics: lets the UI (and field debugging) confirm the AI node is
+    // actually inferring - /ai/toggle only gates drawing, so these counters
+    // keep moving even with the web switch "off".
+    cJSON* stats = cJSON_CreateObject();
+    ai_service_stats_t service_stats;
+    if (ai_get_stats(&service_stats) == AICAM_OK) {
+        cJSON_AddNumberToObject(stats, "total_frames_processed",
+                                 (double)service_stats.total_frames_processed);
+        cJSON_AddNumberToObject(stats, "total_detections_found",
+                                 (double)service_stats.total_detections_found);
+        cJSON_AddNumberToObject(stats, "avg_fps", service_stats.avg_fps);
+        cJSON_AddNumberToObject(stats, "avg_ai_processing_time_us",
+                                 service_stats.avg_ai_processing_time_us);
+        cJSON_AddNumberToObject(stats, "current_detection_count",
+                                 service_stats.current_detection_count);
+    }
+    cJSON_AddItemToObject(data, "statistics", stats);
+
+    /* data ownership: api_response_success hands the printed string to the
+     * dispatcher, which frees it after sending - do NOT free it here. */
     api_response_success(ctx, cJSON_Print(data), "AI management status retrieved");
 
     cJSON_Delete(data);

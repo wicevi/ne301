@@ -59,10 +59,13 @@ aicam_result_t device_storage_format_handler(http_handler_context_t *ctx);
 aicam_result_t device_image_config_handler(http_handler_context_t *ctx);
 
 /**
- * @brief FSBL persisted CPU clock profile (GET/POST)
+ * @brief Live video stream parameters handler (GET/POST)
+ *        GET/POST /api/v1/device/stream/config - resolution/bitrate/gop
  * @param ctx HTTP request context
  * @return Operation result
  */
+aicam_result_t device_stream_config_handler(http_handler_context_t *ctx);
+
 aicam_result_t device_sys_clk_config_handler(http_handler_context_t *ctx);
 
 /**

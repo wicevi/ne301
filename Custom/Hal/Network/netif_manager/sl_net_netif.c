@@ -2294,6 +2294,7 @@ static sl_status_t ap_connected_event_handler(sl_wifi_event_t event, void *data,
     }
 #endif
     nm_report_ap_client_event(NETIF_AP_CLIENT_CONNECTED, mac_address->octet);
+    nm_report_netif_event(NETIF_NAME_WIFI_AP, NETIF_EVT_AP_STA_CONNECTED, mac_address->octet);
 
     return SL_STATUS_OK;
 }
@@ -2323,6 +2324,7 @@ static sl_status_t ap_disconnected_event_handler(sl_wifi_event_t event, void *da
     }
 #endif
     nm_report_ap_client_event(NETIF_AP_CLIENT_DISCONNECTED, mac_address->octet);
+    nm_report_netif_event(NETIF_NAME_WIFI_AP, NETIF_EVT_AP_STA_DISCONNECTED, mac_address->octet);
 
     return SL_STATUS_OK;
 }
@@ -2680,6 +2682,16 @@ void sl_net_thread(void *arg)
                 client_state = sl_net_client_netif_state();
                 osMutexRelease(sl_net_mutex);
                 LOG_DRV_INFO("Save the current network card status: ap_state = %d, client_state = %d\r\n", ap_state, client_state);
+                /* Firmware recovery tears both netifs down: tell subscribers
+                 * the links are gone (this spot sits between the two mutex
+                 * sections — subscribers take their own locks). LINK_UP is
+                 * reported below if recovery succeeds. */
+                if (client_state == NETIF_STATE_UP) {
+                    nm_report_netif_event(NETIF_NAME_WIFI_STA, NETIF_EVT_LINK_DOWN, NULL);
+                }
+                if (ap_state == NETIF_STATE_UP) {
+                    nm_report_netif_event(NETIF_NAME_WIFI_AP, NETIF_EVT_LINK_DOWN, NULL);
+                }
                 try_times = 0;
                 sta_ret = -1;
                 ap_ret = -1;
@@ -2738,6 +2750,15 @@ void sl_net_thread(void *arg)
                  * for another all-or-nothing cycle). */
                 if (sta_ret == 0 || ap_ret == 0) {
                     netif_manager_change_default_if();
+                    /* Self-healed links are back. The driver re-up bypasses
+                     * netif_manager_ctrl, so no IF_UP fires — report the
+                     * recovery explicitly. */
+                    if (sta_ret == 0 && client_state == NETIF_STATE_UP) {
+                        nm_report_netif_event(NETIF_NAME_WIFI_STA, NETIF_EVT_LINK_UP, NULL);
+                    }
+                    if (ap_ret == 0 && ap_state == NETIF_STATE_UP) {
+                        nm_report_netif_event(NETIF_NAME_WIFI_AP, NETIF_EVT_LINK_UP, NULL);
+                    }
                 }
                 if (sta_ret == 0 && ap_ret == 0) {
                     osEventFlagsClear(sl_net_events, SL_NET_EVENT_FIRMWARE_ERROR);
@@ -2755,9 +2776,11 @@ void sl_net_thread(void *arg)
                     osDelay(100);
                 }
             } else if (event_flag & SL_NET_EVENT_STA_DISCONNECTED) {
+                uint8_t link_was_up = 0;
                 osMutexAcquire(sl_net_mutex, osWaitForever);
                 client_state = sl_net_client_netif_state();
                 if (client_state == NETIF_STATE_UP) {
+                    link_was_up = 1;
                     sl_net_client_netif_down();
                     status = sli_wifi_send_command(SLI_WIFI_REQ_INIT,
                                                               SLI_WIFI_WLAN_CMD,
@@ -2772,6 +2795,11 @@ void sl_net_thread(void *arg)
                 }
                 osEventFlagsClear(sl_net_events, SL_NET_EVENT_STA_DISCONNECTED);
                 osMutexRelease(sl_net_mutex);
+                /* Router gone / AP dropped us. Report outside sl_net_mutex —
+                 * subscribers take their own locks and may only be poked. */
+                if (link_was_up) {
+                    nm_report_netif_event(NETIF_NAME_WIFI_STA, NETIF_EVT_LINK_DOWN, NULL);
+                }
             }
         }
     }

@@ -6,7 +6,7 @@ The XSPI NOR Flash driver now supports **both** Macronix MX66UM1G45G (OctaBus) a
 
 - **Date**: 2026-06-22
 - **Branch**: `halow-ver`
-- **Datasheets**: `Docs/MX66UM1G45G, 1.8V, 1Gb, v1.1.pdf`, `Docs/DS-00683-GD55LX01GE-Rev1.4.pdf`
+- **Datasheets**: `documentation/hardware/MX66UM1G45G, 1.8V, 1Gb, v1.1.pdf`, `documentation/hardware/DS-00683-GD55LX01GE-Rev1.4.pdf`
 
 ---
 

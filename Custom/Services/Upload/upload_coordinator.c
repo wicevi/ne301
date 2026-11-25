@@ -17,6 +17,10 @@
  * count/list O(days) file reads instead of O(records) opendir, and eliminates
  * expensive LittleFS renames on every upload. The .json retains a `state`
  * field only so the index can be rebuilt from disk if the manifest is lost.
+ *
+ * Records captured while the clock was never synced (id ts==0) bucket under
+ * 1970-01-01/00 (TS0_DATE/TS0_HOUR) - a real date name so they stay visible
+ * to every manifest consumer; see date_dir_from_id.
  */
 
 #include "upload_coordinator.h"
@@ -142,6 +146,10 @@ _Static_assert(IDX_ENTRY_SIZE == 36, "cap_idx_entry_t must be 36 bytes");
  * (avoiding the write-fail→cleanup→retry cycle and the lfs_file_write-on-full
  * hang every wake). Written only on state change (infrequent → negligible wear). */
 #define NVS_KEY_UPLOAD_STORAGE_FULL  "up_stor_full"
+
+/* Persisted id-sequence base for captures taken while the clock is unsynced
+ * (ts==0) - see next_seq0(). */
+#define NVS_KEY_UPLOAD_SEQ0  "up_seq0"
 
 /* Max wait for SD media to finish opening before a capture-store attempt.
  * sdProcess opens the media asynchronously; on a cold boot the first capture
@@ -284,11 +292,38 @@ static uint32_t next_seq(void)
 {
     /* RAM-only counter - resets to 0 on each cold boot (wake). Different wakes
      * have different timestamps (minutes apart), so cross-boot id collision is
-     * impossible. Within a single wake, the counter increments for same-second
-     * captures (e.g. PIR + button simultaneously). No NVS write - eliminates
-     * per-capture flash wear that the previous NVS-persisted counter caused. */
+     * impossible - EXCEPT while the clock has never been synced (ts==0 on
+     * every wake); that path uses next_seq0() instead. Within a single wake,
+     * the counter increments for same-second captures (e.g. PIR + button
+     * simultaneously). No NVS write - eliminates per-capture flash wear that
+     * the previous NVS-persisted counter caused. */
     static uint32_t s = 0;
     return ++s;
+}
+
+/* Sequence for ts==0 captures (clock never synced). next_seq()'s no-collision
+ * argument breaks there: every wake would re-mint cap_00000000_00001, so a
+ * later wake's persist overwrote the earlier one's files (fopen "w" truncates)
+ * and manifest dedup collapsed both entries - silently losing every earlier
+ * pre-sync capture. This variant reserves a block of ids in NVS once per wake
+ * (first unsynced capture): a pre-sync capture burst costs at most one small
+ * NVS write per wake, and fully time-synced operation pays nothing. */
+#define SEQ0_RESERVE  1024u
+static uint32_t next_seq0(void)
+{
+    static uint32_t s_base = 0;
+    static uint32_t s_used = SEQ0_RESERVE;   /* force reservation on first call */
+    if (s_used >= SEQ0_RESERVE) {
+        uint32_t v = 0;
+        if (storage_nvs_read(NVS_USER, NVS_KEY_UPLOAD_SEQ0, &v, sizeof(v)) <= 0)
+            v = 0;
+        s_base = v;
+        s_used = 0;
+        uint32_t next = v + SEQ0_RESERVE;
+        (void)storage_nvs_write(NVS_USER, NVS_KEY_UPLOAD_SEQ0, &next, sizeof(next));
+    }
+    s_used++;
+    return s_base + s_used;
 }
 
 static const char *trigger_str(aicam_capture_trigger_t t)
@@ -332,30 +367,37 @@ static unsigned long ts_from_id(const char *id)
     return ts;
 }
 
+/* Bucket for records whose id carries no usable time (ts==0 - captured while
+ * the clock was never synced, or an unparseable id): gmtime(0) = 1970-01-01,
+ * hour 00. A valid YYYY-MM-DD/HH name is REQUIRED: enumerate_date_files only
+ * accepts date-shaped names, so the old "unknown" fallback made these records
+ * invisible to flush/list/count/cleanup forever (first-boot captures were
+ * written to disk but never uploaded - the "captures silently not saved"
+ * bug). 1970-01-01 also sorts oldest, so wrap cleanup evicts them first. */
+#define TS0_DATE "1970-01-01"
+#define TS0_HOUR "00"
+
 /* Format a record id's timestamp as a UTC date directory name "YYYY-MM-DD".
- * On parse failure returns "unknown" so the record still lands somewhere
- * deterministic and listable. */
+ * ts==0 maps to the TS0_DATE bucket (see above) - not "unknown". */
 static void date_dir_from_id(const char *id, char *out, size_t n)
 {
     if (!out || n == 0) return;
     unsigned long ts = ts_from_id(id);
-    if (ts == 0) { snprintf(out, n, "unknown"); return; }
-    time_t t = (time_t)ts;
+    time_t t = (time_t)ts;               /* gmtime(0) = 1970-01-01 */
     struct tm *tmv = gmtime(&t);
-    if (!tmv) { snprintf(out, n, "unknown"); return; }
+    if (!tmv) { snprintf(out, n, TS0_DATE); return; }
     strftime(out, n, "%Y-%m-%d", tmv);
 }
 
 /* Format a record id's timestamp as a UTC hour directory "HH" (zero-padded so
- * lexicographic readdir order == chronological). "unknown" on parse failure. */
+ * lexicographic readdir order == chronological). ts==0 maps to TS0_HOUR. */
 static void hour_dir_from_id(const char *id, char *out, size_t n)
 {
     if (!out || n == 0) return;
     unsigned long ts = ts_from_id(id);
-    if (ts == 0) { snprintf(out, n, "unknown"); return; }
-    time_t t = (time_t)ts;
+    time_t t = (time_t)ts;               /* gmtime(0) hour = 00 */
     struct tm *tmv = gmtime(&t);
-    if (!tmv) { snprintf(out, n, "unknown"); return; }
+    if (!tmv) { snprintf(out, n, TS0_HOUR); return; }
     strftime(out, n, "%H", tmv);
 }
 
@@ -3443,9 +3485,10 @@ aicam_result_t upload_coordinator_enqueue_capture(
     /* Build record id: cap_<timestamp>_<seq>, both zero-padded for correct
      * lexicographic ordering (cleanup deletes oldest by filename sort).
      * Avoid PRIu64 - on this toolchain it prints "lu" literally; %lu with
-     * (unsigned long) is safe for timestamps < 2038. */
+     * (unsigned long) is safe for timestamps < 2038. ts==0 (clock never
+     * synced) must use the cross-wake-unique sequence - see next_seq0(). */
     uint64_t ts = meta_in->timestamp ? meta_in->timestamp : now_unix();
-    uint32_t seq = next_seq();
+    uint32_t seq = (ts != 0) ? next_seq() : next_seq0();
     char id[64];
     snprintf(id, sizeof(id), "cap_%08lu_%05u", (unsigned long)ts, (unsigned)seq);
 
@@ -3725,6 +3768,8 @@ static aicam_result_t list_visitor(FS_Type_t fs, const char *id, void *user)
     cJSON *t;
     t = cJSON_GetObjectItem(meta, "timestamp");  if (t) r->timestamp = (uint64_t)t->valuedouble;
     t = cJSON_GetObjectItem(meta, "size");       if (t) r->size = (uint32_t)t->valueint;
+    t = cJSON_GetObjectItem(meta, "width");      if (t) r->width = (uint32_t)t->valueint;
+    t = cJSON_GetObjectItem(meta, "height");     if (t) r->height = (uint32_t)t->valueint;
     t = cJSON_GetObjectItem(meta, "retry_count"); if (t) r->retry_count = (uint8_t)t->valueint;
     t = cJSON_GetObjectItem(meta, "trigger");
     if (t && cJSON_IsString(t)) snprintf(r->trigger, sizeof(r->trigger), "%s", t->valuestring);

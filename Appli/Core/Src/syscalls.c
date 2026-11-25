@@ -22,6 +22,7 @@
 
 /* Includes */
 #include <sys/stat.h>
+#include "main.h"  /* __disable_irq / HAL_NVIC_SystemReset */
 #include <stdlib.h>
 #include <errno.h>
 #include <stdio.h>
@@ -60,8 +61,15 @@ int _kill(int pid, int sig)
 
 void _exit (int status)
 {
-  _kill(status, -1);
-  while (1) {}    /* Make sure we hang here */
+  (void)status;
+  /* Was a bare while(1) with IRQs enabled: a thread dying here (newlib
+   * abort(), e.g. lwIP's LWIP_PLATFORM_ASSERT) never stopped the
+   * Realtime-priority watchdog feeder thread, so the IWDG never expired
+   * and the unit hung silently instead of recovering. Match the project
+   * assert policy (see __assert_func in main.c): print-less reset. */
+  __disable_irq();
+  HAL_NVIC_SystemReset();
+  while (1) { }  /* not reached */
 }
 
 __attribute__((weak)) int _read(int file, char *ptr, int len)

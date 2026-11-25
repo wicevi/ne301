@@ -20,6 +20,10 @@ export default function App() {
   }
   const setSystemTime = () => {
     try {
+      // Push browser time on every page load. The firmware's rtc_set_timeStamp
+      // skips sub-2s steps, so against an already-synced clock this is a
+      // no-op; it is also the only time source when the device has no
+      // outbound network for NTP (fresh boot over USB/AP-only).
       // Get current UTC time in seconds timestamp
       const timestamp = Math.floor(Date.now() / 1000)
       const offsetMinutes = new Date().getTimezoneOffset()

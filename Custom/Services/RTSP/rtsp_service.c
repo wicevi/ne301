@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
+#include "Core/Data/buffer_mgr.h"
 
 /* ==================== Configuration ==================== */
 
@@ -66,6 +67,124 @@ typedef struct {
 } rtsp_service_ctx_t;
 
 static rtsp_service_ctx_t g_rtsp_ctx;
+
+/* ==================== Async send queue (mirrors the RTMP service) ====================
+ * rtsp_on_frame runs on the ENCODER thread (hub callback); doing socket I/O
+ * there lets one stalled RTSP client stall the whole encode pipeline (and a
+ * bare blocking send() can wedge forever on a full TCP window). Instead the
+ * callback only enqueues a frame copy; a dedicated send task owns all sends
+ * with select()-guarded writes. Queue-full overwrites the OLDEST frame and
+ * flags a drop - consumers then wait for the next keyframe instead of
+ * decoding a broken reference chain (green/smeared screen). */
+#define RTSP_SEND_QUEUE_SIZE        4
+#define RTSP_MAX_FRAME_SIZE         (256*1024)
+#define RTSP_SEND_TASK_STACK_SIZE   (4096*2)
+#define RTSP_SEND_ERROR_LIMIT       5
+
+typedef struct {
+    uint8_t *data;
+    uint32_t size;
+    aicam_bool_t is_keyframe;
+    aicam_bool_t valid;
+} rtsp_frame_entry_t;
+
+typedef struct {
+    rtsp_frame_entry_t frames[RTSP_SEND_QUEUE_SIZE];
+    volatile uint32_t head;             /* write position */
+    volatile uint32_t tail;             /* read position */
+    osMutexId_t mutex;
+    osSemaphoreId_t sem_data;
+    uint8_t *frame_buffers[RTSP_SEND_QUEUE_SIZE]; /* lazy aligned allocs */
+    volatile uint8_t dropped;           /* set on overwrite, cleared by task */
+    uint32_t drop_count;
+} rtsp_send_queue_t;
+
+static rtsp_send_queue_t s_send_q;
+static osThreadId_t s_send_task_handle = NULL;
+static uint8_t s_send_task_stack[RTSP_SEND_TASK_STACK_SIZE] AICAM_ALIGN_32;
+/* Send-side staging copy: send_queue_pop hands out a POINTER into the ring
+ * slot - if a slow client keeps the task busy past one ring wrap the
+ * producer overwrites that buffer mid-send and the client decodes a
+ * half-old/half-new frame (flash-back + smear until the next IDR). The
+ * task sends from this private copy instead. */
+static uint8_t s_send_staging[RTSP_MAX_FRAME_SIZE] AICAM_ALIGN_32;
+
+static void rtsp_send_task(void *argument);
+
+static aicam_bool_t send_queue_init(void)
+{
+    memset(&s_send_q, 0, sizeof(s_send_q));
+    s_send_q.mutex = osMutexNew(NULL);
+    s_send_q.sem_data = osSemaphoreNew(RTSP_SEND_QUEUE_SIZE, 0, NULL);
+    if (!s_send_q.mutex || !s_send_q.sem_data) {
+        return AICAM_FALSE;
+    }
+    for (int i = 0; i < RTSP_SEND_QUEUE_SIZE; i++) {
+        s_send_q.frame_buffers[i] = buffer_malloc_aligned(RTSP_MAX_FRAME_SIZE, 32);
+        if (!s_send_q.frame_buffers[i]) {
+            LOG_SVC_ERROR("RTSP: send queue alloc failed (slot %d)", i);
+            return AICAM_FALSE;
+        }
+        s_send_q.frames[i].data = s_send_q.frame_buffers[i];
+    }
+    return AICAM_TRUE;
+}
+
+static void send_queue_deinit(void)
+{
+    for (int i = 0; i < RTSP_SEND_QUEUE_SIZE; i++) {
+        if (s_send_q.frame_buffers[i]) {
+            buffer_free(s_send_q.frame_buffers[i]);
+            s_send_q.frame_buffers[i] = NULL;
+        }
+    }
+    if (s_send_q.sem_data) { osSemaphoreDelete(s_send_q.sem_data); s_send_q.sem_data = NULL; }
+    if (s_send_q.mutex) { osMutexDelete(s_send_q.mutex); s_send_q.mutex = NULL; }
+}
+
+/* Non-blocking; overwrites the OLDEST unread entry when full. */
+static aicam_result_t send_queue_push(const uint8_t *data, uint32_t size,
+                                      aicam_bool_t is_keyframe)
+{
+    if (size > RTSP_MAX_FRAME_SIZE) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+    osMutexAcquire(s_send_q.mutex, osWaitForever);
+    uint32_t write_pos = s_send_q.head % RTSP_SEND_QUEUE_SIZE;
+    rtsp_frame_entry_t *entry = &s_send_q.frames[write_pos];
+    if (entry->valid) {
+        s_send_q.dropped = 1;
+        s_send_q.drop_count++;
+    }
+    memcpy(entry->data, data, size);
+    entry->size = size;
+    entry->is_keyframe = is_keyframe;
+    entry->valid = AICAM_TRUE;
+    s_send_q.head++;
+    osMutexRelease(s_send_q.mutex);
+    osSemaphoreRelease(s_send_q.sem_data);
+    return AICAM_OK;
+}
+
+/* Blocking with timeout; AICAM_ERROR_TIMEOUT when empty. */
+static aicam_result_t send_queue_pop(rtsp_frame_entry_t *out)
+{
+    if (osSemaphoreAcquire(s_send_q.sem_data, 100) != osOK) {
+        return AICAM_ERROR_TIMEOUT;
+    }
+    osMutexAcquire(s_send_q.mutex, osWaitForever);
+    uint32_t read_pos = s_send_q.tail % RTSP_SEND_QUEUE_SIZE;
+    rtsp_frame_entry_t *entry = &s_send_q.frames[read_pos];
+    if (!entry->valid) {
+        osMutexRelease(s_send_q.mutex);
+        return AICAM_ERROR_TIMEOUT;
+    }
+    *out = *entry;
+    entry->valid = AICAM_FALSE;
+    s_send_q.tail++;
+    osMutexRelease(s_send_q.mutex);
+    return AICAM_OK;
+}
 
 /* ==================== Forward Declarations ==================== */
 
@@ -308,6 +427,24 @@ bind_ok:
         return AICAM_ERROR;
     }
 
+    /* Async send queue + dedicated send task (frame sends must never run
+     * on the encoder thread - see the queue block above). */
+    if (!send_queue_init()) {
+        LOG_SVC_ERROR("RTSP: send queue init failed");
+        /* streaming won't work, but the control server can still run */
+    } else {
+        osThreadAttr_t send_attr = {
+            .name = "rtsp_send",
+            .stack_size = RTSP_SEND_TASK_STACK_SIZE,
+            .stack_mem = s_send_task_stack,
+            .priority = RTSP_TASK_PRIORITY,
+        };
+        s_send_task_handle = osThreadNew(rtsp_send_task, NULL, &send_attr);
+        if (!s_send_task_handle) {
+            LOG_SVC_ERROR("RTSP: failed to create send task");
+        }
+    }
+
     LOG_SVC_INFO("RTSP service started on port %lu", (unsigned long)g_rtsp_ctx.listen_port);
     return AICAM_OK;
 }
@@ -338,6 +475,14 @@ aicam_result_t rtsp_service_stop(void)
         g_rtsp_ctx.clients[i].in_use = AICAM_FALSE;
     }
     osMutexRelease(g_rtsp_ctx.mutex);
+
+    /* Join the send task first (running=FALSE above ends its loop) and
+     * release its queue buffers. */
+    if (s_send_task_handle) {
+        osDelay(150); /* pop timeout is 100 ms */
+        s_send_task_handle = NULL;
+    }
+    send_queue_deinit();
 
     /* Wait for the server task to exit (up to 3 s).
      * The task closes all sockets itself after exiting the select loop,
@@ -440,6 +585,11 @@ static void rtsp_release_client(rtsp_client_t *client)
     client->session_id[0] = '\0';
     client->nonce[0] = '\0';
     client->client_rtp_port = 0;
+    client->interleaved = AICAM_FALSE;
+    client->interleave_rtp_channel = 0;
+    client->interleave_rtcp_channel = 0;
+    client->send_errors = 0;
+    client->stalled = AICAM_FALSE;
     client->client_rtcp_port = 0;
     client->server_rtp_port = 0;
     client->rtp_seq = 0;
@@ -667,74 +817,109 @@ static aicam_result_t rtsp_on_frame(const video_hub_frame_t *frame, void *user_d
     if (!frame || !frame->data || frame->size == 0) {
         return AICAM_OK;
     }
+    /* Encoder-thread context: enqueue only. A copy here costs ~50us for a
+     * 60KB frame; everything socket-related happens in rtsp_send_task. */
+    return send_queue_push(frame->data, frame->size, frame->is_keyframe);
+}
 
-    static uint32_t frame_log_counter = 0;
-    frame_log_counter++;
+/* Dedicated send task: owns ALL RTP sends (UDP + interleaved TCP) so a
+ * stalled client can never stall the encoder pipeline. select()-guarded
+ * writes with a bounded budget (see rtp_sendto); on failure the client
+ * drops to keyframe-wait (recovery at the next IDR, <=1 s) and repeated
+ * failures release the client entirely. */
+static void rtsp_send_task(void *argument)
+{
+    (void)argument;
+    LOG_SVC_INFO("RTSP: send task started");
+    static uint32_t send_frame_count = 0;
 
-    osMutexAcquire(g_rtsp_ctx.mutex, osWaitForever);
-
-    /* Count playing clients */
-    uint32_t playing_count = 0;
-    uint32_t waiting_count = 0;
-    for (int i = 0; i < RTSP_MAX_CLIENTS; i++) {
-        if (g_rtsp_ctx.clients[i].playing) {
-            playing_count++;
-            if (g_rtsp_ctx.clients[i].waiting_for_keyframe) waiting_count++;
-        }
-    }
-
-    if (playing_count == 0) {
-        osMutexRelease(g_rtsp_ctx.mutex);
-        return AICAM_OK;
-    }
-
-    /* Log first 10 frames, keyframes, and every 100th frame */
-    if (frame_log_counter <= 10 || frame->is_keyframe ||
-        (frame_log_counter % 100) == 0) {
-        LOG_SVC_INFO("RTSP on_frame #%lu: size=%lu key=%d playing=%lu waiting_kf=%lu",
-                     (unsigned long)frame_log_counter,
-                     (unsigned long)frame->size, frame->is_keyframe,
-                     (unsigned long)playing_count, (unsigned long)waiting_count);
-    }
-
-    for (int i = 0; i < RTSP_MAX_CLIENTS; i++) {
-        rtsp_client_t *client = &g_rtsp_ctx.clients[i];
-        if (!client->playing) continue;
-
-        /* Skip P-frames for clients waiting for their first keyframe */
-        if (client->waiting_for_keyframe && !frame->is_keyframe) {
+    while (g_rtsp_ctx.running) {
+        rtsp_frame_entry_t entry;
+        if (send_queue_pop(&entry) != AICAM_OK) {
             continue;
         }
 
-        /*
-         * Generate RTP timestamp from frame counter, not from source timestamp.
-         * The encoder's frame->timestamp is in seconds (Unix time), which lacks
-         * sub-second resolution - all frames within the same second would get
-         * the same RTP timestamp, causing VLC to freeze after one frame.
-         * Instead, use a per-client frame counter at 90kHz / 30fps = 3000 ticks/frame.
-         */
-        #define RTP_TS_PER_FRAME    3000    /* 90kHz / 30fps */
-        uint32_t rtp_ts = client->rtp_frame_index * RTP_TS_PER_FRAME;
-        client->rtp_frame_index++;
+        /* Copy out of the ring BEFORE sending (see staging note above). */
+        memcpy(s_send_staging, entry.data, entry.size);
+        entry.data = s_send_staging;
 
-        /* Send SPS/PPS before keyframe with the SAME timestamp as the keyframe */
-        if (frame->is_keyframe && g_rtsp_ctx.sps_pps_valid) {
-            client->waiting_for_keyframe = AICAM_FALSE;
-            rtsp_rtp_send_single_nal(client,
-                g_rtsp_ctx.sps_data, g_rtsp_ctx.sps_size,
-                rtp_ts, 0);
-            rtsp_rtp_send_single_nal(client,
-                g_rtsp_ctx.pps_data, g_rtsp_ctx.pps_size,
-                rtp_ts, 0);
+        osMutexAcquire(g_rtsp_ctx.mutex, osWaitForever);
+
+        /* Frames were dropped (queue full / slow consumers): every playing
+         * client must resync at the next keyframe, or they decode a broken
+         * reference chain and show green/smeared video. */
+        if (s_send_q.dropped) {
+            s_send_q.dropped = 0;
+            for (int i = 0; i < RTSP_MAX_CLIENTS; i++) {
+                if (g_rtsp_ctx.clients[i].playing) {
+                    g_rtsp_ctx.clients[i].waiting_for_keyframe = AICAM_TRUE;
+                }
+            }
+            LOG_SVC_WARN("RTSP: send queue overflow (total drops=%lu), clients resync at next IDR",
+                         (unsigned long)s_send_q.drop_count);
         }
 
-        rtsp_rtp_send_frame(client,
-            frame->data, frame->size,
-            frame->is_keyframe, rtp_ts);
-    }
+        for (int i = 0; i < RTSP_MAX_CLIENTS; i++) {
+            rtsp_client_t *client = &g_rtsp_ctx.clients[i];
+            if (!client->playing || !client->in_use) {
+                continue;
+            }
+            if (client->waiting_for_keyframe && !entry.is_keyframe) {
+                continue;
+            }
 
-    osMutexRelease(g_rtsp_ctx.mutex);
-    return AICAM_OK;
+            /* RTP timestamp from a per-client frame counter (90kHz / 30fps):
+             * the source timestamp lacks sub-second resolution. */
+            #define RTP_TS_PER_FRAME    3000
+            uint32_t rtp_ts = client->rtp_frame_index * RTP_TS_PER_FRAME;
+            client->rtp_frame_index++;
+
+            aicam_result_t ret = AICAM_OK;
+            if (entry.is_keyframe && g_rtsp_ctx.sps_pps_valid) {
+                client->waiting_for_keyframe = AICAM_FALSE;
+                ret = rtsp_rtp_send_single_nal(client,
+                        g_rtsp_ctx.sps_data, g_rtsp_ctx.sps_size, rtp_ts, 0);
+                if (ret == AICAM_OK) {
+                    ret = rtsp_rtp_send_single_nal(client,
+                            g_rtsp_ctx.pps_data, g_rtsp_ctx.pps_size, rtp_ts, 0);
+                }
+            }
+            if (ret == AICAM_OK) {
+                ret = rtsp_rtp_send_frame(client, entry.data, entry.size,
+                                          entry.is_keyframe, rtp_ts);
+            }
+
+            if (ret != AICAM_OK) {
+                client->send_errors++;
+                client->waiting_for_keyframe = AICAM_TRUE;
+                if (client->send_errors >= RTSP_SEND_ERROR_LIMIT) {
+                    /* NEVER close the socket from here: the server task
+                     * still selects on it; a closed+reused fd makes it read
+                     * foreign connections (mongoose HTTP responses showed
+                     * up as "Unknown method" requests). Mark it and let the
+                     * server task - the socket owner - do the release. */
+                    LOG_SVC_WARN("RTSP: client %d stalled (%d send errors), deferred release",
+                                 i, client->send_errors);
+                    client->playing = AICAM_FALSE;
+                    client->stalled = AICAM_TRUE;
+                }
+            } else {
+                client->send_errors = 0;
+    client->stalled = AICAM_FALSE;
+            }
+        }
+
+        send_frame_count++;
+        if (send_frame_count <= 10 || (send_frame_count % 100) == 0) {
+            LOG_SVC_INFO("RTSP: send task #%lu (size=%lu key=%d drops=%lu)",
+                         (unsigned long)send_frame_count,
+                         (unsigned long)entry.size, entry.is_keyframe,
+                         (unsigned long)s_send_q.drop_count);
+        }
+
+        osMutexRelease(g_rtsp_ctx.mutex);
+    }
+    LOG_SVC_INFO("RTSP: send task exited");
 }
 
 /* ==================== Accept & Client I/O ==================== */
@@ -893,6 +1078,12 @@ static void rtsp_server_task(void *arg)
 
         osMutexAcquire(g_rtsp_ctx.mutex, osWaitForever);
         for (int i = 0; i < RTSP_MAX_CLIENTS; i++) {
+            /* The send task defers stalled clients here: this task owns the
+             * sockets, so it is the only context allowed to close them. */
+            if (g_rtsp_ctx.clients[i].in_use && g_rtsp_ctx.clients[i].stalled) {
+                LOG_SVC_WARN("RTSP: releasing stalled client %d (server task)", i);
+                rtsp_release_client(&g_rtsp_ctx.clients[i]);
+            }
             int fd = g_rtsp_ctx.clients[i].tcp_socket;
             if (g_rtsp_ctx.clients[i].in_use && fd >= 0) {
                 FD_SET(fd, &read_fds);

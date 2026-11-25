@@ -26,7 +26,7 @@
 # Keep MINOR/PATCH/BUILD here as the release line within that generation.
 VERSION_MAJOR  := 4
 VERSION_MINOR  := 3
-VERSION_PATCH  := 1
+VERSION_PATCH  := 2
 # Version suffix (optional, for alpha/beta/rc releases)
 # Examples: alpha, beta, rc1, dev
 # Leave empty for production releases
@@ -76,7 +76,7 @@ endif
 # Format: MAJOR.MINOR.PATCH.BUILD or empty
 FSBL_VERSION_OVERRIDE    := 1.0.3.1
 APP_VERSION_OVERRIDE     := 
-WEB_VERSION_OVERRIDE     := 1.5.0.8
+WEB_VERSION_OVERRIDE     := 1.5.1.0
 # Model OTA: $(STEDGEAI_BIT).$(MODEL_VERSION_OVERRIDE) — BIT auto in stedgeai.mk (2.2->2, 3.0->3, 4.0->4)
 # APP major is also set to STEDGEAI_BIT in stedgeai.mk (aligned with MODEL prefix)
 MODEL_VERSION_OVERRIDE   := 0.0.0

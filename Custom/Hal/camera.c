@@ -13,6 +13,8 @@
 #include "isp_services.h"
 #include "json_config_mgr.h"    /* IMAGE_ISP_MODE_* for camera_fill_isp_iq_for_mode */
 #include "board_hw.h"           /* board_is_ir() for the IR-CUT filter */
+#include "cmw_os04c10.h"        /* CMW_OS04C10 exposure-cap override (motion-blur) */
+#include "os04c10_reg.h"        /* OS04C10_EXPOSURE_MAX */
 #include "main.h"               /* IR_CUT_A_* pin defines */
 
 /* AE restart state handed to the ISP middleware (QS fast wake): the AE loop
@@ -48,6 +50,32 @@ int camera_ae_set_last(uint32_t exposure_us, uint32_t gain_mdb)
 aicam_bool_t camera_ae_last_valid(void)
 {
     return s_ae_restart_state.sensorConfigured ? AICAM_TRUE : AICAM_FALSE;
+}
+
+int camera_exposure_cap_set(uint32_t cap_us)
+{
+    /* Motion-blur knob: cap_us=0 restores the driver default (33266).
+     * Range guard: 1000us floor rejects garbage, ceiling = driver max.
+     * Applied twice on purpose: the driver-side override survives camera
+     * re-init (GetSensorInfo), and the live ISP-handle mirror takes effect
+     * on the very next AE pass (the algo dereferences sensorInfo each
+     * iteration) — no stream restart needed. */
+    if (cap_us != 0U && (cap_us < 1000U || cap_us > OS04C10_EXPOSURE_MAX)) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+    CMW_OS04C10_SetExposureCapOverride(cap_us);
+    ISP_HandleTypeDef *hIsp = CMW_CAMERA_GetISPHandle();
+    if (hIsp != NULL) {
+        hIsp->sensorInfo.exposure_max =
+            (cap_us != 0U) ? cap_us : OS04C10_EXPOSURE_MAX;
+    }
+    return AICAM_OK;
+}
+
+uint32_t camera_exposure_cap_get(void)
+{
+    uint32_t cap = CMW_OS04C10_GetExposureCapOverride();
+    return (cap != 0U) ? cap : OS04C10_EXPOSURE_MAX;
 }
 
 int camera_stats_get_luma(uint8_t *luma, uint32_t *frame_id)
@@ -92,23 +120,25 @@ int camera_ae_get_target(uint8_t *target)
 #define CAMERA_TASK_DELAY_MS            0
 /* IR-CUT filter state owned by this component (IR boards): 0 = day (color),
  * 1 = night (IR), 0xFF = unavailable (standard board / not initialized).
- * Polarity is an implementation detail: LOW = day, HIGH = night (hardware
- * verified).
+ * Polarity is an implementation detail: NEW filter (2026-11 hardware swap)
+ * is INVERTED vs the old one — HIGH = day, LOW = night.
  *
  * The filter driver is edge-driven and the lens position is unknown after
- * power-up. The pin idles HIGH (board strap pull-up + the HIGH claim in
- * camera_init), so cameraProcess performs a single deterministic homing
- * edge — LOW before CAM_Init — and keeps it: the LOW level persists through
- * the whole sensor bring-up (settle window), leaving the system in the DAY
- * position by default. CAM_CMD_IRCUT_SET then only writes on an actual
- * level change; a same-level command is a no-op. */
+ * power-up. Homing keeps the previously shipped two-stage timing, mirrored:
+ * camera_init claims the pin at the strap level (HIGH = day, no edge — the
+ * sensor rail has just been enabled and an edge this early could precede
+ * driver power-up), then cameraProcess issues the one deterministic falling
+ * edge (LOW = night) before CAM_Init, after a short rail-stabilization
+ * delay. NIGHT wakes then need zero further mechanical moves (same-level
+ * switch commands are no-ops), DAY wakes get one edge from the day/night
+ * logic. CAM_CMD_IRCUT_SET only writes on an actual level change. */
 static uint8_t s_ircut_state = 0xFF;          /* commanded state (0/1) or 0xFF */
 
-/* Level write for a commanded state (LOW = day, HIGH = night). */
+/* Level write for a commanded state (NEW filter: HIGH = day, LOW = night). */
 static void camera_ircut_write(uint8_t night)
 {
     HAL_GPIO_WritePin(IR_CUT_A_GPIO_Port, IR_CUT_A_Pin,
-                      night ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                      night ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 #define CAMERA_ISP_SEM_TIMEOUT_MS       50
 #define CAMERA_BUFFER_TIMEOUT_MS        50
@@ -121,6 +151,7 @@ static int pipe_buffer_acquire(pipe_buffer_t *pipe_buffer, pipe_params_t *pipe_p
 static int pipe_buffer_release(pipe_buffer_t *pipe_buffer, pipe_params_t *pipe_param, camera_dq_t *dq);
 
 static camera_t g_camera = {0};
+
 const osThreadAttr_t cameraTask_attributes = {
     .name = "cameraTask",
     .priority = (osPriority_t) osPriorityRealtime,
@@ -221,6 +252,7 @@ pipe_buffer_t* buffer_get_latest_ready(pipe_buffer_t *bufs, int nb, camera_dq_t 
     pipe_buffer_t* latest = NULL;
     uint32_t max_frame_id = 0;
 
+
     for (int i = 0; i < nb; ++i) {
         if (bufs[i].state >= BUFFER_READY && !bufs[i].is_locked) {
             if (latest == NULL || bufs[i].frame_id > max_frame_id) {
@@ -250,6 +282,8 @@ pipe_buffer_t* buffer_get_latest_ready(pipe_buffer_t *bufs, int nb, camera_dq_t 
         }
         if (latest != NULL) latest->owner_count++;
     }
+
+
     // printf("latest buffer(%p) frame_id=%ld, owner_count=%d, requester=%p\r\n", latest, latest ? latest->frame_id : -1, latest ? latest->owner_count : -1, requester);
     return latest;
 }
@@ -303,14 +337,14 @@ void camera_fill_isp_iq_scene(cam_iq_scene_t scene, ISP_IQParamTypeDef *out_iq)
             memcpy(out_iq, &ISP_IQParamCacheInit_OS04C10_NIGHT, sizeof(ISP_IQParamTypeDef));
         }
     } else {
-        /* outdoor: middle horizontal band tuned in the 10-28 IQTune session
-         * (user-requested region, ~full width x 44% height slightly below
-         * center); runtime override, profile statArea stays untouched. */
+        /* outdoor: middle band re-tuned in the 11-24 IQTune session (the
+         * D65 AWB recalibration export); kept in sync with the profile's
+         * statAreaStatic so the effective region matches the tuning. */
         if (sensor == CMW_OS04C10_Sensor) {
-            out_iq->statAreaStatic.X0 = 58U;
-            out_iq->statAreaStatic.Y0 = 523U;
-            out_iq->statAreaStatic.XSize = 2578U;
-            out_iq->statAreaStatic.YSize = 629U;
+            out_iq->statAreaStatic.X0 = 54U;
+            out_iq->statAreaStatic.Y0 = 358U;
+            out_iq->statAreaStatic.XSize = 2595U;
+            out_iq->statAreaStatic.YSize = 869U;
         }
     }
 }
@@ -403,24 +437,25 @@ int camera_apply_isp_iq_runtime(ISP_HandleTypeDef *hIsp, ISP_IQParamTypeDef *iq)
         }
         cached->AWBAlgo.enable = 0;
     } else if (!cached->AWBAlgo.enable) {
-        /* AWB off -> on (IR night / grayscale -> color profile): re-enable
-           the AWB algorithm. The middleware state machine re-initializes on
-           the next frame (isp_algo.c: enableCurrent==false -> INIT) and
-           takes back the ISP gains and color conversion from the color
-           profile, replacing the grayscale blocks the AWB-off profile had
-           written. Without this, the grayscale CCM stayed in the hardware
-           after switching back to a color mode — the image never regained
-           color (one-way gate since f307f6c8).
-           The cached static gain/CCM blocks must ALSO be refreshed to the
-           color profile's values even though the AWB (not the static path)
-           drives the hardware now: the memcmp guards in the AWB-off branch
-           compare against the cache, and stale night values there would
-           make a LATER switch back to night skip the writes and leave the
-           AWB's color CCM in the hardware (stuck-at-color bug, round 2). */
-        ISP_SetWBRefMode(hIsp, 1, 0);
-        cached->AWBAlgo.enable = 1;
+        /* AWB off -> on (IR night / grayscale -> color profile): copy the
+           FULL AWB configuration from the incoming color profile before
+           re-enabling the algorithm. Three things must be synced:
+           1. cached->AWBAlgo = iq->AWBAlgo — the AWB curve data (reference
+              color temps, per-point gains and CCM coefficients). The NIGHT
+              profile stores grayscale coefficients in the AWB curve; if the
+              cache keeps them, the re-enabled AWB reads NIGHT's curve and
+              writes grayscale CCM even in color mode — the image stays
+              black-and-white after a NIGHT-mode reboot (field-verified:
+              only "set NIGHT + power cycle + switch to DAY" triggered it).
+           2. cached->ispGainStatic / colorConvStatic — so a later switch
+              back to an AWB-off profile sees the correct diff baseline.
+           3. ISP_SetWBRefMode — re-enables the algorithm; the middleware
+              state machine re-initializes on the next frame and now reads
+              the COLOR curve from the synced cache. */
+        cached->AWBAlgo = iq->AWBAlgo;   /* full curve sync, sets enable=1 */
         cached->ispGainStatic = iq->ispGainStatic;
         cached->colorConvStatic = iq->colorConvStatic;
+        ISP_SetWBRefMode(hIsp, 1, 0);    /* trigger AWB re-init */
     }
 
     if (memcmp(&iq->AECAlgo.exposureCompensation, &cached->AECAlgo.exposureCompensation,
@@ -546,7 +581,12 @@ static int DCMIPP_Pipe2Init(camera_t *camera)
     dcmipp_conf.output_format = camera->pipe2_param.format;
     dcmipp_conf.output_bpp = camera->pipe2_param.bpp;
     dcmipp_conf.mode = CMW_Aspect_ratio_manual_roi;
-    dcmipp_conf.enable_swap = 1;
+    /* Byte swap is only meaningful for the packed-RGB888 pipe2 format
+     * (yields B-G-R bytes the downstream chain is calibrated against). The
+     * product pipe2 format is RGB565 - swap OFF (swap was cleared of any
+     * role in the write-contention corruption either way). */
+    dcmipp_conf.enable_swap =
+        (camera->pipe2_param.format == DCMIPP_PIXEL_PACKER_FORMAT_RGB888_YUV444_1) ? 1 : 0;
     /* -1: leave per-pipe gamma to ISP_SVC_ISP_SetGamma (both pipes).
     Passing 0 would DisableGammaConversion here and desync Pipe2 after
     model reload, because camera_start no longer re-runs ISP_Start. */
@@ -564,6 +604,11 @@ static int DCMIPP_IpPlugInit(DCMIPP_HandleTypeDef *hdcmipp)
     DCMIPP_IPPlugConfTypeDef ipplug_conf = { 0 };
     int ret;
 
+    /* STOCK configuration - do not retune without hardware documentation:
+     * an experiment giving CLIENT5 (PIPE1) a line-sized FIFO region and
+     * near-equal WLRU weights produced full-screen horizontal stripes on the
+     * PIPE2 preview; the DPREG word size / arbitration semantics evidently
+     * differ from the assumption used. */
     ipplug_conf.MemoryPageSize = DCMIPP_MEMORY_PAGE_SIZE_256BYTES;
 
     ipplug_conf.Client = DCMIPP_CLIENT2; /* aux pipe */
@@ -680,13 +725,18 @@ static void main_pipe_frame_event()
         }else{
             buffer_release_isr(buffer, &g_camera.pipe1_dq);
         }
-    }else if(buffer1 != NULL && buffer1->data != NULL){
+    }else if(buffer1 != NULL && buffer1->data != NULL && buffer1->state == BUFFER_READY){
         /*
          * buffer1 was marked BUFFER_READY above but the DCMIPP is about to
          * DMA into it; demote it so it cannot be handed out mid-write. Only
          * when buffer == NULL: otherwise buffer_acquire already promoted a
          * different buffer, and a second PROCESSING buffer would break
          * find_processing_buffer.
+         * STATE GUARD: a consumer may have grabbed buffer1 (IN_USE) between
+         * the set_ready above and here - DMAing into a held buffer is exactly
+         * the tearing the dual-snapshot forensics caught (97% of the frame
+         * replaced while the pipeline thread was dumping). If it was taken,
+         * DROP this frame instead of tearing a consumer's buffer.
          */
         if (buffer == NULL)
             buffer1->state = BUFFER_PROCESSING;
@@ -705,6 +755,17 @@ static void ancillary_pipe_frame_event()
     pipe_buffer_t *buffer,*buffer1;
     int ret;
     bool frame_is_valid = (g_camera.skip_frame_counter == 0);
+
+
+    /* The shared startup skip counter is normally burned by PIPE1's frame
+     * events. With PIPE1 fully stopped (EXPERIMENT C), pipe2 must burn it
+     * itself or skip never reaches 0 and every pipe2 frame is discarded as
+     * an invalid startup frame - no buffer is ever published and the preview
+     * starves. Guarded on pipe1 being stopped so normal dual-pipe mode keeps
+     * the exact original skip pacing. */
+    if (g_camera.state.pipe1_state != PIPE_START && g_camera.skip_frame_counter > 0){
+        g_camera.skip_frame_counter--;
+    }
 
     // check pipe state and buffer validity
     if(g_camera.pipe2_buffer == NULL || g_camera.state.pipe2_state != PIPE_START){
@@ -733,8 +794,9 @@ static void ancillary_pipe_frame_event()
         }else{
             buffer_release_isr(buffer, &g_camera.pipe2_dq);
         }
-    }else if(buffer1 != NULL && buffer1->data != NULL){
-        /* Same demote as main_pipe_frame_event above. */
+    }else if(buffer1 != NULL && buffer1->data != NULL && buffer1->state == BUFFER_READY){
+        /* Same demote as main_pipe_frame_event above, incl. the IN_USE
+         * guard: never DMA into a buffer a consumer already holds. */
         if (buffer == NULL)
             buffer1->state = BUFFER_PROCESSING;
         ret = HAL_DCMIPP_PIPE_SetMemoryAddress(CMW_CAMERA_GetDCMIPPHandle(), DCMIPP_PIPE2,
@@ -1062,16 +1124,20 @@ static void cameraProcess(void *argument)
     osDelay(CAMERA_TASK_DELAY_MS);
 #endif
     /* IR-CUT homing edge (IR boards): the filter driver is edge-driven and
-     * its lens position is unknown after power-up. The pin idles HIGH (strap
-     * pull-up + the camera_init claim), so pulling it LOW here is one
-     * deterministic edge — the LOW level then persists through the whole
-     * CAM_Init sensor bring-up (settle window), homing the filter into the
-     * DAY position. Zero added boot time, completes BEFORE sem_init is
-     * released, and the system boots in DAY mode by default. */
+     * its lens position is unknown after power-up. The pin was claimed at
+     * the strap level (HIGH = day, no edge) in camera_init; pulling it LOW
+     * here is the one deterministic edge — it homes the new (inverted)
+     * filter into the NIGHT position, the boot default. The sensor rail was
+     * enabled in camera_init a moment ago: give it a short stabilization
+     * delay first so the edge cannot precede driver power-up (review
+     * feedback). The LOW level then persists through the whole CAM_Init
+     * sensor bring-up (settle window), and the system boots in NIGHT mode
+     * by default. */
     const aicam_bool_t ircut_home =
         (board_is_ir() == AICAM_TRUE) && (s_ircut_state != 0xFFU);
     if (ircut_home) {
-        camera_ircut_write(0U); /* LOW = day: the homing edge */
+        osDelay(10); /* sensor-rail stabilization before the homing edge */
+        camera_ircut_write(1U); /* LOW = night: the homing edge */
     }
     ret = CAM_Init(camera);
     // printf("camera init end, %lu ms\r\n", HAL_GetTick());
@@ -1081,7 +1147,7 @@ static void cameraProcess(void *argument)
         osThreadExit();
         return;
     }
-    if (ircut_home) s_ircut_state = 0U; /* homed to DAY — LOW stays as the boot default */
+    if (ircut_home) s_ircut_state = 1U; /* homed to NIGHT — LOW stays as the boot default */
     camera->is_init = true;
     osSemaphoreRelease(camera->sem_init);
     while (camera->is_init) {
@@ -1382,11 +1448,12 @@ static int camera_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsig
             break;
 
         case CAM_CMD_RETURN_PIPE1_BUFFER:
-            if(camera->state.pipe1_state != PIPE_START){
+            if (camera->state.pipe1_state != PIPE_START){
                 ret = AICAM_ERROR_NOT_FOUND;
                 break;
             }
             // printf("Return PIPE1 buffer: 0x%p, osThreadGetId: 0x%p\r\n", ubuf, osThreadGetId());
+            ret = AICAM_ERROR_NOT_FOUND; /* caller can fall back to the other pipe's pool */
             for (i = 0; i < camera->pipe1_param.buffer_nb; ++i) {
                 if (camera->pipe1_buffer[i].data == ubuf) {
                     camera->pipe1_buffer[i].return_count++;
@@ -1400,11 +1467,12 @@ static int camera_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsig
             break;
 
         case CAM_CMD_RETURN_PIPE2_BUFFER:
-            if(camera->state.pipe2_state != PIPE_START){
+            if (camera->state.pipe2_state != PIPE_START){
                 ret = AICAM_ERROR_NOT_FOUND;
                 break;
             }
             // printf("Return PIPE2 buffer: 0x%p, osThreadGetId: 0x%p\r\n", ubuf, osThreadGetId());
+            ret = AICAM_ERROR_NOT_FOUND; /* caller can fall back to the other pipe's pool */
             for (i = 0; i < camera->pipe2_param.buffer_nb; ++i) {
                 if (camera->pipe2_buffer[i].data == ubuf) {
                     camera->pipe2_buffer[i].return_count++;
@@ -1595,7 +1663,8 @@ static int camera_ioctl(void *priv, unsigned int cmd, unsigned char* ubuf, unsig
                component holds since camera_init; this ioctl waits for the
                camera init semaphore, so the boot homing edge in
                cameraProcess has already established a deterministic
-               position (DAY by default). The driver acts on level CHANGES only — write on
+               position (NIGHT by default with the new filter). The driver
+               acts on level CHANGES only — write on
                an actual change, skip same-level commands. */
             if (ubuf == NULL) {
                 ret = AICAM_ERROR_INVALID_PARAM;
@@ -1690,15 +1759,33 @@ static int camera_init(void *priv)
     camera->pwr_handle = pwr_manager_get_handle(PWR_SENSOR_NAME);
     pwr_manager_acquire(camera->pwr_handle);
 
+    /* Motion-blur suppression (image config exposure_cap_us, NVS "img_exp_cap"):
+     * BEST-EFFORT early apply. camera_init runs in boot Step 3 while
+     * json_config initializes in Step 4, so this read usually fails and the
+     * override stays at the default — the AUTHORITATIVE boot-time apply is
+     * in device service init (init_default_camera_config), after the config
+     * system is up and still before any streaming starts. Config changes
+     * apply immediately via the image config PUT. */
+    {
+        image_config_t img_cfg;
+        if (json_config_get_device_service_image_config(&img_cfg) == AICAM_OK) {
+            CMW_OS04C10_SetExposureCapOverride(img_cfg.exposure_cap_us);
+        } else {
+            CMW_OS04C10_SetExposureCapOverride(0U); /* config unavailable: default */
+        }
+    }
+
     /* IR-CUT filter (IR boards, PE9) belongs to this component: its driver
      * chip is powered from the sensor rail acquired just above, so claiming
      * the pin here guarantees every CAM_CMD_IRCUT_SET write is powered —
      * day/night switching, sleep-wake captures and the CLI all go through
      * the camera ioctl. Standard boards never register the pin.
      *
-     * Claim at HIGH (the board strap holds the pin HIGH anyway): the
-     * cameraProcess homing edge pulls it LOW right after — that single
-     * edge per boot homes the filter and leaves the system in DAY mode. */
+     * Claim at HIGH (the board strap holds the pin HIGH anyway, so claiming
+     * at that level creates no edge while the sensor rail is still ramping):
+     * with the new (inverted) filter HIGH = day. cameraProcess then issues
+     * the one deterministic falling edge (LOW = night) as the boot default
+     * once the rail has stabilized. */
     if (board_is_ir() == AICAM_TRUE) {
         GPIO_InitTypeDef gpio = {0};
         __HAL_RCC_GPIOE_CLK_ENABLE();
@@ -1708,7 +1795,7 @@ static int camera_init(void *priv)
         gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
         HAL_GPIO_Init(IR_CUT_A_GPIO_Port, &gpio);
         HAL_GPIO_WritePin(IR_CUT_A_GPIO_Port, IR_CUT_A_Pin, GPIO_PIN_SET);
-        s_ircut_state = 1U; /* night — matches the level written above */
+        s_ircut_state = 0U; /* day — matches the HIGH level (new polarity) */
     } else {
         s_ircut_state = 0xFFU; /* not available on this board */
     }

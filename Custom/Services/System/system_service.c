@@ -757,50 +757,80 @@ static aicam_result_t unregister_pir_runtime_callback(void);
  }
  
  aicam_result_t system_controller_set_work_config(system_controller_t *controller,
-                                                 const work_mode_config_t *config)
+                                                 const work_mode_config_t *config,
+                                                 aicam_bool_t *pir_apply_failed,
+                                                 aicam_bool_t skip_pir_apply)
  {
      if (!controller || !controller->is_initialized || !config) {
          return AICAM_ERROR_INVALID_PARAM;
      }
-     
+
+     if (pir_apply_failed) {
+         *pir_apply_failed = AICAM_FALSE;
+     }
+
      aicam_work_mode_t old_mode = controller->current_work_mode;
-     
+
      // Update configuration
      memcpy(&controller->work_config, config, sizeof(work_mode_config_t));
      controller->current_work_mode = config->work_mode;
- 
+
      //log timer trigger configuration
      LOG_SVC_INFO("Timer trigger configuration: %s", config->timer_trigger.enable ? "enabled" : "disabled");
      LOG_SVC_INFO("Timer trigger capture mode: %d", config->timer_trigger.capture_mode);
      LOG_SVC_INFO("Timer trigger interval: %d", config->timer_trigger.interval_sec);
      LOG_SVC_INFO("Timer trigger time nodes: %d", config->timer_trigger.time_node_count);
-     for (int i = 0; i < config->timer_trigger.time_node_count; i++) {
+     for (uint32_t i = 0; i < config->timer_trigger.time_node_count; i++) {
          LOG_SVC_INFO("Timer trigger time node %d: %d", i, config->timer_trigger.time_node[i]);
      }
-    for (int i = 1; i < config->timer_trigger.time_node_count; i++) {
+    for (uint32_t i = 1; i < config->timer_trigger.time_node_count; i++) {
         LOG_SVC_INFO("Timer trigger weekdays %d: %d", i, config->timer_trigger.weekdays[i]);
     }
 
     // Sync PIR trigger enable state to wakeup source configuration
-    aicam_bool_t pir_was_enabled = controller->work_config.pir_trigger.enable;
+    aicam_bool_t pir_was_enabled = controller->wakeup_sources[WAKEUP_SOURCE_PIR].enabled;
     controller->wakeup_sources[WAKEUP_SOURCE_PIR].enabled = config->pir_trigger.enable;
-    LOG_SVC_INFO("PIR trigger configuration: %s (wakeup source enabled: %s)", 
+    LOG_SVC_INFO("PIR trigger configuration: %s, device_type: %d (wakeup source enabled: %s)",
                  config->pir_trigger.enable ? "enabled" : "disabled",
+                 (int)config->pir_trigger.device_type,
                  controller->wakeup_sources[WAKEUP_SOURCE_PIR].enabled ? "yes" : "no");
-    
-    // Configure PIR sensor if PIR trigger is enabled or configuration changed
-    if (config->pir_trigger.enable) {
+
+    /* Persist FIRST, before the (potentially slow / failing) chip write: an
+     * absent PIR sensor is a normal state — the parameters must survive no
+     * matter what the sensor does, because the sensor may be attached later
+     * (the sleep path re-applies the chip config on every sleep). */
+    uint32_t dbg_t0 = (uint32_t)rtc_get_uptime_ms();   /* stage timing: locate web-POST watchdog stalls */
+    aicam_result_t config_result = save_work_mode_config_to_nvs(controller);
+    LOG_SVC_DEBUG("[PIRDBG] nvs save done +%lu ms", (unsigned long)((uint32_t)rtc_get_uptime_ms() - dbg_t0));
+    if (config_result != AICAM_OK) {
+        LOG_SVC_ERROR("Failed to save work mode configuration persistently: %d", config_result);
+        // Continue execution even if save fails, as the configuration change is already applied
+    }
+
+    // Configure PIR sensor if PIR trigger is enabled or configuration changed.
+    // skip_pir_apply: partial-update callers (timer/remote endpoints) must not
+    // re-run the chip-level PIR write - it is a seconds-long bridge retry loop
+    // and has nothing to do with the field being changed.
+    if (config->pir_trigger.enable && !skip_pir_apply) {
         aicam_result_t pir_result = configure_pir_sensor(controller);
+        LOG_SVC_DEBUG("[PIRDBG] cfg pir done +%lu ms (ret %d)", (unsigned long)((uint32_t)rtc_get_uptime_ms() - dbg_t0), (int)pir_result);
         if (pir_result != AICAM_OK) {
             LOG_SVC_WARN("Failed to configure PIR sensor after config update: %d", pir_result);
+            /* Config is still saved below and retried at sleep/boot, but the
+             * caller must be able to surface the chip-level failure (the web
+             * UI shows a warning toast). */
+            if (pir_apply_failed) {
+                *pir_apply_failed = AICAM_TRUE;
+            }
         } else {
             LOG_SVC_INFO("PIR sensor configured after config update");
         }
-        
+
         // Register runtime callback if PIR trigger is newly enabled
         // Also ensure callback is registered if PIR was already enabled (for robustness)
         if (!pir_was_enabled) {
             pir_result = register_pir_runtime_callback(controller);
+            LOG_SVC_DEBUG("[PIRDBG] cb reg done +%lu ms (ret %d)", (unsigned long)((uint32_t)rtc_get_uptime_ms() - dbg_t0), (int)pir_result);
             if (pir_result != AICAM_OK) {
                 LOG_SVC_WARN("Failed to register PIR runtime callback: %d", pir_result);
             } else {
@@ -827,25 +857,19 @@ static aicam_result_t unregister_pir_runtime_callback(void);
             }
         }
     }
-    
-    // Save configuration to persistent storage
-     aicam_result_t config_result = save_work_mode_config_to_nvs(controller);
-     if (config_result != AICAM_OK) {
-         LOG_SVC_ERROR("Failed to save work mode configuration persistently: %d", config_result);
-         // Continue execution even if save fails, as the configuration change is already applied
-     }
-     
-     // Apply timer trigger configuration whenever work mode changes
-     aicam_result_t timer_result = apply_timer_trigger_config(controller, &config->timer_trigger);
+
+    // Apply timer trigger configuration whenever work mode changes
+    aicam_result_t timer_result = apply_timer_trigger_config(controller, &config->timer_trigger);
+    LOG_SVC_DEBUG("[PIRDBG] timer apply done +%lu ms (ret %d)", (unsigned long)((uint32_t)rtc_get_uptime_ms() - dbg_t0), (int)timer_result);
      if (timer_result != AICAM_OK) {
          LOG_SVC_ERROR("Failed to apply timer trigger configuration: %d", timer_result);
      }
-     
+
      // If work mode changed, trigger callback
      if (old_mode != config->work_mode && controller->work_callback) {
          controller->work_callback(old_mode, config->work_mode, controller->work_callback_user_data);
      }
-     
+
      LOG_SVC_DEBUG("Work mode configuration updated");
      return AICAM_OK;
  }
@@ -1783,8 +1807,13 @@ static void pir_value_change_callback(uint32_t pir_value)
     // Check trigger type match
     aicam_trigger_type_t trigger_type = controller->work_config.pir_trigger.trigger_type;
     aicam_bool_t should_trigger = AICAM_FALSE;
-    
-    switch (trigger_type) {
+
+    if (controller->work_config.pir_trigger.device_type != AICAM_PIR_DEVICE_IO) {
+        /* PIR chip mode: the conditioning IC already decided "motion" - every
+         * INT pulse is a trigger, trigger_type does not apply. */
+        should_trigger = AICAM_TRUE;
+    } else {
+        switch (trigger_type) {
         case AICAM_TRIGGER_TYPE_RISING:
             // Trigger on rising edge (0 -> 1)
             should_trigger = (pir_value == 1);
@@ -1808,6 +1837,7 @@ static void pir_value_change_callback(uint32_t pir_value)
         default:
             LOG_SVC_WARN("Unknown PIR trigger type: %d", trigger_type);
             return;
+        }
     }
     
     if (should_trigger) {
@@ -1904,34 +1934,40 @@ static uint32_t configure_u0_wakeup_sources(system_controller_t *controller, uin
         if (controller->work_config.pir_trigger.enable &&
             controller->wakeup_sources[WAKEUP_SOURCE_PIR].enabled &&
             controller->wakeup_sources[WAKEUP_SOURCE_PIR].low_power_supported) {
-            // Select PIR wakeup flag based on trigger type
-            switch (controller->work_config.pir_trigger.trigger_type) {
-                case AICAM_TRIGGER_TYPE_RISING:
-                    wakeup_flags |= PWR_WAKEUP_FLAG_PIR_RISING;
-                    LOG_SVC_INFO("PIR wakeup enabled in low power mode: rising edge");
-                    break;
-                case AICAM_TRIGGER_TYPE_FALLING:
-                    wakeup_flags |= PWR_WAKEUP_FLAG_PIR_FALLING;
-                    LOG_SVC_INFO("PIR wakeup enabled in low power mode: falling edge");
-                    break;
-                case AICAM_TRIGGER_TYPE_HIGH:
-                    wakeup_flags |= PWR_WAKEUP_FLAG_PIR_HIGH;
-                    LOG_SVC_INFO("PIR wakeup enabled in low power mode: high level");
-                    break;
-                case AICAM_TRIGGER_TYPE_LOW:
-                    wakeup_flags |= PWR_WAKEUP_FLAG_PIR_LOW;
-                    LOG_SVC_INFO("PIR wakeup enabled in low power mode: low level");
-                    break;
-                case AICAM_TRIGGER_TYPE_BOTH_EDGES:
-                    // Both edges: use rising edge as default
-                    wakeup_flags |= PWR_WAKEUP_FLAG_PIR_RISING;
-                    LOG_SVC_INFO("PIR wakeup enabled in low power mode: both edges (using rising)");
-                    break;
-                default:
-                    // Default to rising edge
-                    wakeup_flags |= PWR_WAKEUP_FLAG_PIR_RISING;
-                    LOG_SVC_INFO("PIR wakeup enabled in low power mode: default (rising edge)");
-                    break;
+            /* PIR chip mode: the conditioning IC drives a motion pulse on its
+             * INT output - always arm the rising edge regardless of what the
+             * (hidden) trigger_type field holds. IO mode: the wake edge is
+             * user-selected via trigger_type. */
+            if (controller->work_config.pir_trigger.device_type == AICAM_PIR_DEVICE_IO) {
+                switch (controller->work_config.pir_trigger.trigger_type) {
+                    case AICAM_TRIGGER_TYPE_RISING:
+                        wakeup_flags |= PWR_WAKEUP_FLAG_PIR_RISING;
+                        LOG_SVC_INFO("IO wakeup enabled in low power mode: rising edge");
+                        break;
+                    case AICAM_TRIGGER_TYPE_FALLING:
+                        wakeup_flags |= PWR_WAKEUP_FLAG_PIR_FALLING;
+                        LOG_SVC_INFO("IO wakeup enabled in low power mode: falling edge");
+                        break;
+                    case AICAM_TRIGGER_TYPE_HIGH:
+                        wakeup_flags |= PWR_WAKEUP_FLAG_PIR_HIGH;
+                        LOG_SVC_INFO("IO wakeup enabled in low power mode: high level");
+                        break;
+                    case AICAM_TRIGGER_TYPE_LOW:
+                        wakeup_flags |= PWR_WAKEUP_FLAG_PIR_LOW;
+                        LOG_SVC_INFO("IO wakeup enabled in low power mode: low level");
+                        break;
+                    case AICAM_TRIGGER_TYPE_BOTH_EDGES:
+                        wakeup_flags |= PWR_WAKEUP_FLAG_PIR_RISING;
+                        LOG_SVC_INFO("IO wakeup enabled in low power mode: both edges (using rising)");
+                        break;
+                    default:
+                        wakeup_flags |= PWR_WAKEUP_FLAG_PIR_RISING;
+                        LOG_SVC_INFO("IO wakeup enabled in low power mode: default (rising edge)");
+                        break;
+                }
+            } else {
+                wakeup_flags |= PWR_WAKEUP_FLAG_PIR_RISING;
+                LOG_SVC_INFO("PIR wakeup enabled in low power mode: rising edge (chip INT)");
             }
         }
          
@@ -2151,13 +2187,20 @@ static aicam_result_t configure_pir_sensor(system_controller_t *controller)
     if (!controller) {
         return AICAM_ERROR_INVALID_PARAM;
     }
-    
+
     // Check if PIR wakeup is enabled
     if (!controller->work_config.pir_trigger.enable ||
         !controller->wakeup_sources[WAKEUP_SOURCE_PIR].enabled) {
         return AICAM_OK;  // PIR not enabled, skip configuration
     }
-    
+
+    /* Plain IO signal on the wake input: there is no PIR conditioning chip to
+     * program - the wake edge comes from trigger_type alone. */
+    if (controller->work_config.pir_trigger.device_type == AICAM_PIR_DEVICE_IO) {
+        LOG_SVC_INFO("PIR input is IO mode - skipping chip configuration");
+        return AICAM_OK;
+    }
+
     // Configure PIR sensor with parameters from configuration
     ms_bridging_pir_cfg_t pir_cfg = {0};
     pir_cfg.sensitivity_level = controller->work_config.pir_trigger.sensitivity_level;
@@ -3121,7 +3164,7 @@ aicam_bool_t system_service_requires_only_essential_services(wakeup_source_type_
      work_mode_config_t work_config;
      aicam_result_t result = json_config_get_work_mode_config(&work_config);
      if (result == AICAM_OK) {
-         result = system_controller_set_work_config(g_system_service_ctx.controller, &work_config);
+         result = system_controller_set_work_config(g_system_service_ctx.controller, &work_config, NULL, AICAM_FALSE);
          if (result != AICAM_OK) {
              LOG_SVC_ERROR("Failed to load work mode config: %d", result);
              return result;
@@ -3539,12 +3582,14 @@ aicam_result_t system_service_capture_request(const system_capture_request_t *re
 
     g_fast_fail_mqtt_policy = resolved.fast_fail_mqtt;
 
+    aicam_bool_t ai_filtered = AICAM_FALSE;
     uint64_t start_ms = rtc_get_uptime_ms();
     aicam_result_t ret = system_service_capture_and_upload_mqtt(
         resolved.enable_ai,
         resolved.chunk_size,
         resolved.store_to_sd,
-        resolved.trigger_type);
+        resolved.trigger_type,
+        &ai_filtered);
     uint64_t duration_ms = rtc_get_uptime_ms() - start_ms;
 
     g_fast_fail_mqtt_policy = AICAM_FALSE;
@@ -3552,6 +3597,7 @@ aicam_result_t system_service_capture_request(const system_capture_request_t *re
     if (response) {
         response->result = ret;
         response->duration_ms = duration_ms;
+        response->ai_filtered = ai_filtered;
     }
 
     return ret;
@@ -3740,11 +3786,42 @@ static aicam_result_t generate_inference_json(const nn_result_t *nn_result,
  * @param qos MQTT QoS level (0, 1, or 2)
  * @return AICAM_OK on success, error code otherwise
  */
+/* AI-filter label gate: does a detection's class name pass the
+ * comma-separated allowed list? Empty list = all labels allowed. An empty
+ * detection name can never match a non-empty list. */
+static aicam_bool_t ai_filter_label_ok(const char *labels_csv, const char *class_name)
+{
+    if (labels_csv == NULL || labels_csv[0] == '\0') {
+        return AICAM_TRUE;
+    }
+    if (class_name == NULL || class_name[0] == '\0') {
+        return AICAM_FALSE;
+    }
+    size_t name_len = strlen(class_name);
+    const char *p = labels_csv;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        if (len == name_len && strncmp(p, class_name, len) == 0) {
+            return AICAM_TRUE;
+        }
+        if (!comma) {
+            break;
+        }
+        p = comma + 1;
+    }
+    return AICAM_FALSE;
+}
+
 aicam_result_t system_service_capture_and_upload_mqtt(aicam_bool_t enable_ai,
                                                      uint32_t chunk_size,
                                                      aicam_bool_t store_to_sd,
-                                                     aicam_capture_trigger_t trigger_type)
+                                                     aicam_capture_trigger_t trigger_type,
+                                                     aicam_bool_t *ai_filtered_out)
 {
+    if (ai_filtered_out) {
+        *ai_filtered_out = AICAM_FALSE;
+    }
     if (g_capture_in_progress || ota_is_upload_in_progress()) {
         LOG_SVC_WARN("Capture rejected: busy or OTA in progress");
         return AICAM_ERROR_BUSY;
@@ -3760,6 +3837,19 @@ aicam_result_t system_service_capture_and_upload_mqtt(aicam_bool_t enable_ai,
     // Record start time for total duration calculation (use uptime for accurate timing)
     uint64_t total_start_time = rtc_get_uptime_ms();
     uint64_t step_start_time, step_end_time, step_duration;
+
+    /* AI master switch (capture settings, "capture AI participation"):
+     * off = this capture runs WITHOUT AI inference, regardless of the
+     * per-request enable_ai flag (web / button / MQTT remote all funnel
+     * through here). The live preview pipeline and its always-on inference
+     * are NOT touched by this switch. */
+    {
+        camera_config_t cam_cfg;
+        if (device_service_camera_get_config(&cam_cfg) == AICAM_OK &&
+            cam_cfg.image_config.ai_capture_enable == AICAM_FALSE) {
+            enable_ai = AICAM_FALSE;
+        }
+    }
 
     LOG_SVC_INFO("========== Starting image capture and MQTT upload (AI: %s) ==========", 
                  enable_ai ? "enabled" : "disabled");
@@ -3823,6 +3913,86 @@ aicam_result_t system_service_capture_and_upload_mqtt(aicam_bool_t enable_ai,
     {
         capture_upload_config_t cu_cfg;
         (void)json_config_get_capture_upload_config(&cu_cfg);
+
+        /* AI inference filter: drop the WHOLE capture (storage AND upload)
+         * unless the model produced a detection whose confidence meets
+         * ai_filter_threshold. This is the capture-settings gate, independent
+         * of the debug-page inference threshold - which has already filtered
+         * the detections inside nn_result, so the effective gate is the larger
+         * of the two thresholds. */
+        /* enable_ai == FALSE (master switch off): no inference ran, so the
+         * filter has nothing to judge on - keep the capture instead of
+         * dropping it. */
+        if (cu_cfg.ai_filter_enable && enable_ai) {
+            /* A detection passes when confidence >= threshold AND its label
+             * is in ai_filter_labels (empty list = all). class_name fallback
+             * mirrors the JSON serializer ("person" for MPE results that
+             * carry no class name). */
+            uint32_t best_conf = 0;
+            aicam_bool_t pass = AICAM_FALSE;
+            aicam_bool_t conf_semantics = AICAM_TRUE;
+            if (!enable_ai || !nn_result.is_valid) {
+                best_conf = 0;
+            } else switch (nn_result.type) {
+                case PP_TYPE_OD:
+                    for (uint32_t i = 0; i < nn_result.od.nb_detect; i++) {
+                        uint32_t c = (uint32_t)(nn_result.od.detects[i].conf * 100.0f + 0.5f);
+                        if (c > best_conf) best_conf = c;
+                        if (c >= cu_cfg.ai_filter_threshold &&
+                            ai_filter_label_ok(cu_cfg.ai_filter_labels,
+                                               nn_result.od.detects[i].class_name)) {
+                            pass = AICAM_TRUE;
+                        }
+                    }
+                    break;
+                case PP_TYPE_MPE:
+                    for (uint32_t i = 0; i < nn_result.mpe.nb_detect; i++) {
+                        uint32_t c = (uint32_t)(nn_result.mpe.detects[i].conf * 100.0f + 0.5f);
+                        if (c > best_conf) best_conf = c;
+                        if (c >= cu_cfg.ai_filter_threshold &&
+                            ai_filter_label_ok(cu_cfg.ai_filter_labels,
+                                               nn_result.mpe.detects[i].class_name
+                                                   ? nn_result.mpe.detects[i].class_name
+                                                   : "person")) {
+                            pass = AICAM_TRUE;
+                        }
+                    }
+                    break;
+                case PP_TYPE_ISEG:
+                    for (uint32_t i = 0; i < nn_result.iseg.nb_detect; i++) {
+                        uint32_t c = (uint32_t)(nn_result.iseg.detects[i].conf * 100.0f + 0.5f);
+                        if (c > best_conf) best_conf = c;
+                        if (c >= cu_cfg.ai_filter_threshold &&
+                            ai_filter_label_ok(cu_cfg.ai_filter_labels,
+                                               nn_result.iseg.detects[i].class_name)) {
+                            pass = AICAM_TRUE;
+                        }
+                    }
+                    break;
+                default:
+                    /* Classification/segmentation outputs carry no per-detect
+                     * confidence - the filter has no meaning for them. */
+                    conf_semantics = AICAM_FALSE;
+                    break;
+            }
+            if (conf_semantics && !pass) {
+                LOG_SVC_INFO("Capture dropped by AI filter: best conf %u%% (threshold %u%%, labels '%s')",
+                             (unsigned)best_conf, (unsigned)cu_cfg.ai_filter_threshold,
+                             cu_cfg.ai_filter_labels);
+                if (ai_filtered_out) {
+                    *ai_filtered_out = AICAM_TRUE;
+                }
+                if (jpeg_copy && jpeg_buffer == jpeg_copy) {
+                    buffer_free(jpeg_buffer);
+                } else if (jpeg_buffer) {
+                    device_service_camera_free_jpeg_buffer(jpeg_buffer);
+                }
+                jpeg_buffer = NULL;
+                jpeg_copy = NULL;
+                g_capture_in_progress = AICAM_FALSE;
+                return AICAM_OK;
+            }
+        }
 
         /* Build metadata now so the coordinator can freeze it. */
         jpegc_params_t jpeg_enc_param = {0};

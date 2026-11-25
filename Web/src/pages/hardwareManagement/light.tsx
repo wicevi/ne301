@@ -9,7 +9,17 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import Slider from '@/components/slider';
+import { Button } from '@/components/ui/button';
 import hardwareServiceApi, { type SetLightConfigReq } from '@/services/api/hardware-management';
+
+/* IR distance quick presets (user-confirmed values): nearer subjects need
+ * less IR to avoid over-exposure, farther ones more. */
+const IR_LIGHT_PRESETS = [
+   { key: '4m', value: 20 },
+   { key: '5_5m', value: 40 },
+   { key: '6_5m', value: 60 },
+   { key: '9m', value: 100 },
+] as const;
 
 export default function Light() {
    const { i18n } = useLingui();
@@ -147,6 +157,31 @@ export default function Light() {
                      <Separator />
                      <div className="flex justify-between">
                         <Label>{i18n._('sys.hardware_management.ir_light')}</Label>
+                     </div>
+                     <Separator />
+                     {/* Distance quick presets - one click sets the IR
+                      * brightness for a typical subject distance (nearer
+                      * subjects need LESS IR to avoid over-exposure). */}
+                     <div className="flex justify-between gap-2 items-center">
+                        <Label>{i18n._('sys.hardware_management.light_presets')}</Label>
+                        <div className="flex flex-wrap gap-1 justify-end">
+                           {IR_LIGHT_PRESETS.map(preset => {
+                              const active = lightConfig.brightness_level === preset.value;
+                              return (
+                                 <Button
+                                   key={preset.key}
+                                   className="h-7 px-2 text-xs"
+                                   variant={active ? 'primary' : 'outline'}
+                                   onClick={() => {
+                                       setLightConfig({ ...lightConfig, brightness_level: preset.value });
+                                       handleSetLightBrightness(preset.value);
+                                    }}
+                                 >
+                                    {i18n._(`sys.hardware_management.light_preset_${preset.key}`)}
+                                 </Button>
+                              );
+                           })}
+                        </div>
                      </div>
                      <Separator />
                      <div className="flex justify-between">

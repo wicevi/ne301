@@ -281,8 +281,12 @@ static void parse_device_service(cJSON *json, device_service_config_t *cfg)
         /* "grayscale" field removed with the IR-board adaptation; imports
          * carrying it are ignored. */
         json_get_uint32(img_cfg, "fast_capture_skip_frames", &cfg->image_config.fast_capture_skip_frames);
+        json_get_uint32(img_cfg, "exposure_cap_us", &cfg->image_config.exposure_cap_us);
         json_get_uint32(img_cfg, "fast_capture_resolution", &cfg->image_config.fast_capture_resolution);
         json_get_uint32(img_cfg, "fast_capture_jpeg_quality", &cfg->image_config.fast_capture_jpeg_quality);
+        json_get_uint32(img_cfg, "runtime_capture_skip_frames", &cfg->image_config.runtime_capture_skip_frames);
+        json_get_uint32(img_cfg, "runtime_capture_jpeg_quality", &cfg->image_config.runtime_capture_jpeg_quality);
+        json_get_bool(img_cfg, "ai_capture_enable", &cfg->image_config.ai_capture_enable);
         json_get_bool(img_cfg, "capture_disable_comm", &cfg->image_config.capture_disable_comm);
         json_get_bool(img_cfg, "capture_storage_ai", &cfg->image_config.capture_storage_ai);
     }
@@ -464,6 +468,27 @@ static void parse_network_service(cJSON *json, network_service_config_t *cfg)
         // Validation settings
         json_get_bool(poe, "validate_gateway", &cfg->poe.validate_gateway);
         json_get_bool(poe, "detect_ip_conflict", &cfg->poe.detect_ip_conflict);
+    }
+
+    /* NTP time-sync */
+    {
+        cJSON *ntp = cJSON_GetObjectItem(json, "ntp");
+        if (cJSON_IsObject(ntp)) {
+            json_get_bool(ntp, "enable", &cfg->ntp.enable);
+            cJSON *srv_arr = cJSON_GetObjectItem(ntp, "servers");
+            if (cJSON_IsArray(srv_arr)) {
+                int cnt = cJSON_GetArraySize(srv_arr);
+                if (cnt > NTP_SERVER_MAX_COUNT) cnt = NTP_SERVER_MAX_COUNT;
+                for (int i = 0; i < cnt; i++) {
+                    cJSON *it = cJSON_GetArrayItem(srv_arr, i);
+                    if (cJSON_IsString(it) && it->valuestring != NULL && it->valuestring[0] != '\0') {
+                        strncpy(cfg->ntp.servers[i], it->valuestring, sizeof(cfg->ntp.servers[i]) - 1);
+                        cfg->ntp.servers[i][sizeof(cfg->ntp.servers[i]) - 1] = '\0';
+                    }
+                }
+                cfg->ntp.server_count = (uint8_t)cnt;
+            }
+        }
     }
 
     /* Wi-Fi HaLow */
@@ -705,6 +730,13 @@ static void parse_work_mode(cJSON *json, work_mode_config_t *cfg)
         json_get_bool(pir, "enable", &cfg->pir_trigger.enable);
         json_get_uint32(pir, "pin_number", &cfg->pir_trigger.pin_number);
         json_get_uint32(pir, "trigger_type", (uint32_t *)&cfg->pir_trigger.trigger_type);
+        {
+            uint32_t dev_type = (uint32_t)cfg->pir_trigger.device_type;
+            json_get_uint32(pir, "device_type", &dev_type);
+            cfg->pir_trigger.device_type =
+                (dev_type <= (uint32_t)AICAM_PIR_DEVICE_IO) ? (aicam_pir_device_type_t)dev_type
+                                                            : AICAM_PIR_DEVICE_PIR;
+        }
         // PIR sensor configuration parameters
         json_get_uint8(pir, "sensitivity_level", &cfg->pir_trigger.sensitivity_level);
         json_get_uint8(pir, "ignore_time_s", &cfg->pir_trigger.ignore_time_s);
@@ -863,10 +895,28 @@ static void parse_capture_upload_config(cJSON *json, capture_upload_config_t *cf
     json_get_uint32(json, "max_pending_records", &cfg->max_pending_records);
     json_get_uint32(json, "flash_max_records", &cfg->flash_max_records);
     json_get_uint32(json, "upload_comm_type", &cfg->upload_comm_type);
+    json_get_bool(json, "ai_filter_enable", &cfg->ai_filter_enable);
+    json_get_uint8(json, "ai_filter_threshold", &cfg->ai_filter_threshold);
+    json_get_string(json, "ai_filter_labels",
+                    cfg->ai_filter_labels, sizeof(cfg->ai_filter_labels));
 
     /* Same normalization the web-API setter applies, so a hand-edited file
      * lands on sane values instead of poisoning the upload pipeline. */
     json_config_capture_upload_normalize(cfg);
+}
+
+static void parse_video_stream_config(cJSON *json, video_stream_param_t *cfg)
+{
+    uint32_t temp;
+
+    json_get_uint32(json, "version", &cfg->version);
+
+    temp = cfg->resolution;
+    json_get_uint32(json, "resolution", &temp);
+    cfg->resolution = (uint8_t)temp;
+
+    json_get_uint32(json, "bitrate_kbps", &cfg->bitrate_kbps);
+    json_get_uint8(json, "gop_sec", &cfg->gop_sec);
 }
 
 /* ==================== JSON Serialization Helpers (static) ==================== */
@@ -1064,8 +1114,12 @@ static cJSON *serialize_device_service(const device_service_config_t *cfg)
     cJSON_AddNumberToObject(img_cfg, "aec", cfg->image_config.aec);
     cJSON_AddNumberToObject(img_cfg, "isp_mode", cfg->image_config.isp_mode);
     cJSON_AddNumberToObject(img_cfg, "fast_capture_skip_frames", cfg->image_config.fast_capture_skip_frames);
+    cJSON_AddNumberToObject(img_cfg, "exposure_cap_us", cfg->image_config.exposure_cap_us);
     cJSON_AddNumberToObject(img_cfg, "fast_capture_resolution", cfg->image_config.fast_capture_resolution);
     cJSON_AddNumberToObject(img_cfg, "fast_capture_jpeg_quality", cfg->image_config.fast_capture_jpeg_quality);
+    cJSON_AddNumberToObject(img_cfg, "runtime_capture_skip_frames", cfg->image_config.runtime_capture_skip_frames);
+    cJSON_AddNumberToObject(img_cfg, "runtime_capture_jpeg_quality", cfg->image_config.runtime_capture_jpeg_quality);
+    cJSON_AddBoolToObject(img_cfg, "ai_capture_enable", cfg->image_config.ai_capture_enable);
     cJSON_AddBoolToObject(img_cfg, "capture_disable_comm", cfg->image_config.capture_disable_comm);
     cJSON_AddBoolToObject(img_cfg, "capture_storage_ai", cfg->image_config.capture_storage_ai);
     cJSON_AddItemToObject(json, "image_config", img_cfg);
@@ -1221,6 +1275,18 @@ static cJSON *serialize_network_service(const network_service_config_t *cfg)
         cJSON_AddItemToObject(json, "halow", halow);
     }
 
+    /* NTP time-sync */
+    {
+        cJSON *ntp = cJSON_CreateObject();
+        cJSON_AddBoolToObject(ntp, "enable", cfg->ntp.enable);
+        cJSON *srv_arr = cJSON_CreateArray();
+        for (int i = 0; i < cfg->ntp.server_count && i < NTP_SERVER_MAX_COUNT; i++) {
+            cJSON_AddItemToArray(srv_arr, cJSON_CreateString(cfg->ntp.servers[i]));
+        }
+        cJSON_AddItemToObject(ntp, "servers", srv_arr);
+        cJSON_AddItemToObject(json, "ntp", ntp);
+    }
+
     return json;
 }
 
@@ -1368,6 +1434,7 @@ static cJSON *serialize_work_mode(const work_mode_config_t *cfg)
     cJSON_AddBoolToObject(pir, "enable", cfg->pir_trigger.enable);
     cJSON_AddNumberToObject(pir, "pin_number", cfg->pir_trigger.pin_number);
     cJSON_AddNumberToObject(pir, "trigger_type", cfg->pir_trigger.trigger_type);
+    cJSON_AddNumberToObject(pir, "device_type", cfg->pir_trigger.device_type);
     // PIR sensor configuration parameters
     cJSON_AddNumberToObject(pir, "sensitivity_level", cfg->pir_trigger.sensitivity_level);
     cJSON_AddNumberToObject(pir, "ignore_time_s", cfg->pir_trigger.ignore_time_s);
@@ -1459,6 +1526,19 @@ static cJSON *serialize_capture_upload_config(const capture_upload_config_t *cfg
     cJSON_AddNumberToObject(json, "max_pending_records", cfg->max_pending_records);
     cJSON_AddNumberToObject(json, "flash_max_records", cfg->flash_max_records);
     cJSON_AddNumberToObject(json, "upload_comm_type", cfg->upload_comm_type);
+    cJSON_AddBoolToObject(json, "ai_filter_enable", cfg->ai_filter_enable);
+    cJSON_AddNumberToObject(json, "ai_filter_threshold", cfg->ai_filter_threshold);
+    cJSON_AddStringToObject(json, "ai_filter_labels", cfg->ai_filter_labels);
+    return json;
+}
+
+static cJSON *serialize_video_stream_config(const video_stream_param_t *cfg)
+{
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddNumberToObject(json, "version", cfg->version);
+    cJSON_AddNumberToObject(json, "resolution", cfg->resolution);
+    cJSON_AddNumberToObject(json, "bitrate_kbps", cfg->bitrate_kbps);
+    cJSON_AddNumberToObject(json, "gop_sec", cfg->gop_sec);
     return json;
 }
 
@@ -1518,6 +1598,18 @@ aicam_result_t json_config_parse_json_object(const char *json_str, aicam_global_
     if (cJSON_IsObject(dev_svc))
         parse_device_service(dev_svc, &config->device_service);
 
+    cJSON *usb_cfg = cJSON_GetObjectItem(root, "usb_config");
+    if (cJSON_IsObject(usb_cfg)) {
+        json_get_bool(usb_cfg, "device_enable", &config->usb_config.device_enable);
+        json_get_bool(usb_cfg, "follow_ap", &config->usb_config.follow_ap);
+        cJSON *s = cJSON_GetObjectItem(usb_cfg, "ip");
+        if (cJSON_IsString(s) && s->valuestring[0] != '\0')
+            strncpy(config->usb_config.ip, s->valuestring, sizeof(config->usb_config.ip) - 1);
+        s = cJSON_GetObjectItem(usb_cfg, "netmask");
+        if (cJSON_IsString(s) && s->valuestring[0] != '\0')
+            strncpy(config->usb_config.netmask, s->valuestring, sizeof(config->usb_config.netmask) - 1);
+    }
+
     cJSON *net_svc = cJSON_GetObjectItem(root, "network_service");
     if (cJSON_IsObject(net_svc))
         parse_network_service(net_svc, &config->network_service);
@@ -1537,6 +1629,10 @@ aicam_result_t json_config_parse_json_object(const char *json_str, aicam_global_
     cJSON *capup = cJSON_GetObjectItem(root, "capture_upload_config");
     if (cJSON_IsObject(capup))
         parse_capture_upload_config(capup, &config->capture_upload);
+
+    cJSON *vstream = cJSON_GetObjectItem(root, "video_stream_config");
+    if (cJSON_IsObject(vstream))
+        parse_video_stream_config(vstream, &config->video_stream);
 
     cJSON *auth_mgr = cJSON_GetObjectItem(root, "auth_mgr");
     if (cJSON_IsObject(auth_mgr))
@@ -1575,11 +1671,19 @@ aicam_result_t json_config_serialize_json_object(const aicam_global_config_t *co
     cJSON_AddItemToObject(root, "power_mode_config", serialize_power_mode(&config->power_mode_config));
     cJSON_AddItemToObject(root, "device_info", serialize_device_info(&config->device_info));
     cJSON_AddItemToObject(root, "device_service", serialize_device_service(&config->device_service));
+
+    cJSON *usb_cfg = cJSON_CreateObject();
+    cJSON_AddBoolToObject(usb_cfg, "device_enable", config->usb_config.device_enable);
+    cJSON_AddBoolToObject(usb_cfg, "follow_ap", config->usb_config.follow_ap);
+    cJSON_AddStringToObject(usb_cfg, "ip", config->usb_config.ip);
+    cJSON_AddStringToObject(usb_cfg, "netmask", config->usb_config.netmask);
+    cJSON_AddItemToObject(root, "usb_config", usb_cfg);
     cJSON_AddItemToObject(root, "network_service", serialize_network_service(&config->network_service));
     cJSON_AddItemToObject(root, "mqtt_service", serialize_mqtt_service(&config->mqtt_service));
     cJSON_AddItemToObject(root, "work_mode_config", serialize_work_mode(&config->work_mode_config));
     cJSON_AddItemToObject(root, "webhook_config", serialize_webhook_config(&config->webhook_config));
     cJSON_AddItemToObject(root, "capture_upload_config", serialize_capture_upload_config(&config->capture_upload));
+    cJSON_AddItemToObject(root, "video_stream_config", serialize_video_stream_config(&config->video_stream));
     cJSON_AddItemToObject(root, "auth_mgr", serialize_auth_mgr(&config->auth_mgr));
 
     // Print to string buffer

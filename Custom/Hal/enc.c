@@ -37,7 +37,20 @@ static JpegEncIn   jpegEncIn= {0};
 static JpegEncOut  jpegEncOut= {0};
 #endif
 
-static uint8_t venc_out_buffer[VENC_OUT_BUFFER_SIZE] ALIGN_32 IN_PSRAM;
+static uint8_t venc_out_buffer[VENC_OUT_BUFFER_MAX] ALIGN_32 IN_PSRAM;
+
+/* Adaptive output-buffer budget for the given geometry + bitrate (enc.h). */
+uint32_t venc_out_buffer_size_for(uint32_t width, uint32_t height, uint32_t bitrate_kbps)
+{
+    uint32_t size = (width > 0 && height > 0) ? (width * height) / 3u : 0;
+    /* A short-GOP I-frame may consume nearly the whole per-second rate
+     * budget; budget for it or the encoder stalls with output overflow. */
+    uint32_t rate_budget = bitrate_kbps * 1000u / 8u;
+    if (rate_budget > size) size = rate_budget;
+    if (size < VENC_OUT_BUFFER_MIN) size = VENC_OUT_BUFFER_MIN;
+    if (size > VENC_OUT_BUFFER_MAX) size = VENC_OUT_BUFFER_MAX;
+    return size;
+}
 
 static enc_t g_enc = {0};
 
@@ -350,14 +363,14 @@ static int VENC_H264_Encode(enc_t *enc)
     uint8_t *p_out = enc->out_frame.frame_buffer + enc->out_frame.header_size;
     if (!p_ctx->is_sps_pps_done)
     {
-        ret = VENC_H264_EncodeStart(p_ctx, p_out, VENC_OUT_BUFFER_SIZE, &start_len);
+        ret = VENC_H264_EncodeStart(p_ctx, p_out, enc->out_buffer_size, &start_len);
         if (ret)
             return ret;
         p_ctx->is_sps_pps_done = 1;
     }
 
     p_out += start_len;
-    ret = VENC_H264_EncodeFrame(p_ctx, enc->in_buffer, p_out, VENC_OUT_BUFFER_SIZE - start_len, &frame_len, enc->is_intra_force, &enc->out_frame.frame_info);
+    ret = VENC_H264_EncodeFrame(p_ctx, enc->in_buffer, p_out, enc->out_buffer_size - start_len, &frame_len, enc->is_intra_force, &enc->out_frame.frame_info);
     if (ret)
         return ret;
 
@@ -376,6 +389,12 @@ static int ENC_H264_Init(enc_t *enc)
     H264EncRateCtrl rate;
     int target_bitrate;
     int ret = H264ENC_OK;
+
+    /* Output budget follows the geometry + bitrate this session was opened with. */
+    enc->out_buffer_size = venc_out_buffer_size_for(enc->params.width, enc->params.height,
+                                                    (uint32_t)enc->params.bitrate_kbps);
+    LOG_DRV_INFO("VENC out buffer: %u bytes (%dx%d)\r\n",
+                 (unsigned)enc->out_buffer_size, enc->params.width, enc->params.height);
 
     memset(&config, 0, sizeof(config));
     memset(&VENC_Instance, 0, sizeof(VENC_Instance));
@@ -421,13 +440,24 @@ static int ENC_H264_Init(enc_t *enc)
     if(ret != H264ENC_OK){
         return ret;
     }
-    target_bitrate = ((enc->params.width * enc->params.height * 2) * enc->params.fps) / 30;
+    /* Configured bitrate/gop win over the historical w*h*fps derivation
+     * (video_encoder_node forwards the web-configured stream params here). */
+    int gop_len = enc->params.fps;   /* frames per IDR: default = 1 second */
+    if (enc->params.bitrate_kbps > 0) {
+        target_bitrate = enc->params.bitrate_kbps * 1000;
+    } else {
+        target_bitrate = ((enc->params.width * enc->params.height * 2) * enc->params.fps) / 30;
+    }
+    if (enc->params.gop_len > 0) {
+        gop_len = enc->params.gop_len;
+    }
+    p_ctx->gop_len = gop_len - 1;
     if (enc->params.rate_ctrl_mode == VENC_RATE_CTRL_QP_CONSTANT)
     {
         VENC_H264_SetupConstantQp(&rate, enc->params.rate_ctrl_dq);
     } else if (enc->params.rate_ctrl_mode == VENC_RATE_CTRL_VBR)
     {
-        VENC_H264_SetupVbr(&rate, target_bitrate, enc->params.fps, enc->params.rate_ctrl_dq);
+        VENC_H264_SetupVbr(&rate, target_bitrate, gop_len, enc->params.rate_ctrl_dq);
     } else
     {
         return H264ENC_INVALID_ARGUMENT;
@@ -530,7 +560,7 @@ uint8_t * ENC_Jpeg_EncodeFrame(uint8_t *p_in, int *out_len)
 {
     int ret;
 
-    ret = encode_jpeg_frame(p_in, venc_out_buffer, VENC_OUT_BUFFER_SIZE);
+    ret = encode_jpeg_frame(p_in, venc_out_buffer, VENC_OUT_BUFFER_MAX);
     if(ret != 0){
         *out_len = ret;
         return venc_out_buffer;
@@ -627,9 +657,9 @@ static void encProcess(void *argument)
             }
         }
 #else
-        encode_ret = encode_jpeg_frame(local_in, 
+        encode_ret = encode_jpeg_frame(local_in,
                                        enc->out_frame.frame_buffer + enc->out_frame.header_size,
-                                       VENC_OUT_BUFFER_SIZE - enc->out_frame.header_size);
+                                       enc->out_buffer_size - enc->out_frame.header_size);
         if (encode_ret > 0) {
             enc->out_frame.data_size = encode_ret;
             encode_ret = 0; /* success */
@@ -773,6 +803,9 @@ static int enc_ioctl(void *priv, unsigned int cmd, unsigned char *ubuf, unsigned
             }
             osMutexAcquire(enc->state_mtx, osWaitForever);
             memcpy(&enc->params, ubuf, sizeof(enc_param_t));
+            /* Output budget follows the (possibly new) geometry + bitrate. */
+            enc->out_buffer_size = venc_out_buffer_size_for(enc->params.width, enc->params.height,
+                                                            (uint32_t)enc->params.bitrate_kbps);
             osMutexRelease(enc->state_mtx);
             ret = AICAM_OK;
             break;
@@ -959,6 +992,10 @@ static int enc_init(void *priv)
     enc->params.bpp = VENC_DEFAULT_BPP;
     enc->params.rate_ctrl_mode = VENC_RATE_CTRL_VBR;
     enc->params.rate_ctrl_dq = VENC_DEFAULT_RATE_CTRL_QP;
+    enc->params.bitrate_kbps = 0;
+    enc->params.gop_len = 0;
+    enc->out_buffer_size = venc_out_buffer_size_for(enc->params.width, enc->params.height,
+                                                    (uint32_t)enc->params.bitrate_kbps);
 
     enc->in_buffer = NULL;
     enc->out_frame.frame_buffer = venc_out_buffer;

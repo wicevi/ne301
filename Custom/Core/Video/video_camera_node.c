@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include "nn.h"
 #include "drtc.h"
+#include "image_utils.h"
+#include "pixel_format_map.h"
 
 /* ==================== Global Camera Device Reference ==================== */
 
@@ -37,6 +39,34 @@ static aicam_result_t video_camera_start_device(video_camera_node_data_t *data);
 static aicam_result_t video_camera_stop_device(video_camera_node_data_t *data);
 static aicam_result_t video_camera_capture_frame_zero_copy(video_camera_node_data_t *data, video_frame_t **output_frame);
 
+/* ==================== Pipe Selection Helpers ==================== */
+
+/* pipe_id 2 (AI pipe) only TAPS the pipe2 buffer queue: its geometry is owned
+ * by the AI node, so the camera node never issues SET_PIPE2_PARAM. */
+static uint32_t cam_get_param_cmd(uint32_t pipe_id)
+{
+    return (pipe_id == 2) ? CAM_CMD_GET_PIPE2_PARAM : CAM_CMD_GET_PIPE1_PARAM;
+}
+
+static uint32_t cam_get_buffer_cmd(uint32_t pipe_id)
+{
+    return (pipe_id == 2) ? CAM_CMD_GET_PIPE2_BUFFER_WITH_FRAME_ID
+                          : CAM_CMD_GET_PIPE1_BUFFER_WITH_FRAME_ID;
+}
+
+static uint32_t cam_return_buffer_cmd(uint32_t pipe_id)
+{
+    return (pipe_id == 2) ? CAM_CMD_RETURN_PIPE2_BUFFER
+                          : CAM_CMD_RETURN_PIPE1_BUFFER;
+}
+
+/* Frame release callback for converted (pipe2) frames: the buffer came from
+ * buffer_alloc, not from the camera buffer queue. */
+static void converted_buffer_free_callback(uint8_t *buffer)
+{
+    buffer_free(buffer);
+}
+
 /* ==================== Zero-Copy Buffer Return Callback ==================== */
 
 /**
@@ -47,13 +77,22 @@ static void camera_buffer_return_callback(uint8_t *buffer)
 {
     // This callback is called when the frame is no longer needed
     // We need to return the buffer to the camera hardware
-    
+
     if (g_camera_device) {
-        //if(g_ai_enabled == AICAM_FALSE) {
+        /* The frame's source pipe is not carried through the zero-copy frame,
+         * and this callback historically issued RETURN_PIPE1 only: in PIPE2
+         * streaming mode (RGB565 direct path) that returned the buffer to the
+         * WRONG pool - the pointer matched nothing, the ioctl was a silent
+         * no-op and the pipe2 buffer stayed IN_USE forever. Being the newest
+         * frame_id in the pool it then won every buffer_get_latest_ready
+         * "pick newest" election, only to be rejected by the duplicate-owner
+         * check - every subsequent GET returned NULL and the preview starved
+         * after its first frame. Try the pipe whose pool actually holds this
+         * pointer: RETURN only acts on a real match and reports NOT_FOUND
+         * otherwise, so trying both is exact. */
+        if (device_ioctl(g_camera_device, CAM_CMD_RETURN_PIPE2_BUFFER, buffer, 0) != AICAM_OK) {
             device_ioctl(g_camera_device, CAM_CMD_RETURN_PIPE1_BUFFER, buffer, 0);
-        // } else {
-        //     device_ioctl(g_camera_device, CAM_CMD_RETURN_PIPE2_BUFFER, buffer, 0);
-        // }
+        }
     }
 }
 
@@ -61,7 +100,7 @@ static void camera_buffer_return_callback(uint8_t *buffer)
 
 void video_camera_get_default_config(video_camera_config_t *config) {
     if (!config) return;
-    
+
     memset(config, 0, sizeof(video_camera_config_t));
     config->width = 1280;
     config->height = 720;
@@ -70,6 +109,7 @@ void video_camera_get_default_config(video_camera_config_t *config) {
     config->bpp = 2;
     config->ai_enabled = AICAM_FALSE;
     config->overlay_results = AICAM_TRUE;
+    config->pipe_id = 1;
 }
 
 video_node_t* video_camera_node_create(const char *name, const video_camera_config_t *config) {
@@ -140,10 +180,11 @@ aicam_result_t video_camera_node_set_config(video_node_t *node, const video_came
     data->config.bpp = config->bpp;
     data->config.ai_enabled = config->ai_enabled;
     data->config.overlay_results = config->overlay_results;
-    LOG_CORE_INFO("Camera node config updated: %dx%d@%dfps, format=%d, bpp=%d, ai_enabled=%d, overlay_results=%d",
+    data->config.pipe_id = config->pipe_id;
+    LOG_CORE_INFO("Camera node config updated: %dx%d@%dfps, format=%d, bpp=%d, pipe_id=%d, ai_enabled=%d, overlay_results=%d",
                   data->config.width, data->config.height, data->config.fps,
-                  data->config.format, data->config.bpp, data->config.ai_enabled,
-                  data->config.overlay_results);
+                  data->config.format, data->config.bpp, data->config.pipe_id,
+                  data->config.ai_enabled, data->config.overlay_results);
     
     // Restart camera if it was running
     // if (data->is_running) {
@@ -269,7 +310,7 @@ static aicam_result_t video_camera_node_init_callback(video_node_t *node) {
                 (uint8_t *)&data->sensor_param, sizeof(sensor_params_t));
 
 
-    device_ioctl(data->camera_dev, CAM_CMD_GET_PIPE1_PARAM, 
+    device_ioctl(data->camera_dev, cam_get_param_cmd(data->config.pipe_id),
                 (uint8_t *)&data->pipe_param, sizeof(pipe_params_t));
 
 
@@ -389,10 +430,12 @@ static aicam_result_t video_camera_start_device(video_camera_node_data_t *data) 
     }
     
     // Update pipeline parameters if needed (based on driver_test.c)
-    if (data->pipe_param.width != data->config.width ||
+    // Pipe2 mode never reconfigures the pipe - the AI node owns its geometry.
+    if (data->config.pipe_id != 2 &&
+        (data->pipe_param.width != data->config.width ||
        data->pipe_param.height != data->config.height ||
-       data->pipe_param.fps != data->config.fps) {
-        
+       data->pipe_param.fps != data->config.fps)) {
+
         data->pipe_param.width = data->config.width;
         data->pipe_param.height = data->config.height;
         data->pipe_param.fps = data->config.fps;
@@ -400,15 +443,15 @@ static aicam_result_t video_camera_start_device(video_camera_node_data_t *data) 
         data->pipe_param.bpp = data->config.bpp;
         data->pipe_param.buffer_nb = 3;
 
-        LOG_CORE_INFO("Camera node set pipe param: %dx%d@%dfps, format=%d, bpp=%d", 
-                      data->pipe_param.width, data->pipe_param.height, data->pipe_param.fps, 
+        LOG_CORE_INFO("Camera node set pipe param: %dx%d@%dfps, format=%d, bpp=%d",
+                      data->pipe_param.width, data->pipe_param.height, data->pipe_param.fps,
                       data->pipe_param.format, data->pipe_param.bpp);
-        
+
         //if (data->config.ai_enabled == AICAM_FALSE) {
-            device_ioctl(data->camera_dev, CAM_CMD_SET_PIPE1_PARAM, 
+            device_ioctl(data->camera_dev, CAM_CMD_SET_PIPE1_PARAM,
                         (uint8_t *)&data->pipe_param, sizeof(pipe_params_t));
         // } else {
-        //     device_ioctl(data->camera_dev, CAM_CMD_SET_PIPE2_PARAM, 
+        //     device_ioctl(data->camera_dev, CAM_CMD_SET_PIPE2_PARAM,
         //                 (uint8_t *)&data->pipe_param, sizeof(pipe_params_t));
         // }
    }
@@ -453,46 +496,124 @@ static aicam_result_t video_camera_stop_device(video_camera_node_data_t *data) {
 
 static aicam_result_t video_camera_capture_frame_zero_copy(video_camera_node_data_t *data, video_frame_t **output_frame) {
     if (!data || !output_frame) return AICAM_ERROR_INVALID_PARAM;
-    
+
     uint64_t start_time = osKernelGetTickCount();
-    
+
     // Get frame buffer from camera (hardware buffer) - NO COPYING!
     camera_buffer_with_frame_id_t camera_buffer_with_frame_id;
-    int result = device_ioctl(data->camera_dev, CAM_CMD_GET_PIPE1_BUFFER_WITH_FRAME_ID, 
+    int result = device_ioctl(data->camera_dev, cam_get_buffer_cmd(data->config.pipe_id),
                             (uint8_t *)&camera_buffer_with_frame_id, 0);
-
 
     if (result != AICAM_OK) {
         data->stats.buffer_underruns++;
         return AICAM_ERROR;
     }
-   
+
     data->current_buffer = camera_buffer_with_frame_id.buffer;
     data->frame_id = camera_buffer_with_frame_id.frame_id;
 
+    uint32_t pipe_id = data->config.pipe_id;
+
+
+    /* Pipe2 carries the AI format (packed RGB888), which the VENC cannot take
+     * directly (its RGB888 mode wants a 32-bit container). Convert a full-frame
+     * "ROI" to ARGB8888 via DMA2D into a per-frame buffer, then hand the pipe2
+     * buffer straight back - the encoder works solely on the copy. */
+    if (pipe_id == 2 && fmt_dcmipp_to_enc(data->config.format) < 0) {
+        uint32_t w = data->config.width;
+        uint32_t h = data->config.height;
+        uint32_t conv_size = w * h * 4;
+        uint8_t *conv_buf = buffer_calloc(1, conv_size);
+        if (!conv_buf) {
+            device_ioctl(data->camera_dev, cam_return_buffer_cmd(pipe_id),
+                         camera_buffer_with_frame_id.buffer, 0);
+            data->stats.capture_errors++;
+            LOG_CORE_ERROR("Pipe2 convert buffer alloc failed (%u bytes)", (unsigned)conv_size);
+            return AICAM_ERROR_NO_MEMORY;
+        }
+        /* buffer_calloc's zero-fill left DIRTY cache lines for this buffer.
+         * DMA2D writes the real pixels straight to PSRAM (bypassing cache);
+         * when those stale dirty lines later evict they overwrite the fresh
+         * DMA data with zeros in cache-line bands - the horizontal tearing
+         * bands on the PIPE2 preview. Drop them now, before the conversion. */
+        SCB_InvalidateDCache_by_Addr((void *)((uint32_t)conv_buf & ~31u),
+                                     (conv_size + 31u) & ~31u);
+
+        uint32_t dma2d_in = fmt_dcmipp_to_dma2d(data->config.format);
+        aicam_result_t cret = image_crop_roi(camera_buffer_with_frame_id.buffer, w, h,
+                                             dma2d_in, 0, 0, w, h,
+                                             conv_buf, DMA2D_OUTPUT_ARGB8888);
+
+        /* Dump BEFORE returning the source buffer: after RETURN the pool
+         * hands it back to the DCMIPP at any moment, and the dump was
+         * reading a buffer being rewritten (97% content change between the
+         * two forensics snapshots - an artifact of this ordering, not
+         * product tearing). While we have NOT returned it, the buffer is
+         * genuinely held. */
+
+        /* Source buffer is no longer needed once the DMA2D copy completes. */
+        device_ioctl(data->camera_dev, cam_return_buffer_cmd(pipe_id),
+                     camera_buffer_with_frame_id.buffer, 0);
+        if (cret != AICAM_OK) {
+            buffer_free(conv_buf);
+            data->stats.capture_errors++;
+            return cret;
+        }
+
+        video_frame_info_t conv_info = {
+            .width = w,
+            .height = h,
+            .format = (video_format_t)DCMIPP_PIXEL_PACKER_FORMAT_ARGB8888,
+            .stride = w * 4,
+            .size = conv_size,
+            .timestamp = rtc_get_local_timestamp(),
+            .sequence = data->frame_sequence++
+        };
+        video_frame_t *conv_frame = video_frame_create_zero_copy(&conv_info, conv_buf,
+                                                                 conv_size, converted_buffer_free_callback);
+        if (!conv_frame) {
+            buffer_free(conv_buf);
+            data->stats.capture_errors++;
+            return AICAM_ERROR_NO_MEMORY;
+        }
+
+        data->stats.frames_captured++;
+        *output_frame = conv_frame;
+        return AICAM_OK;
+    }
+    /* Non-converted PIPE2 frames (encoder-compatible format) and all pipe1
+     * frames fall through to the zero-copy path below. */
+
     //if ai enabled and overlay allowed, draw ai result onto the frame
+    /* PIPE2 never draws here: with the RGB888->ARGB8888 conversion path the
+     * branch was bypassed entirely (the encoder worked on the copy), and on
+     * the RGB565 direct path (EXPERIMENT A) drawing would hit the shared
+     * pipe2 buffer whose owner_count is 2 (AI node + camera node) - the
+     * LOCK then fails BUSY every frame. Keep PIPE2 preview undrawn. */
     if (data->config.ai_enabled == AICAM_TRUE && data->config.overlay_results == AICAM_TRUE &&
-        data->ai_draw_callback) {
-        result = device_ioctl(data->camera_dev, CAM_CMD_LOCK_PIPE1_BUFFER, 
+        data->ai_draw_callback && pipe_id != 2) {
+        uint32_t lock_cmd = (pipe_id == 2) ? CAM_CMD_LOCK_PIPE2_BUFFER : CAM_CMD_LOCK_PIPE1_BUFFER;
+        uint32_t unlock_cmd = (pipe_id == 2) ? CAM_CMD_UNLOCK_PIPE2_BUFFER : CAM_CMD_UNLOCK_PIPE1_BUFFER;
+        result = device_ioctl(data->camera_dev, lock_cmd,
                             camera_buffer_with_frame_id.buffer, 0);
         if (result == AICAM_OK) {
             // Call AI drawing callback to draw results on frame buffer
-            aicam_result_t callback_ret = data->ai_draw_callback(data->current_buffer, 
+            aicam_result_t callback_ret = data->ai_draw_callback(data->current_buffer,
                                                             data->config.width,
-                                                            data->config.height, 
+                                                            data->config.height,
                                                             data->frame_id,
                                                             data->ai_callback_user_data);
             if (callback_ret != AICAM_OK) {
                 LOG_CORE_WARN("AI drawing callback failed: %d", callback_ret);
             }
             // Unlock buffer after AI drawing
-            device_ioctl(data->camera_dev, CAM_CMD_UNLOCK_PIPE1_BUFFER, 
+            device_ioctl(data->camera_dev, unlock_cmd,
                         camera_buffer_with_frame_id.buffer, 0);
         } else {
             LOG_CORE_WARN("Failed to lock camera buffer for AI drawing: %d", result);
         }
     }
-    
+
     // Prepare frame information
     video_frame_info_t frame_info = {
         .width = data->config.width,
@@ -503,14 +624,14 @@ static aicam_result_t video_camera_capture_frame_zero_copy(video_camera_node_dat
         .timestamp = rtc_get_local_timestamp(),
         .sequence = data->frame_sequence++
     };
-    
+
     // Create zero-copy frame (directly uses hardware buffer - NO MEMCPY!)
     video_frame_t *frame = video_frame_create_zero_copy(&frame_info,
                                                        data->current_buffer,  // Direct hardware buffer
                                                        camera_buffer_with_frame_id.size,
                                                        camera_buffer_return_callback);
     if (!frame) {
-        device_ioctl(data->camera_dev, CAM_CMD_RETURN_PIPE1_BUFFER, data->current_buffer, 0);
+        device_ioctl(data->camera_dev, cam_return_buffer_cmd(pipe_id), data->current_buffer, 0);
         data->stats.capture_errors++;
         return AICAM_ERROR_NO_MEMORY;
     }

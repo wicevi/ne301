@@ -1239,6 +1239,9 @@ static aicam_result_t mqtt_capture_handler(http_handler_context_t* ctx)
     cJSON_AddBoolToObject(response_json, "store_to_sd", store_to_sd);
     cJSON_AddNumberToObject(response_json, "chunk_size", chunk_size);
     cJSON_AddNumberToObject(response_json, "duration_ms", resp.duration_ms);
+    /* TRUE: the capture was dropped by the AI inference filter (policy
+     * behavior) - the web UI shows a distinct toast instead of "success". */
+    cJSON_AddBoolToObject(response_json, "ai_filtered", resp.ai_filtered);
 
     json_string = cJSON_Print(response_json);
     cJSON_Delete(response_json);
