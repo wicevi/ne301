@@ -127,7 +127,7 @@ sl_status_t sli_queue_manager_enqueue(sli_queue_t *handle, void *data)
     return SL_STATUS_INVALID_PARAMETER;
   }
 
-  status = sli_buffer_manager_allocate_buffer((const sli_buffer_manager_pool_types_t)handle->queue_node_pool,
+  status = sli_buffer_manager_allocate_buffer(handle->queue_node_pool,
                                               SLI_BUFFER_MANAGER_ALLOCATION_TYPE_DEDICATED,
                                               1000,
                                               (sli_buffer_t *)&node);
@@ -150,7 +150,7 @@ sl_status_t sli_queue_manager_add_to_queue_head(sli_queue_t *handle, void *data)
     return SL_STATUS_INVALID_PARAMETER;
   }
 
-  status = sli_buffer_manager_allocate_buffer((const sli_buffer_manager_pool_types_t)handle->queue_node_pool,
+  status = sli_buffer_manager_allocate_buffer(handle->queue_node_pool,
                                               SLI_BUFFER_MANAGER_ALLOCATION_TYPE_DEDICATED,
                                               1000,
                                               (sli_buffer_t *)&node);
@@ -295,7 +295,11 @@ sl_status_t sli_queue_manager_remove_node_from_queue(sli_queue_t *handle,
     } else if (handle->tail == node) {
       handle->tail = prev;
     } else {
-      prev->next = node->next;
+      // Non-head/non-tail node: prev is always set by traversal on a consistent list.
+      assert(prev != NULL);
+      if (prev != NULL) {
+        prev->next = node->next;
+      }
     }
   }
   CORE_ExitAtomic(state);
@@ -311,7 +315,7 @@ sl_status_t sli_queue_manager_remove_node_from_queue(sli_queue_t *handle,
 
 sl_status_t sli_queue_manager_flush_nodes_from_queue(sli_queue_t *handle,
                                                      sli_queue_manager_node_match_handler_t id_handler,
-                                                     void *node_match_data,
+                                                     const void *node_match_data,
                                                      sli_queue_manager_flush_handler_t flush_handler)
 {
   if (NULL == handle) {
@@ -384,7 +388,7 @@ sl_status_t sli_queue_manager_flush_nodes_from_queue(sli_queue_t *handle,
 
 sl_status_t sli_queue_manager_flush_queue(sli_queue_t *handle,
                                           sli_queue_manager_flush_handler_t flush_handler,
-                                          void *context)
+                                          const void *context)
 {
   if (NULL == handle) {
     return SL_STATUS_INVALID_PARAMETER;
@@ -427,7 +431,7 @@ sl_status_t sli_queue_manager_flush_queue(sli_queue_t *handle,
 
 sl_status_t sli_queue_manager_deinit(sli_queue_t *handle,
                                      sli_queue_manager_flush_handler_t flush_handler,
-                                     void *context)
+                                     const void *context)
 {
   return sli_queue_manager_flush_queue(handle, flush_handler, context);
 }

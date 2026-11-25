@@ -225,7 +225,7 @@ typedef void (*sl_si91x_socket_select_callback_t)(sl_si91x_fdset_t *fd_read,
  * @brief Callback function indicates termination of the remote socket.
  *
  * @details
- * The callback function notifies on the termination of the remote socket when the sl_si91x_set_remote_termination_callback API is registered and called.
+ * The callback function notifies termination of the remote socket when the sl_si91x_set_remote_termination_callback API is registered and called.
  * The callback provides the following details: host socket index (BSD socket descriptor), remote peer port number, and number of bytes sent before termination of the remote socket.
  *
  * Typical causes reported by firmware:
@@ -559,4 +559,18 @@ typedef struct {
 
   /// Timeout for read
   uint8_t read_timeout[SLI_SI91X_2BYTE_FIELD_SIZE];
+
+  /// recv flags (for example MSG_PEEK)
+  uint8_t flags[SLI_SI91X_4BYTE_FIELD_SIZE];
 } sli_si91x_req_socket_read_t;
+
+#pragma pack(1)
+/// Bytes available on socket response (frame 0x75). Request payload is socket_id only.
+typedef struct {
+  /// socket id
+  uint8_t socket_id;
+
+  /// number of bytes ready to read
+  uint32_t available_bytes;
+} sli_si91x_rsp_socket_bytes_available_t;
+#pragma pack()

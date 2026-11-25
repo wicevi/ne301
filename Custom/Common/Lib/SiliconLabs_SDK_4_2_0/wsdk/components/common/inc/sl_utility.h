@@ -64,6 +64,25 @@ typedef struct {
   uint8_t btdm_log_level;
 } sli_nwp_log_level_t;
 
+/** NWP COMMON log component, for @ref sl_si91x_nwp_log_set_component_mask. */
+#define SL_SI91X_NWP_LOG_COMPONENT_COMMON (1u << 0)
+/** NWP CM_PM log component, for @ref sl_si91x_nwp_log_set_component_mask. */
+#define SL_SI91X_NWP_LOG_COMPONENT_CM_PM (1u << 1)
+/** NWP WLAN_LMAC log component, for @ref sl_si91x_nwp_log_set_component_mask. */
+#define SL_SI91X_NWP_LOG_COMPONENT_WLAN_LMAC (1u << 2)
+/** NWP WLAN_UMAC log component, for @ref sl_si91x_nwp_log_set_component_mask. */
+#define SL_SI91X_NWP_LOG_COMPONENT_WLAN_UMAC (1u << 3)
+/** NWP WLAN_NETSTACK log component, for @ref sl_si91x_nwp_log_set_component_mask. */
+#define SL_SI91X_NWP_LOG_COMPONENT_WLAN_NETSTACK (1u << 4)
+/** NWP BT_BLE_CTRL log component, for @ref sl_si91x_nwp_log_set_component_mask. */
+#define SL_SI91X_NWP_LOG_COMPONENT_BT_BLE_CTRL (1u << 5)
+/** NWP BT_BLE_STACK log component, for @ref sl_si91x_nwp_log_set_component_mask. */
+#define SL_SI91X_NWP_LOG_COMPONENT_BT_BLE_STACK (1u << 6)
+/** NWP BTDM log component, for @ref sl_si91x_nwp_log_set_component_mask. */
+#define SL_SI91X_NWP_LOG_COMPONENT_BTDM (1u << 7)
+/** Every NWP log component. */
+#define SL_SI91X_NWP_LOG_COMPONENT_ALL (0xFFu)
+
 typedef struct {
   uint8_t logging_enable;
   uint8_t tsf_granularity;
@@ -75,26 +94,37 @@ typedef struct {
 
 typedef struct {
   uint8_t log_config_level;
+  /**
+   * When non-zero, @ref component_mask selects which firmware components
+   * receive @ref log_config_level. Cleared bits are sent as log level NONE
+   * so those components emit nothing. When zero, every component receives
+   * @ref log_config_level.
+   */
+  uint8_t apply_component_mask;
+  /** Bitmask of @ref SL_SI91X_NWP_LOG_COMPONENT_COMMON and the other component bits. */
+  uint8_t component_mask;
 } sli_nwp_log_config_t;
 
 /**
  * @brief NWP wire format for a log record.
  *
- * Fixed by the NWP firmware, so it is spelled out here instead of reusing
- * @ref sl_log_event_t: the host structure carries a 64-bit event time (a
- * timestamp plus an epoch) and its args[] length follows SL_LOG_CONFIG_ARG, so
- * the two layouts no longer coincide. Sizing the receive path off the host
+ * Fixed by the NWP firmware (@c sl_log_entry_t), so it is spelled out here
+ * instead of reusing @ref sl_log_event_t. The NWP packs a 64-bit time in one
+ * field ([31:0] soc timer µs, [63:32] wrap count); the host splits that into
+ * timestamp + epoch. Host args[] length also follows SL_LOG_CONFIG_ARG, so the
+ * layouts are not interchangeable. Sizing the receive path off the host
  * structure would make every RX packet fail the length check and be dropped.
  *
- * Single source of truth for the wire layout, shared by both the NCP host path
- * (sl_utility.c) and the SiWx91x MCU platform path (sl_log_platform_specific.c).
- * The MCU log component pulls this header in through its wiseconnect_common
- * dependency, so the definition lives in exactly one place.
+ * Packed size is 28 bytes. Single source of truth for the wire layout, shared
+ * by both the NCP host path (sl_utility.c) and the SiWx91x MCU platform path
+ * (sl_log_platform_specific.c). The MCU log component pulls this header in
+ * through its wiseconnect_common dependency, so the definition lives in
+ * exactly one place.
  */
 typedef __PACKED_STRUCT
 {
-  /** @brief Timestamp on the NWP timebase, in microseconds */
-  uint32_t timestamp;
+  /** @brief NWP timebase: [31:0] µs, [63:32] wraps since NWP log init */
+  uint64_t timestamp;
   /** @brief Unique event identifier (pointer to format string or numeric ID) */
   uint32_t event_id;
   /** @brief Event arguments; the NWP always emits three slots */
@@ -158,6 +188,31 @@ int sl_inet_pton6(const char *src, const char *src_endp, unsigned char *dst, uns
 void sli_reverse_digits(unsigned char *xx, int no_digits);
 sl_status_t sli_nwp_log_configure(const sli_nwp_log_config_t *config);
 void sli_handle_nwp_log_packet(const uint8_t *data, uint16_t length);
+
+/***************************************************************************/ /**
+ * @brief
+ *   Select which NWP firmware components send DEBUG logs.
+ *
+ * @details
+ *   Components whose bit is set in @p component_mask log at DEBUG; all other
+ *   components are silenced. A mask of 0 disables NWP logging.
+ *
+ *   Supported only when SL_LOG_CONFIG_LEVEL_COMPILE_TIME is
+ *   SL_LOG_CONFIG_LEVEL_DEBUG and SL_LOG_CONFIG_MODE is SL_LOG_CONFIG_MODE_HOST.
+ *   Call after sl_wifi_init(); sl_wifi_init() re-enables every component.
+ *
+ * @param[in] component_mask
+ *   Bitwise OR of SL_SI91X_NWP_LOG_COMPONENT_* values.
+ *
+ * @return
+ *   - SL_STATUS_OK: the selection was sent to the NWP.
+ *   - SL_STATUS_NOT_SUPPORTED: the build is not DEBUG + Host Mode.
+ *   - SL_STATUS_INVALID_STATE: the runtime log level is not DEBUG.
+ *   - SL_STATUS_NOT_INITIALIZED: the NWP is not initialized.
+ *   - Other sl_status_t values from sending the NWP command.
+ *   See https://docs.silabs.com/gecko-platform/latest/platform-common/status for details.
+ ******************************************************************************/
+sl_status_t sl_si91x_nwp_log_set_component_mask(uint8_t component_mask);
 
 /***************************************************************************/ /**
  * @brief

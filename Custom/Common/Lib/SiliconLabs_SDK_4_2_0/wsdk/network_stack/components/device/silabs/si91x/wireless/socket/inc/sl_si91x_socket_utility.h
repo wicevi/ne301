@@ -382,12 +382,16 @@ void sli_handle_accept_response(sli_si91x_socket_t *si91x_client_socket,
 int sli_handle_select_response(const sli_si91x_socket_select_rsp_t *response,
                                fd_set *readfds,
                                fd_set *writefds,
-                               fd_set *exception_fd);
+                               fd_set *exception_fd,
+                               uint32_t read_interest_host_mask,
+                               uint32_t write_interest_host_mask);
 #else
 int sli_handle_select_response(const sli_si91x_socket_select_rsp_t *response,
                                sl_si91x_fdset_t *readfds,
                                sl_si91x_fdset_t *writefds,
-                               sl_si91x_fdset_t *exception_fd);
+                               sl_si91x_fdset_t *exception_fd,
+                               uint32_t read_interest_host_mask,
+                               uint32_t write_interest_host_mask);
 #endif
 
 void sli_si91x_set_accept_callback(sli_si91x_socket_t *server_socket,
@@ -586,4 +590,19 @@ sl_status_t sli_si91x_socket_pre_tx_handler(sli_command_engine_t *instance, uint
 sl_status_t sli_si91x_get_dest_ip_address_from_ap_client_disconnect_resp(
   const sli_si91x_ap_disconnect_resp_t *ap_disconnect_resp,
   sl_ip_address_t *dest_ip_address);
+
+/**
+ * @brief Validate recv flags and populate the wire-format flags field for a read request.
+ *
+ * When @c SL_SI91X_SOCKETS_ENABLE_RECV_FLAGS is 0, any non-zero @p flags returns -1 with
+ * @c errno set to @c EOPNOTSUPP. When enabled, only @c MSG_PEEK is accepted.
+ */
+int sli_si91x_prepare_recv_wire_flags(int flags, uint8_t wire_flags[SLI_SI91X_4BYTE_FIELD_SIZE]);
+
+/**
+ * @brief Query bytes available to read on a firmware socket (frame 0x75).
+ *
+ * Request payload to NWP is the socket id only (1 byte).
+ */
+sl_status_t sli_si91x_get_socket_bytes_available(uint8_t firmware_socket_id, uint32_t *available_bytes);
 #endif // _SL_SI91X_SOCKET_UTILITY_H_

@@ -31,12 +31,15 @@
 #include "sl_status.h"
 #include "sli_utility.h"
 #include "sl_constants.h"
+#include "sl_si91x_async_socket_log_helper.h"
 #include "sl_si91x_socket.h"
 #include "sl_si91x_socket_callback_framework.h"
 #include "sl_si91x_socket_types.h"
 #include "sl_si91x_socket_constants.h"
 #include <stdint.h>
 #include <string.h>
+
+sl_log_level_t sl_log_si91x_async_socket_component_level = SL_LOG_SI91X_ASYNC_SOCKET_COMPONENT_LEVEL;
 /******************************************************
  *                      Macros
  ******************************************************/
@@ -90,7 +93,7 @@ int sl_si91x_listen(int socket, int max_number_of_clients)
   // Preserve errno if already set by sli_create_and_send_socket_request (e.g., EAFNOSUPPORT)
   if (status != SLI_SI91X_NO_ERROR) {
     if (errno == 0) {
-      errno = SLI_SI91X_UNDEFINED_ERROR;
+      errno = (si91x_socket->pending_error != 0) ? si91x_socket->pending_error : SLI_SI91X_UNDEFINED_ERROR;
     }
     return -1;
   }
@@ -257,7 +260,8 @@ int sl_si91x_setsockopt(int32_t sockID, int level, int option_name, const void *
                SLI_GET_SAFE_MEMCPY_LENGTH(sizeof(si91x_socket->max_retransmission_timeout_value), option_len));
       } else {
         SL_DEBUG_LOG_V2(DEBUG,
-                        "\n Max retransmission timeout must be 1-128 and a power of two (e.g. 1,2,4,8,16,32,64,128)\n");
+                        "[si91x_async_socket] Max retransmission timeout must be 1-128 and a power of two (e.g. "
+                        "1,2,4,8,16,32,64,128)\r\n");
         SLI_SET_ERROR_AND_RETURN(EINVAL);
       }
       break;
@@ -360,7 +364,7 @@ int sl_si91x_send_large_data(int socket, const uint8_t *buffer, size_t buffer_le
     // Send chunk of data and return the total data sent in successful case
     bsd_ret_code = sl_si91x_send_async(socket, buffer + offset, chunk_size, flags, NULL);
     if (bsd_ret_code < 0) {
-      SL_DEBUG_LOG_V2(ERROR, "\n Send failed with error code 0x%X \r\n", errno);
+      SL_DEBUG_LOG_V2(ERROR, "[si91x_async_socket] Send failed with error code 0x%X\r\n", errno);
       break;
     } else {
       offset += bsd_ret_code;
@@ -567,8 +571,6 @@ int sl_si91x_recvfrom(int socket,
                       struct sockaddr *addr,
                       socklen_t *addr_len)
 {
-  UNUSED_PARAMETER(flags);
-
   // Initialize variables for socket communication
   sli_wifi_wait_period_t wait_time         = 0;
   sli_si91x_req_socket_read_t request      = { 0 };
@@ -591,8 +593,13 @@ int sl_si91x_recvfrom(int socket,
 
   // create and send a socket request to configure it as UDP.
   if (si91x_socket->type == SOCK_DGRAM && (si91x_socket->state == BOUND || si91x_socket->state == INITIALIZED)) {
-    int bsd_status = sli_create_and_send_socket_request(socket, SLI_SI91X_SOCKET_UDP_CLIENT, NULL);
-    SLI_SOCKET_VERIFY_STATUS_AND_RETURN(bsd_status, SLI_SI91X_NO_ERROR, SLI_SI91X_UNDEFINED_ERROR);
+    sl_status_t bsd_status = sli_create_and_send_socket_request(socket, SLI_SI91X_SOCKET_UDP_CLIENT, NULL);
+    if (bsd_status != SL_STATUS_OK) {
+      if (errno == 0) {
+        errno = (si91x_socket->pending_error != 0) ? si91x_socket->pending_error : SLI_SI91X_UNDEFINED_ERROR;
+      }
+      return -1;
+    }
 
     si91x_socket->state = UDP_UNCONNECTED_READY;
   }
@@ -620,27 +627,32 @@ int sl_si91x_recvfrom(int socket,
     buf_len = max_buf_len;
   }
   // Initialize the socket read request with the socket ID and requested buffer length
-  request.socket_id = (uint8_t)si91x_socket->id;
-  memcpy(request.requested_bytes, &buf_len, sizeof(buf_len));
+  const uint32_t requested_byte_count = (uint32_t)buf_len;
+  request.socket_id                   = (uint8_t)si91x_socket->id;
+  memcpy(request.requested_bytes, &requested_byte_count, sizeof(requested_byte_count));
   memcpy(request.read_timeout, &si91x_socket->read_timeout, sizeof(si91x_socket->read_timeout));
+  if (sli_si91x_prepare_recv_wire_flags((int)flags, request.flags) < 0) {
+    return -1;
+  }
   wait_time = (SLI_WIFI_WAIT_FOR_EVER | SLI_WIFI_WAIT_FOR_RESPONSE_BIT);
 
+  const uint16_t cmd_queue = (uint16_t)(SLI_SI91X_CMD_MAX + si91x_socket->index);
+
   si91x_socket->is_receive_cmd_pending = true;
-  sl_status_t status                   = sli_wifi_async_send_command(SLI_WIFI_REQ_SOCKET_READ_DATA,
-                                                   (SLI_SI91X_CMD_MAX + si91x_socket->index),
-                                                   &request,
-                                                   sizeof(request),
-                                                   NULL);
+  sl_status_t status =
+    sli_wifi_async_send_command(SLI_WIFI_REQ_SOCKET_READ_DATA, cmd_queue, &request, sizeof(request), NULL);
   if (status != SL_STATUS_IN_PROGRESS) {
     si91x_socket->is_receive_cmd_pending = false;
-    VERIFY_STATUS_AND_RETURN(status);
+    if (status != SL_STATUS_OK) {
+      if (errno == 0) {
+        errno = sli_si91x_socket_status_to_errno(status);
+      }
+      return -1;
+    }
   }
 
-  status = sli_wifi_receive_response_buffer((uint16_t)(SLI_SI91X_CMD_MAX + si91x_socket->index),
-                                            0,
-                                            wait_time,
-                                            SLI_WIFI_WAIT_ON_EVENT_ID,
-                                            (void **)&response_buffer);
+  status =
+    sli_wifi_receive_response_buffer(cmd_queue, 0, wait_time, SLI_WIFI_WAIT_ON_EVENT_ID, (void **)&response_buffer);
   if (status == SL_STATUS_SI91X_SOCKET_CLOSED) {
     sli_buffer_manager_free_buffer(response_buffer);
     errno                                = ENOTCONN;
@@ -654,7 +666,12 @@ int sl_si91x_recvfrom(int socket,
   }
   si91x_socket->is_receive_cmd_pending = false;
 
-  SLI_SOCKET_VERIFY_STATUS_AND_RETURN(status, SL_STATUS_OK, SLI_SI91X_UNDEFINED_ERROR);
+  if (status != SL_STATUS_OK) {
+    if (errno == 0) {
+      errno = sli_si91x_socket_status_to_errno(status);
+    }
+    return -1;
+  }
 
   // Retrieve the response packet from the response_buffer
   response_packet = (sl_wifi_system_packet_t *)sli_wifi_host_get_buffer_data(response_buffer, 0, NULL);
@@ -702,6 +719,28 @@ int sl_si91x_recvfrom(int socket,
   sli_buffer_manager_free_buffer(response_buffer);
 
   return bytes_read;
+}
+
+int sl_si91x_socket_get_available_bytes_count(int socket, uint32_t *available_bytes_count)
+{
+  const sli_si91x_socket_t *si91x_socket = sli_get_si91x_socket(socket);
+
+  SLI_SET_ERRNO_AND_RETURN_IF_TRUE(available_bytes_count == NULL, EINVAL);
+  SLI_SET_ERRNO_AND_RETURN_IF_TRUE(si91x_socket == NULL, EBADF);
+  SLI_SET_ERRNO_AND_RETURN_IF_TRUE(si91x_socket->type == SOCK_STREAM && si91x_socket->state != CONNECTED, ENOTCONN);
+  SLI_SET_ERRNO_AND_RETURN_IF_TRUE(si91x_socket->state != CONNECTED && si91x_socket->state != UDP_UNCONNECTED_READY,
+                                   EBADF);
+
+  sl_status_t status = sli_si91x_get_socket_bytes_available((uint8_t)si91x_socket->id, available_bytes_count);
+  if (status != SL_STATUS_OK) {
+    int mapped_errno = sli_si91x_socket_status_to_errno(status);
+    if (mapped_errno == 0) {
+      mapped_errno = EIO;
+    }
+    SLI_SET_ERROR_AND_RETURN(mapped_errno);
+  }
+
+  return 0;
 }
 
 #ifndef __ZEPHYR__

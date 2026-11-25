@@ -75,15 +75,22 @@
 #include "rsi_wisemcu_hardware_setup.h"
 #include "sli_siwx917_soc.h"
 #endif
+#ifdef SL_SI91X_SIDE_BAND_CRYPTO
+#include "sli_si91x_nwp_interface.h"
+#include "sli_si91x_ahb_bus.h"
+#endif
 #ifdef SLI_SI91X_ENABLE_BLE
 #include "rsi_common_apis.h"
 #endif
+#include "sl_si91x_driver_log_helper.h"
+
+sl_log_level_t sl_log_si91x_driver_component_level = SL_LOG_SI91X_DRIVER_COMPONENT_LEVEL;
 
 #ifdef SL_SI91X_SIDE_BAND_CRYPTO
-#define SLI_SIDE_BAND_DONE (1 << 2) //! had to be redefined as this macro is not in .h
 rsi_m4ta_desc_t crypto_desc[2];
-extern osEventFlagsId_t ta_events;
 extern osMutexId_t side_band_crypto_mutex;
+/* Held after a timeout until SIDE_BAND_DONE. crypto_desc[] still points into it. */
+static sl_wifi_buffer_t *sli_side_band_timed_out_buffer = NULL;
 #endif
 
 #ifndef NULL
@@ -288,11 +295,11 @@ sl_status_t sl_si91x_driver_init_wifi_radio(const sl_wifi_device_configuration_t
   if (SL_WIFI_IGNORE_REGION != config->region_code) {
     // Set the device's region based on configuration
     status = sl_si91x_set_device_region(config->boot_config.oper_mode, config->band, config->region_code);
-    SL_DEBUG_LOG_V2(DEBUG, "Region code set to %d\r\n", config->region_code);
+    SL_DEBUG_LOG_V2(DEBUG, "[si91x_driver] Region code set to %d\r\n", config->region_code);
     VERIFY_STATUS_AND_RETURN(status);
   }
 #else
-  SL_DEBUG_LOG_V2(DEBUG, "Region code configuration skipped for Modules\r\n");
+  SL_DEBUG_LOG_V2(DEBUG, "[si91x_driver] Region code configuration skipped for Modules\r\n");
 #endif
 
   // Configure the RTS threshold for WLAN
@@ -380,6 +387,9 @@ sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, s
     }
     return SL_STATUS_ALREADY_INITIALIZED;
   }
+
+  // Persist init band separately so sl_wifi_set_default_interface() cannot overwrite it
+  sli_wifi_set_band(config->band);
   // Initialize BLE if BLE is enabled
 #ifdef SLI_SI91X_ENABLE_BLE
   int32_t rsi_status = 0;
@@ -405,12 +415,12 @@ sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, s
     // [0] SLI_BUFFER_MANAGER_CE_CMD_TX_POOL: Command Engine TX command buffers.
     {
       .block_size  = SLI_WIFI_BUFFER_BLOCK_SIZE,
-      .block_count = 5,
+      .block_count = SLI_BUFFER_MANAGER_CE_CMD_TX_POOL_BLOCK_COUNT,
     },
     // [1] SLI_BUFFER_MANAGER_DATA_TX_POOL: Host TX data payload buffers (socket, transceiver, raw TX).
     {
       .block_size  = SLI_WIFI_BUFFER_BLOCK_SIZE,
-      .block_count = 5,
+      .block_count = SLI_BUFFER_MANAGER_DATA_TX_POOL_BLOCK_COUNT,
     },
     // [2] SLI_BUFFER_MANAGER_CE_METADATA_POOL: Command Engine packet metadata (sli_command_engine_metadata_t).
     {
@@ -427,17 +437,17 @@ sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, s
       .block_size = SLI_WIFI_BUFFER_BLOCK_SIZE,
 #ifndef SL_NCP_UART_INTERFACE
       // SPI (NCP) and AHB (SOC): HAL thread posts and reads one RX frame at a time.
-      .block_count = 5,
+      .block_count = SLI_BUFFER_MANAGER_HAL_CMD_DATA_RX_POOL_BLOCK_COUNT,
 #else
       // NCP UART: the UART ISR/callback enqueues each frame and allocates the next RX
       // buffer before the HAL thread drains the queue; a larger pool avoids drops.
-      .block_count = 10,
+      .block_count = SLI_BUFFER_MANAGER_HAL_CMD_DATA_RX_POOL_UART_BLOCK_COUNT,
 #endif
     },
     // [5] SLI_BUFFER_MANAGER_QUEUE_NODE_POOL: Queue manager node buffers (sli_queue_node_t).
     {
       .block_size  = sizeof(sli_queue_node_t),
-      .block_count = 20,
+      .block_count = SLI_BUFFER_MANAGER_QUEUE_NODE_POOL_BLOCK_COUNT,
     },
   };
 
@@ -450,7 +460,7 @@ sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, s
 
   // Common pool: shared fallback for HYBRID allocations (same block size as CE TX pool, 4 blocks).
   config_buffer.common_pool_info.block_size  = default_buffer_configuration[0].block_size;
-  config_buffer.common_pool_info.block_count = 4;
+  config_buffer.common_pool_info.block_count = SLI_BUFFER_MANAGER_COMMON_POOL_BLOCK_COUNT;
 
   // Initialize the buffer manager
   status = sli_buffer_manager_init(&config_buffer);
@@ -546,7 +556,7 @@ sl_status_t sl_si91x_driver_init(const sl_wifi_device_configuration_t *config, s
   // In coex mode, 160 MHz SoC clock is not supported.
   // If 160 MHz is configured in coex mode, it will automatically fall back to 120 MHz.
   if ((boot_config.coex_mode) && (boot_config.custom_feature_bit_map & SL_SI91X_CUSTOM_FEAT_SOC_CLK_CONFIG_160MHZ)) {
-    SL_DEBUG_LOG_V2(WARN, "\r\n 160 MHz clock is not supported in coex mode. Falling back to 120 MHz.\r\n");
+    SL_DEBUG_LOG_V2(WARN, "[si91x_driver] 160 MHz clock is not supported in coex mode. Falling back to 120 MHz.\r\n");
     // Clamp the configuration to 120 MHz
     boot_config.custom_feature_bit_map &= ~SL_SI91X_CUSTOM_FEAT_SOC_CLK_CONFIG_160MHZ;
     boot_config.custom_feature_bit_map |= SL_SI91X_CUSTOM_FEAT_SOC_CLK_CONFIG_120MHZ;
@@ -867,30 +877,71 @@ sl_status_t sl_si91x_driver_send_side_band_crypto(uint32_t command,
   // Acquire Mutex
   osMutexAcquire(side_band_crypto_mutex, 0xFFFFFFFFUL);
 
+  /* A previous timeout left crypto_desc[] pointing at this buffer. Wait for the NWP
+   * to finish before reusing the descriptors or freeing the memory. */
+  if (sli_side_band_timed_out_buffer != NULL) {
+    uint32_t done = osEventFlagsWait(ta_events, SLI_SI91X_SIDE_BAND_DONE, osFlagsWaitAny, osWaitForever);
+    if ((done & SLI_SI91X_SIDE_BAND_DONE) == 0U) {
+      osMutexRelease(side_band_crypto_mutex);
+      sli_buffer_manager_free_buffer(buffer);
+      return SL_STATUS_TIMEOUT;
+    }
+    sli_si91x_update_side_band_crypto_command_status(false);
+    sl_si91x_host_clear_sleep_indicator();
+    sli_buffer_manager_free_buffer(sli_side_band_timed_out_buffer);
+    sli_side_band_timed_out_buffer = NULL;
+  }
+
   // fill crypto desc
   crypto_desc[0].addr   = (uint32_t)packet->desc;
   crypto_desc[0].length = SL_HOST_DESC_LEN;
   crypto_desc[1].addr   = (uint32_t)packet->data;
   crypto_desc[1].length = SL_CRYPTO_PKT_LEN;
 
+  status = sli_si91x_req_wakeup();
+  if (status != SL_STATUS_OK) {
+    sl_si91x_host_clear_sleep_indicator();
+    osMutexRelease(side_band_crypto_mutex);
+    sli_buffer_manager_free_buffer(buffer);
+    return status;
+  }
+
+  /* Drop a stale SIDE_BAND_DONE so this wait cannot complete on the previous operation. */
+  (void)osEventFlagsClear(ta_events, SLI_SI91X_SIDE_BAND_DONE);
+
   //! Enter Critical Section
   __disable_irq();
+
+  /* Hold M4 out of sleep until the NWP reports SIDE_BAND_DONE, including after timeout. */
+  sli_si91x_update_side_band_crypto_command_status(true);
 
   sli_si91x_raise_side_band_interrupt_to_ta();
 
   //! Exit Critical Section
   __enable_irq();
 
-  result =
-    osEventFlagsWait(ta_events, SLI_SIDE_BAND_DONE, (osFlagsWaitAny), (wait_period & ~SLI_WIFI_WAIT_FOR_RESPONSE_BIT));
+  result = osEventFlagsWait(ta_events,
+                            SLI_SI91X_SIDE_BAND_DONE,
+                            (osFlagsWaitAny),
+                            (wait_period & ~SLI_WIFI_WAIT_FOR_RESPONSE_BIT));
+
   if (result == (uint32_t)osErrorTimeout || result == (uint32_t)osErrorResource) {
+    /* The NWP may still be writing the buffer. Keep the wake hold and the M4-sleep
+     * block until SIDE_BAND_DONE; the next call frees the buffer after that. */
+    sli_side_band_timed_out_buffer = buffer;
     osMutexRelease(side_band_crypto_mutex);
-    sli_buffer_manager_free_buffer(buffer);
     return SL_STATUS_TIMEOUT;
   }
 
-  status =
-    (((uint8_t *)crypto_desc[0].addr)[12] + (((uint8_t *)crypto_desc[0].addr)[13] << 8)); // Extract the frame status
+  sli_si91x_update_side_band_crypto_command_status(false);
+  sl_si91x_host_clear_sleep_indicator();
+
+  /* TA returns a 16-bit frame status (e.g. 0xCC9A for tag mismatch). Named
+   * sl_status codes set bit 16 (SL_STATUS_CRYPTO_INVALID_SIGNATURE = 0x1CC9A),
+   * so promote the same way the command path does. */
+  uint16_t firmware_status =
+    (uint16_t)(((uint8_t *)crypto_desc[0].addr)[12] + (((uint8_t *)crypto_desc[0].addr)[13] << 8));
+  status = (firmware_status == SL_STATUS_OK) ? SL_STATUS_OK : (sl_status_t)(firmware_status | (1U << 16));
 
   // Release Mutex
   osMutexRelease(side_band_crypto_mutex);
@@ -1600,8 +1651,7 @@ sl_status_t sl_si91x_driver_send_transceiver_data(sl_wifi_transceiver_tx_data_co
   host_desc[14] =
     (uint8_t)(((WME_AC_TO_TID(control->priority) & 0xf) << 4) | (WME_AC_TO_QNUM(control->priority) & 0xf));
 
-  //! Initialize extended desc
-  memcpy(&host_desc[16], &control->token, TRANSCEIVER_TX_DATA_EXT_DESC_SIZE);
+  memcpy(packet->data, &control->token, TRANSCEIVER_TX_DATA_EXT_DESC_SIZE);
 
   // Note: Bits 6 and 7 of ctrl_flags, bit 0 of ctrl_flags1, and the channel and tx_power fields are currently not supported.
   //! If it is an EIA packet, update extended descriptor fields
@@ -1610,10 +1660,10 @@ sl_status_t sl_si91x_driver_send_transceiver_data(sl_wifi_transceiver_tx_data_co
     if (SLI_IS_IMMEDIATE_TRF(control->ctrl_flags)) {
       host_desc[7] |= SLI_IMMEDIATE_TRF_HOST_DESC; //! Immediate Transfer
     }
-    host_desc[20] = control->channel;  //! Channel
-    host_desc[21] = control->tx_power; //! Transmission Power
+    packet->data[4] = control->channel;  //! Channel
+    packet->data[5] = control->tx_power; //! Transmission Power
     if (SLI_IS_LAST_PKT(control->ctrl_flags1)) {
-      host_desc[22] |= SLI_LAST_PKT; //! Last Packet
+      packet->data[6] |= SLI_LAST_PKT; //! Last Packet
     }
   }
 

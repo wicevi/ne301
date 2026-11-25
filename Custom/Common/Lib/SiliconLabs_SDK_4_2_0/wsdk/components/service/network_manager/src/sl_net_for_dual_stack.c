@@ -65,6 +65,7 @@
 #include "sli_net_ip_config.h"
 #include "sl_si91x_socket_constants.h"
 #include "sl_net_dns_utility.h"
+#include "sl_net_log_helper.h"
 
 #define NETIF_IPV4_ADDRESS(X, Y) (uint8_t)(((X) >> (8 * Y)) & 0xFF)
 #define MAC_48_BIT_SET           (1)
@@ -118,7 +119,7 @@ static void low_level_init(struct netif *netif)
   // Request MAC address
   status = sl_wifi_get_mac_address(SL_WIFI_CLIENT_INTERFACE, &mac_addr);
   if (status != SL_STATUS_OK) {
-    SL_DEBUG_LOG_V2(ERROR, " MAC address failed \r\n");
+    SL_DEBUG_LOG_V2(ERROR, "[network_manager]  MAC address failed \r\n");
     return;
   }
 
@@ -156,15 +157,17 @@ static void low_level_input(struct netif *netif, uint8_t *b, uint16_t len)
   if (len < LWIP_FRAME_ALIGNMENT) { /* 60 : LWIP frame alignment */
     len = LWIP_FRAME_ALIGNMENT;
   }
+#if LWIP_IPV6 || defined(SL_LOG_COMPONENT_NETWORK_MANAGER_DEBUG_ENABLED)
   // Drop packets originated from the same interface and is not destined for the said interface
   const uint8_t *src_mac = b + netif->hwaddr_len;
   const uint8_t *dst_mac = b;
+#endif
 
 #if LWIP_IPV6
   if (!(ip6_addr_ispreferred(netif_ip6_addr_state(netif, 0)))
       && (memcmp(netif->hwaddr, src_mac, netif->hwaddr_len) == 0)
       && (memcmp(netif->hwaddr, dst_mac, netif->hwaddr_len) != 0)) {
-    SL_DEBUG_LOG_V2(DEBUG, "%s: DROP, [%02x:%02x:", (uintptr_t) __func__, dst_mac[0], dst_mac[1]);
+    SL_DEBUG_LOG_V2(DEBUG, "[network_manager] %s: DROP, [%02x:%02x:", (uintptr_t) __func__, dst_mac[0], dst_mac[1]);
     SL_DEBUG_LOG_V2(DEBUG, "%02x:%02x:%02x:", dst_mac[2], dst_mac[3], dst_mac[4]);
     SL_DEBUG_LOG_V2(DEBUG, "%02x]<-", dst_mac[5]);
     SL_DEBUG_LOG_V2(DEBUG, "[%02x:%02x:%02x:", src_mac[0], src_mac[1], src_mac[2]);
@@ -184,7 +187,7 @@ static void low_level_input(struct netif *netif, uint8_t *b, uint16_t len)
       bufferoffset += q->len;
     }
 
-    SL_DEBUG_LOG_V2(DEBUG, "%s: ACCEPT %d,", (uintptr_t) __func__, bufferoffset);
+    SL_DEBUG_LOG_V2(DEBUG, "[network_manager] %s: ACCEPT %d,", (uintptr_t) __func__, bufferoffset);
     SL_DEBUG_LOG_V2(DEBUG, " [%02x:%02x:%02x:", dst_mac[0], dst_mac[1], dst_mac[2]);
     SL_DEBUG_LOG_V2(DEBUG, "%02x:%02x:%02x]<-", dst_mac[3], dst_mac[4], dst_mac[5]);
     SL_DEBUG_LOG_V2(DEBUG, "[%02x:%02x:%02x:", src_mac[0], src_mac[1], src_mac[2]);
@@ -623,16 +626,16 @@ static sl_status_t sli_set_sta_link_up_by_profile_mode(sl_net_wifi_client_profil
 
   // SL_SI91X_EXT_TCP_IP_DUAL_MODE_ENABLE mode: Dual Network Stack
   if (dual_mode_enabled) {
-    SL_DEBUG_LOG_V2(DEBUG, "Dual mode - Dual Network Stack (NWP + LwIP)\r\n");
+    SL_DEBUG_LOG_V2(DEBUG, "[network_manager] Dual mode - Dual Network Stack (NWP + LwIP)\r\n");
 
     if (ip_mode == SL_IP_MANAGEMENT_DHCP_IPV4_LINK_LOCAL_IPV6) {
       // DHCPv4 + IPv6 link-local mode: Configure based on requested IP type(s)
       // IPv4: DHCP on offload stack, IPv6: link-local on offload stack, then sync to LwIP
-      SL_DEBUG_LOG_V2(DEBUG, "Dual: DHCPv4 + IPv6 link-local mode");
+      SL_DEBUG_LOG_V2(DEBUG, "[network_manager] Dual: DHCPv4 + IPv6 link-local mode");
 
       // Configure IPv4 via DHCP if IPv4 is requested
       if ((profile->ip.type & SL_IPV4) == SL_IPV4) {
-        SL_DEBUG_LOG_V2(DEBUG, "Dual: Configuring IPv4 via DHCP");
+        SL_DEBUG_LOG_V2(DEBUG, "[network_manager] Dual: Configuring IPv4 via DHCP");
         sl_net_ip_configuration_t ipv4_config = { 0 };
         ipv4_config.mode                      = SL_IP_MANAGEMENT_DHCP;
         ipv4_config.type                      = SL_IPV4;
@@ -648,7 +651,7 @@ static sl_status_t sli_set_sta_link_up_by_profile_mode(sl_net_wifi_client_profil
 
       // Configure IPv6 link-local if IPv6 is requested
       if ((profile->ip.type & SL_IPV6) == SL_IPV6) {
-        SL_DEBUG_LOG_V2(DEBUG, "Dual: Configuring IPv6 link-local");
+        SL_DEBUG_LOG_V2(DEBUG, "[network_manager] Dual: Configuring IPv6 link-local");
         status = sli_configure_ipv6_link_local(&profile->ip);
         if (status != SL_STATUS_OK) {
           return status;
@@ -658,7 +661,7 @@ static sl_status_t sli_set_sta_link_up_by_profile_mode(sl_net_wifi_client_profil
       set_sta_link_up(profile);
     } else {
       // Default dual mode: single ipconfig, then sync to LwIP
-      SL_DEBUG_LOG_V2(DEBUG, "Dual: DHCP performed by NWP, synced to LwIP");
+      SL_DEBUG_LOG_V2(DEBUG, "[network_manager] Dual: DHCP performed by NWP, synced to LwIP");
       status = sl_si91x_configure_ip_address(&profile->ip, SL_SI91X_WIFI_CLIENT_VAP_ID);
       // Bring the link up on full or partial IP configuration success. profile->ip.type now
       // reflects only the families that configured successfully, so LwIP is synced accordingly.
@@ -668,17 +671,17 @@ static sl_status_t sli_set_sta_link_up_by_profile_mode(sl_net_wifi_client_profil
     }
   } else if (sli_is_bypass_mode_enabled()) {
     // SL_SI91X_TCP_IP_FEAT_BYPASS mode: Host-only IP management (LwIP only)
-    SL_DEBUG_LOG_V2(DEBUG, "Bypass mode - LwIP only IP management");
+    SL_DEBUG_LOG_V2(DEBUG, "[network_manager] Bypass mode - LwIP only IP management");
 
     switch (ip_mode) {
       case SL_IP_MANAGEMENT_DHCP:
         // DHCP will be performed by LwIP
-        SL_DEBUG_LOG_V2(DEBUG, "Bypass: DHCP performed by LwIP");
+        SL_DEBUG_LOG_V2(DEBUG, "[network_manager] Bypass: DHCP performed by LwIP");
         status = sli_configure_host_dhcp(profile);
         break;
       case SL_IP_MANAGEMENT_STATIC_IP:
         // Static IP configuration to LwIP only
-        SL_DEBUG_LOG_V2(DEBUG, "Bypass: Static IP configuration to LwIP");
+        SL_DEBUG_LOG_V2(DEBUG, "[network_manager] Bypass: Static IP configuration to LwIP");
         set_sta_link_up(profile);
         break;
       default:
@@ -686,7 +689,7 @@ static sl_status_t sli_set_sta_link_up_by_profile_mode(sl_net_wifi_client_profil
     }
   } else {
     // Offload only mode: NWP-only IP management
-    SL_DEBUG_LOG_V2(DEBUG, "Offload mode - NWP only IP management\r\n");
+    SL_DEBUG_LOG_V2(DEBUG, "[network_manager] Offload mode - NWP only IP management\r\n");
     status = sl_si91x_configure_ip_address(&profile->ip, SL_SI91X_WIFI_CLIENT_VAP_ID);
   }
 
@@ -702,14 +705,14 @@ static void sli_sta_link_down_on_tcpip(void *arg)
   }
 
 #if LWIP_IPV4 && LWIP_DHCP
-  SL_DEBUG_LOG_V2(DEBUG, "DHCP Link down\r\n");
+  SL_DEBUG_LOG_V2(DEBUG, "[network_manager] DHCP Link down\r\n");
   dhcp_stop(netif);
 #endif /* LWIP_IPV4 && LWIP_DHCP */
-#if SL_LWIP_ADAPTIVE_TIMERS
-  netif_stop_timers(netif);
-#endif
   netif_set_link_down(netif);
   netif_set_down(netif);
+#if SL_LWIP_LINK_DOWN_CLEANUP
+  netif_stop_timers(netif);
+#endif
 }
 
 static void set_sta_link_down(void)
@@ -717,7 +720,7 @@ static void set_sta_link_down(void)
   struct netif *netif = &(wifi_client_context->netif);
 
   if (tcpip_callback(sli_sta_link_down_on_tcpip, netif) != ERR_OK) {
-    SL_DEBUG_LOG_V2(ERROR, "Failed to schedule STA link down on tcpip thread\r\n");
+    SL_DEBUG_LOG_V2(ERROR, "[network_manager] Failed to schedule STA link down on tcpip thread\r\n");
   }
 }
 
@@ -756,7 +759,8 @@ sl_status_t sl_net_wifi_client_init(sl_net_interface_t interface,
 
     if (dual_mode_enabled && sli_is_bypass_mode_enabled()) {
       SL_DEBUG_LOG_V2(ERROR,
-                      "Error: SL_SI91X_EXT_TCP_IP_DUAL_MODE_ENABLE and SL_SI91X_TCP_IP_FEAT_BYPASS flags are mutually "
+                      "[network_manager] Error: SL_SI91X_EXT_TCP_IP_DUAL_MODE_ENABLE and SL_SI91X_TCP_IP_FEAT_BYPASS "
+                      "flags are mutually "
                       "exclusive");
       return SL_STATUS_INVALID_CONFIGURATION;
     }
@@ -767,7 +771,7 @@ sl_status_t sl_net_wifi_client_init(sl_net_interface_t interface,
 
   status = sl_wifi_init(configuration, NULL, sl_wifi_default_event_handler);
   if (status != SL_STATUS_OK) {
-    SL_DEBUG_LOG_V2(ERROR, "sl_wifi_init failed with error: 0x%lX", status);
+    SL_DEBUG_LOG_V2(ERROR, "[network_manager] sl_wifi_init failed with error: 0x%lX", status);
     return status;
   }
 
@@ -829,7 +833,7 @@ sl_status_t sl_net_wifi_client_up(sl_net_interface_t interface, sl_net_profile_i
   // Configure IP based on the management type
   status = sli_set_sta_link_up_by_profile_mode(&profile);
   if (!sli_net_is_ip_config_success(status)) {
-    SL_DEBUG_LOG_V2(ERROR, "IP/link config failed with error: 0x%lX", status);
+    SL_DEBUG_LOG_V2(ERROR, "[network_manager] IP/link config failed with error: 0x%lX", status);
     // Disconnect WiFi only when no IP family could be configured.
     sl_wifi_disconnect(SL_WIFI_CLIENT_INTERFACE);
     return status;
@@ -840,7 +844,7 @@ sl_status_t sl_net_wifi_client_up(sl_net_interface_t interface, sl_net_profile_i
   const sl_status_t ip_config_status          = status;
   sl_net_ip_configuration_t *stored_ip_config = sli_get_stored_ip_config(SLI_SI91X_CLIENT);
   if (stored_ip_config == NULL) {
-    SL_DEBUG_LOG_V2(ERROR, "Stored IP configuration not found");
+    SL_DEBUG_LOG_V2(ERROR, "[network_manager] Stored IP configuration not found");
     return SL_STATUS_NULL_POINTER;
   }
   *stored_ip_config = profile.ip;
@@ -865,7 +869,7 @@ sl_status_t sl_net_wifi_client_down(sl_net_interface_t interface)
   }
   sl_net_ip_configuration_t *stored_ip_config = sli_get_stored_ip_config(SLI_SI91X_CLIENT);
   if (stored_ip_config == NULL) {
-    SL_DEBUG_LOG_V2(ERROR, "Stored IP configuration not found");
+    SL_DEBUG_LOG_V2(ERROR, "[network_manager] Stored IP configuration not found");
     return SL_STATUS_NULL_POINTER;
   }
   memset(stored_ip_config, 0, sizeof(sl_net_ip_configuration_t));
@@ -893,7 +897,8 @@ sl_status_t sl_net_wifi_ap_init(sl_net_interface_t interface,
 
     if (dual_mode_enabled && sli_is_bypass_mode_enabled()) {
       SL_DEBUG_LOG_V2(ERROR,
-                      "Error: SL_SI91X_EXT_TCP_IP_DUAL_MODE_ENABLE and SL_SI91X_TCP_IP_FEAT_BYPASS flags are mutually "
+                      "[network_manager] Error: SL_SI91X_EXT_TCP_IP_DUAL_MODE_ENABLE and SL_SI91X_TCP_IP_FEAT_BYPASS "
+                      "flags are mutually "
                       "exclusive");
       return SL_STATUS_INVALID_CONFIGURATION;
     }
@@ -962,7 +967,7 @@ sl_status_t sl_net_wifi_ap_up(sl_net_interface_t interface, sl_net_profile_id_t 
   // Store the IP configuration for later retrieval
   sl_net_ip_configuration_t *stored_ip_config = sli_get_stored_ip_config(SLI_SI91X_AP);
   if (stored_ip_config == NULL) {
-    SL_DEBUG_LOG_V2(ERROR, "Stored IP configuration not found");
+    SL_DEBUG_LOG_V2(ERROR, "[network_manager] Stored IP configuration not found");
     return SL_STATUS_NULL_POINTER;
   }
   *stored_ip_config = profile.ip;
@@ -1068,7 +1073,7 @@ sl_status_t sl_net_dns_resolve_hostname(const char *host_name,
 
   sl_net_ip_configuration_t *stored_ip_config = sli_get_stored_ip_config(SLI_SI91X_CLIENT);
   if (stored_ip_config == NULL) {
-    SL_DEBUG_LOG_V2(ERROR, "Stored IP configuration not found");
+    SL_DEBUG_LOG_V2(ERROR, "[network_manager] Stored IP configuration not found");
     return SL_STATUS_NULL_POINTER;
   }
   sl_ip_address_type_t client_ip_type = stored_ip_config->type;
@@ -1111,7 +1116,7 @@ sl_status_t sl_net_dns_resolve_hostname(const char *host_name,
 
   // Check if the command failed and free the buffer if it was allocated
   if ((status != SL_STATUS_OK) && (buffer != NULL)) {
-    SL_DEBUG_LOG_V2(WARN, "DNS query command request failed");
+    SL_DEBUG_LOG_V2(WARN, "[network_manager] DNS query command request failed");
     sli_buffer_manager_free_buffer(buffer);
   }
   VERIFY_STATUS_AND_RETURN(status);
@@ -1281,7 +1286,7 @@ sl_status_t sl_net_get_ip_address(sl_net_interface_t interface, sl_net_ip_addres
   ip_config.type = stored->type;
   status         = sli_net_configure_ip_address(&ip_config, vap_id, timeout);
   if (status != SL_STATUS_OK) {
-    SL_DEBUG_LOG_V2(ERROR, "ip configuration failed with error: 0x%lX", status);
+    SL_DEBUG_LOG_V2(ERROR, "[network_manager] ip configuration failed with error: 0x%lX", status);
     return status;
   }
 
@@ -1312,7 +1317,7 @@ sl_status_t sl_si91x_host_process_data_frame(sl_wifi_interface_t interface, sl_w
   sl_wifi_system_packet_t *rsi_pkt;
   packet  = sli_wifi_host_get_buffer_data(buffer, 0, NULL);
   rsi_pkt = (sl_wifi_system_packet_t *)packet;
-  SL_DEBUG_LOG_V2(DEBUG, "RX len : %d\r\n", rsi_pkt->length);
+  SL_DEBUG_LOG_V2(DEBUG, "[network_manager] RX len : %d\r\n", rsi_pkt->length);
 
   /* The event handler (sli_si91x_wifi_data_packet_handler) hardcodes
    * SL_WIFI_CLIENT_INTERFACE for all received data frames regardless of

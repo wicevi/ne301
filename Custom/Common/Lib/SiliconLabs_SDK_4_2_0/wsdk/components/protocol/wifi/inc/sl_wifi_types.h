@@ -224,8 +224,8 @@ typedef uint32_t sl_wifi_credential_id_t;
  */
 typedef struct {
   uint16_t channel;              ///< Channel number
-  sl_wifi_band_t band;           ///< Wi-Fi radio band of type @ref sl_wifi_band_t
-  sl_wifi_bandwidth_t bandwidth; ///< Channel bandwidth of type @ref sl_wifi_bandwidth_t
+  sl_wifi_band_t band;           ///< Wi-Fi radio band of type @ref sl_wifi_band_t (Currently not supported)
+  sl_wifi_bandwidth_t bandwidth; ///< Channel bandwidth of type @ref sl_wifi_bandwidth_t (Currently not supported)
 } sl_wifi_channel_t;
 
 /**
@@ -279,7 +279,7 @@ typedef struct {
   struct {
     uint8_t rf_channel;                        ///< Channel number of the AP
     uint8_t security_mode;                     ///< Security mode of the AP
-    uint8_t rssi_val;                          ///< RSSI value of the AP
+    uint8_t rssi_val;                          ///< Unsigned RSSI value of the AP (for example 76 means -76 dBm)
     uint8_t network_type;                      ///< AP network type
     uint8_t ssid[SL_WIFI_MAX_SSID_LENGTH];     ///< SSID of the AP
     uint8_t bssid[SL_WIFI_MAC_ADDRESS_LENGTH]; ///< BSSID of the AP
@@ -291,7 +291,7 @@ typedef struct {
 typedef struct {
   uint8_t rf_channel;                        ///< Channel number of the AP
   uint8_t security_mode;                     ///< Security mode of the AP
-  uint8_t rssi;                              ///< RSSI value of the AP
+  uint8_t rssi;                              ///< Unsigned RSSI value of the AP (for example 76 means -76 dBm)
   uint8_t network_type;                      ///< Network type of the AP
   uint8_t ssid[SL_WIFI_MAX_SSID_LENGTH];     ///< SSID of the AP
   uint8_t bssid[SL_WIFI_MAC_ADDRESS_LENGTH]; ///< BSSID of the AP
@@ -1455,6 +1455,10 @@ typedef struct {
  * @brief Wi-Fi transceiver TX data confirmation structure.
  *
  * Indicates the status report for a transmitted data packet identified by a token.
+ *
+ * @note When this structure is passed to a transceiver callback, the pointer is valid only for the
+ *       duration of the callback. Do not free it (the framework frees it after return); copy any
+ *       fields needed after the callback returns.
  */
 typedef struct {
   /// Status report for the data packet identified by token.
@@ -1478,6 +1482,10 @@ typedef struct {
  * @brief Structure for handling received Wi-Fi transceiver data.
  *
  * Contains information about the received Wi-Fi transceiver data, which includes status, RSSI, data rate, length, and the actual data buffer.
+ *
+ * @note When this structure is passed to a transceiver callback, the pointer is valid only for the
+ *       duration of the callback. Do not free it (the framework frees it after return); copy any
+ *       fields (and payload, if needed) after return.
  */
 typedef struct {
   /// Status code for the received RX packet.
@@ -1486,7 +1494,7 @@ typedef struct {
   /// | SL_STATUS_OK (0x0)           | Success                                                                                                                              |
   /// | SL_STATUS_UNKNOWN_PEER (0x3) | If SL_WIFI_FEAT_TRANSCEIVER_MAC_PEER_DS_SUPPORT feature is enabled and data packet is received from a peer not present in MAC layer |
   uint32_t status;
-  /// RSSI of the received 802.11 frame. This field is valid only if status is set to success.
+  /// Signed RSSI value of the received 802.11 frame. This field is valid only if status is set to success.
   int8_t rssi;
   /// Rate of the received 802.11 frame as per @ref sl_wifi_data_rate_t. This field is valid only if status is set to success.
   uint32_t rate;
@@ -1833,7 +1841,7 @@ typedef struct __attribute__((packed)) {
   struct __attribute__((packed)) {
     uint8_t rf_channel;                        ///< Channel number of the AP
     uint8_t security_mode;                     ///< Security mode of the AP
-    int16_t rssi_val;                          ///< RSSI value of the AP
+    int16_t rssi_val;                          ///< RSSI value of the AP in deci-dBm format
     uint8_t network_type;                      ///< AP network type
     uint8_t ssid[SL_WIFI_MAX_SSID_LENGTH];     ///< SSID of the AP
     uint8_t bssid[SL_WIFI_MAC_ADDRESS_LENGTH]; ///< BSSID of the AP

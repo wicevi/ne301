@@ -443,7 +443,8 @@ typedef enum {
   SLI_WIFI_REQ_FILTER_BCAST_PACKETS         = 0xC9, ///< Filter Broadcast Packets
   SLI_WIFI_REQ_WPS_METHOD                   = 0x72, ///< WPS Method
   SLI_WIFI_REQ_WPS_EXTENDED_CREDENTIALS     = 0x95, ///< Fetch additional WPS credential records
-  SLI_WIFI_REQ_GAIN_TABLE                   = 0x47, ///< Gain Table
+  SLI_WIFI_REQ_WORLDWIDE_GAIN_TABLE         = 0x66, ///< Worldwide Gain Table
+  SLI_WIFI_REQ_GAIN_TABLE                   = 0x47, ///< Region-based Gain Table
   SLI_WIFI_REQ_TIMEOUT                      = 0xEA, ///< Timeout
   SLI_WIFI_REQ_SET_REGION_AP                = 0xBD, ///< Set Region AP
   SLI_WIFI_REQ_11AX_PARAMS                  = 0xFF, ///< 11AX Parameters
@@ -477,6 +478,7 @@ typedef enum {
   SLI_WIFI_REQ_SET_PROFILE               = 0x31,
   SLI_WIFI_REQ_GET_PROFILE               = 0x32,
   SLI_WIFI_REQ_DELETE_PROFILE            = 0x33,
+  SLI_WIFI_REQ_EC_IDENTITY               = 0x34, ///< On-device EC identity generate/delete (CSR sign uses crypto 0x76)
   SLI_WIFI_REQ_EVM_OFFSET                = 0x36,
   SLI_WIFI_REQ_EVM_WRITE                 = 0x37,
   SLI_WIFI_REQ_IPCONFV4                  = 0x41,
@@ -502,6 +504,7 @@ typedef enum {
   SLI_WIFI_REQ_SET_SNI_EMBEDDED          = 0x6E,
   SLI_WIFI_REQ_EFUSE_READ                = 0x73,
   SLI_WIFI_REQ_SELECT_REQUEST            = 0x74,
+  SLI_WIFI_REQ_SOCKET_BYTES_AVAILABLE    = 0x75, ///< Query bytes available to read on a socket
   SLI_WIFI_REQ_WEBPAGE_CLEAR_ALL         = 0x7F,
   SLI_WIFI_REQ_RADIO                     = 0x81,
   SLI_WIFI_REQ_DISCOVER_SERVICE          = 0x8F,
@@ -581,7 +584,8 @@ typedef enum {
   SLI_WIFI_RSP_TWT_ASYNC                    = 0x71,
   SLI_WIFI_RSP_WPS_METHOD                   = 0x72, ///< WPS Method
   SLI_WIFI_RSP_WPS_EXTENDED_CREDENTIALS     = 0x95, ///< Fetch additional WPS credential records
-  SLI_WIFI_RSP_GAIN_TABLE                   = 0x47, ///< Gain Table
+  SLI_WIFI_RSP_WORLDWIDE_GAIN_TABLE         = 0x66, ///< Worldwide Gain Table
+  SLI_WIFI_RSP_GAIN_TABLE                   = 0x47, ///< Region-based Gain Table
   SLI_WIFI_RSP_TIMEOUT                      = 0xEA, ///< Timeout
   SLI_WIFI_RSP_11AX_PARAMS                  = 0xFF, ///< 11AX Parameters
   SLI_WIFI_RSP_ASYNCHRONOUS                 = 0xFF, ///< Asynchronous response (same value as 11AX_PARAMS)
@@ -620,6 +624,7 @@ typedef enum {
   SLI_WIFI_RSP_SET_PROFILE               = 0x31,
   SLI_WIFI_RSP_GET_PROFILE               = 0x32,
   SLI_WIFI_RSP_DELETE_PROFILE            = 0x33,
+  SLI_WIFI_RSP_EC_IDENTITY               = 0x34, ///< On-device EC identity generate/delete (CSR sign uses crypto 0x76)
   SLI_WIFI_RSP_EVM_OFFSET                = 0x36,
   SLI_WIFI_RSP_EVM_WRITE                 = 0x37,
   SLI_WIFI_RSP_IPCONFV4                  = 0x41,
@@ -650,6 +655,7 @@ typedef enum {
   SLI_WIFI_RSP_SET_SNI_EMBEDDED          = 0x6E,
   SLI_WIFI_RSP_EFUSE_READ                = 0x73,
   SLI_WIFI_RSP_SELECT_REQUEST            = 0x74,
+  SLI_WIFI_RSP_SOCKET_BYTES_AVAILABLE    = 0x75, ///< Bytes available to read on a socket
   SLI_WIFI_RSP_TX_TEST_MODE              = 0x7C,
   SLI_WIFI_RSP_WEBPAGE_CLEAR_ALL         = 0x7F,
   SLI_WIFI_RSP_RADIO                     = 0x81,

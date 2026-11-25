@@ -7,6 +7,7 @@
 #include "sli_command_engine.h"
 #include "sl_cmsis_utility.h"
 #include "sl_constants.h"
+#include "sl_utility_log_helper.h"
 #include "sli_wifi_constants.h"
 #include "sl_core.h"
 #include "cmsis_compiler.h"
@@ -88,7 +89,7 @@ static bool rx_packet_identity_handler(const sli_queue_t *handle, const void *da
   const sli_command_engine_metadata_t *metadata = (const sli_command_engine_metadata_t *)data;
 
   SL_DEBUG_LOG_V2(DEBUG,
-                  "Comparing expected packetID : %u with packetId of queue node : %u..!\n",
+                  "[sl_utility] Comparing expected packetID : %u with packetId of queue node : %u..!\r\n",
                   *packet_id,
                   metadata->tx_info.packet_id);
   if (*packet_id == metadata->tx_info.packet_id) {
@@ -128,13 +129,13 @@ static sl_status_t sli_wifi_driver_wait_response_on_thread(
   do {
     uint32_t remaining_time_ticks = sli_wifi_driver_get_remaining_wait_ticks(elapsed_time_ticks, wait_period_ticks);
     SL_DEBUG_LOG_V2(DEBUG,
-                    "Waiting on Thread Events: 0x%lX on event id : 0x%X for queue 0x%X\n",
+                    "[sl_utility] Waiting on Thread Events: 0x%lX on event id : 0x%X for queue 0x%X\r\n",
                     packet_type_info->sync_response_event,
                     (unsigned int)packet_type_info->sync_response_event_id,
                     (unsigned int)packet_type_info->sync_response_queue);
     events = osThreadFlagsWait(packet_type_info->sync_response_event, osFlagsWaitAny, remaining_time_ticks);
     SL_DEBUG_LOG_V2(DEBUG,
-                    "Got Thread Events: 0x%lX for queue 0x%X\n",
+                    "[sl_utility] Got Thread Events: 0x%lX for queue 0x%X\r\n",
                     events,
                     (unsigned int)packet_type_info->sync_response_queue);
 
@@ -206,7 +207,7 @@ static sl_status_t sli_wifi_driver_wait_response_on_event(
   do {
     uint32_t remaining_time_ticks = sli_wifi_driver_get_remaining_wait_ticks(elapsed_time_ticks, wait_period_ticks);
     SL_DEBUG_LOG_V2(DEBUG,
-                    "Waiting on Events: 0x%lX on event id : 0x%X for queue 0x%X\n",
+                    "[sl_utility] Waiting on Events: 0x%lX on event id : 0x%X for queue 0x%X\r\n",
                     packet_type_info->sync_response_event,
                     (unsigned int)packet_type_info->sync_response_event_id,
                     (unsigned int)packet_type_info->sync_response_queue);
@@ -221,7 +222,7 @@ static sl_status_t sli_wifi_driver_wait_response_on_event(
     }
 
     SL_DEBUG_LOG_V2(DEBUG,
-                    "Got Events: 0x%lX for queue 0x%X\n",
+                    "[sl_utility] Got Events: 0x%lX for queue 0x%X\r\n",
                     events,
                     (unsigned int)packet_type_info->sync_response_queue);
 
@@ -418,14 +419,62 @@ sl_status_t sli_wifi_send_command(uint32_t command,
                                   void *sdk_context,
                                   void **response_buffer)
 {
+  sli_wifi_command_payload_t fragments = {
+    .header         = data,
+    .header_length  = data_length,
+    .payload        = NULL,
+    .payload_length = 0,
+  };
+  return sli_wifi_send_command_with_payload(command,
+                                            command_type,
+                                            &fragments,
+                                            wait_period,
+                                            sdk_context,
+                                            response_buffer);
+}
+
+sl_status_t sli_wifi_send_command_with_payload(uint32_t command,
+                                               sli_wifi_command_type_t command_type,
+                                               const sli_wifi_command_payload_t *fragments,
+                                               sli_wifi_wait_period_t wait_period,
+                                               void *sdk_context,
+                                               void **response_buffer)
+{
   sl_wifi_system_packet_t *packet = NULL;
   sl_status_t status              = SL_STATUS_OK;
+  const void *header;
+  uint32_t header_length;
+  const void *payload;
+  uint32_t payload_length;
+  uint32_t total_length;
+  uint32_t offset = 0;
 
-  // Reject payloads that cannot fit in one pool block
-  if (data_length > SLI_WIFI_MAX_CMD_PAYLOAD) {
+  if (fragments == NULL) {
     return SL_STATUS_INVALID_PARAMETER;
   }
 
+  header         = fragments->header;
+  header_length  = fragments->header_length;
+  payload        = fragments->payload;
+  payload_length = fragments->payload_length;
+  total_length   = header_length + payload_length;
+
+  // Reject length/pointer mismatches so packet->length never exceeds copied data
+  // (NULL + non-zero length would otherwise send uninitialized TX buffer contents).
+  if (((header == NULL) && (header_length != 0)) || ((payload == NULL) && (payload_length != 0))) {
+    return SL_STATUS_INVALID_PARAMETER;
+  }
+
+  // Reject wrap, descriptor overflow, or a frame that cannot fit in the NWP/host
+  // SAPI command buffer (1600 bytes including the 16-byte host descriptor).
+  if ((total_length < header_length) || (total_length > 0xFFFu)
+      || ((total_length + SLI_WIFI_HEADER_SIZE) > SLI_WIFI_MAX_SAPI_COMMAND_SIZE)) {
+    return SL_STATUS_INVALID_PARAMETER;
+  }
+
+  // (pool-block payload cap retired here: the upstream SAPI bound above,
+  //  total_length + SLI_WIFI_HEADER_SIZE <= SLI_WIFI_MAX_SAPI_COMMAND_SIZE,
+  //  is stricter than the CE pool block and rejects first)
   // Allocate a buffer for the command with appropriate size
   status = sli_buffer_manager_allocate_buffer(SLI_BUFFER_MANAGER_CE_CMD_TX_POOL,
                                               SLI_BUFFER_MANAGER_ALLOCATION_TYPE_DEDICATED,
@@ -433,14 +482,18 @@ sl_status_t sli_wifi_send_command(uint32_t command,
                                               (sli_buffer_t)&packet);
   VERIFY_STATUS_AND_RETURN(status);
 
-  // Clear the packet descriptor and copy the command data if available
+  // Clear the packet descriptor and copy command fragments if available
   memset(packet->desc, 0, sizeof(packet->desc));
-  if (data != NULL) {
-    memcpy(packet->data, data, data_length);
+  if ((header != NULL) && (header_length > 0)) {
+    memcpy(packet->data, header, header_length);
+    offset = header_length;
+  }
+  if ((payload != NULL) && (payload_length > 0)) {
+    memcpy(&packet->data[offset], payload, payload_length);
   }
 
   // Fill frame type
-  packet->length  = data_length & 0xFFF;
+  packet->length  = total_length & 0xFFF;
   packet->command = (uint16_t)command;
 
   return sli_wifi_send_command_packet(command, command_type, packet, wait_period, sdk_context, response_buffer);

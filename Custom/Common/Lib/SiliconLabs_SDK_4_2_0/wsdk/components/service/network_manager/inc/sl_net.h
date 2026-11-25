@@ -31,12 +31,33 @@
 
 #include "sl_status.h"
 #include "sl_net_types.h"
+#include "sl_net_application_profile.h"
+#if defined(SLI_SI917) || defined(SLI_SI91X_MCU_INTERFACE)
+#include "sl_si91x_ec_identity.h"
+#endif
 
 /** 
  * \addtogroup NET_INTERFACE_FUNCTIONS Network Interface
  * 
- * @note To manage the network interface lifecycle correctly, it's important to use functions like sl_net_init(), sl_net_up(), sl_net_down(), and sl_net_deinit() as intended.
- *       Improper sequencing or combining sl_net_* and sl_wifi_* API functions without following the recommended order may lead to unpredictable or undefined behavior.
+ * @note To manage the network interface lifecycle correctly, use sl_net_init(), sl_net_up(),
+ *       sl_net_down(), and sl_net_deinit() as intended.
+ *       Improper sequencing or combining sl_net_* and sl_wifi_* API functions without following
+ *       the recommended order may lead to unpredictable or undefined behavior.
+ * @note Choosing an initialization model (SiWx91x):
+ *       - Prefer the sl_net_* lifecycle for WLAN station/AP applications that use network profiles,
+ *         credentials, and IP bring-up (typical Wi-Fi networking examples).
+ *       - Prefer sl_wifi_init() (typically with sl_wifi_default_event_handler) for BLE-centric or
+ *         WLAN+BLE applications that only need wireless/NWP bring-up and do not use the network
+ *         manager lifecycle (typical BLE and many WLAN+BLE examples). Custom event handlers are
+ *         allowed when required by the application.
+ *       - Do not call sl_wifi_init() in the same bring-up path after sl_net_init(); for Wi-Fi
+ *         interfaces, sl_net_init() initializes Wi-Fi internally.
+ *       - Do not call sl_net_init(), sl_net_up(), sl_net_down(), or sl_net_deinit() after an
+ *         application-called sl_wifi_init() outside the sl_net_* lifecycle. Pick one initialization
+ *         model for the whole lifecycle; tear down with sl_wifi_deinit() instead.
+ *       - Tear down with the matching API only (sl_net_deinit() vs sl_wifi_deinit()).
+ *       - WiSeConnect examples under different categories are not interchangeable templates for
+ *         initialization; copy the lifecycle model that matches the application type.
  * @note Stack overflows may occur if you invoke functions or use your own variables or data structures while handling callbacks.
  *       Please configure the stack size by modifying the pre-processor macro `SL_SI91X_EVENT_HANDLER_STACK_SIZE` as
  *       per your application's requirements. See [here](https://docs.silabs.com/wiseconnect/latest/wiseconnect-developers-guide-prog-preprocessor-build-settings/list-of-preprocessor-build-settings)
@@ -143,6 +164,89 @@ sl_status_t sl_net_deinit(sl_net_interface_t interface);
  * 
  * @return
  *   sl_status_t. See [Status Codes](https://docs.silabs.com/gecko-platform/latest/platform-common/status) and [WiSeConnect Status Codes](../wiseconnect-api-reference-guide-err-codes/wiseconnect-status-codes) for details.
+ *
+ *   Host-side validation and SDK helper functions return first. Remaining failures propagate from
+ *   profile lookup, [sl_wifi_connect](../wiseconnect-api-reference-guide-wi-fi/wifi-client-api#sl-wifi-connect) /
+ *   [sl_wifi_start_ap](../wiseconnect-api-reference-guide-wi-fi/wifi-ap-api#sl-wifi-start-ap), and IP configuration.
+ *
+ *   Definitive host returns on the @ref sl_net_up path:
+ *   - SL_STATUS_OK: Bring-up completed (connect/start-AP and IP configuration succeeded).
+ *   - SL_STATUS_WIFI_IPV4_OK: Offload/dual-stack IPCONF only; IPv4 OK and IPv6 failed (Wi-Fi remains
+ *     associated; IPv4 can be used). Not returned on the LwIP-only client path.
+ *   - SL_STATUS_WIFI_IPV6_OK: Offload/dual-stack IPCONF only; IPv6 OK and IPv4 failed (Wi-Fi remains
+ *     associated; IPv6 can be used). Not returned on the LwIP-only client path.
+ *   - SL_STATUS_NOT_SUPPORTED: Invalid/unsupported interface; WEP client security; unsupported
+ *     profile/credential path; LwIP-only AP bring-up.
+ *   - SL_STATUS_NOT_INITIALIZED: @ref sl_net_init not done, or Wi-Fi device not initialized.
+ *   - SL_STATUS_INVALID_PARAMETER: Empty SSID; unsupported band/AP start params; invalid auto-join args;
+ *     bypass mode with unsupported IP management; NVM profile id out of range.
+ *   - SL_STATUS_INVALID_INDEX: Invalid @p profile_id (basic/in-RAM profile store).
+ *   - SL_STATUS_INVALID_CONFIGURATION: AP profile not static IP; profile security/credential_id mismatch
+ *     when the profile is written back.
+ *   - SL_STATUS_WIFI_INTERFACE_NOT_UP: Wi-Fi interface not up for connect/start-AP.
+ *   - SL_STATUS_WIFI_UNKNOWN_SECURITY_TYPE: Unrecognized client security type.
+ *   - SL_STATUS_WIFI_INVALID_ENCRYPTION_METHOD: Invalid EAP encryption method.
+ *   - SL_STATUS_NOT_AVAILABLE: Join response not 'C' (STA connected) or not 'G' (AP started).
+ *   - SL_STATUS_TIMEOUT: Host wait expired on SCAN, JOIN, IPCONF, or related command. Call
+ *     @ref sl_net_deinit before retrying.
+ *   - SL_STATUS_ABORT: Auto-join wait aborted (for example, network manager deinitialized).
+ *   - SL_STATUS_NOT_FOUND: Requested Wi-Fi credential ID was not found.
+ *   - SL_STATUS_FAIL: Auto-join failed; credential lookup type mismatch; internal command-engine failure.
+ *   - SL_STATUS_WIFI_UNSUPPORTED: AP bring-up unsupported for this stack (LwIP-only, or bypass mode).
+ *   - SL_STATUS_SI91X_IP_ADDRESS_ERROR: LwIP-only path; IPv6 link-local never became preferred.
+ *
+ *   Firmware statuses returned via Wi-Fi connect / start-AP / IP configuration commands
+ *   (SCAN, optional TIMEOUT, HOST_PSK or SET_EAP_CFG, JOIN, optional INIT after join fail,
+ *   IPCONFV4 / IPCONFV6, APCONF, and optional HT_CAPABILITIES):
+ *   - SL_STATUS_SI91X_SCAN_ISSUED_IN_ASSOCIATED_STATE: Scan while already associated.
+ *   - SL_STATUS_SI91X_NO_AP_FOUND: No AP found during scan/join.
+ *   - SL_STATUS_SI91X_INVALID_PSK_IN_WEP_SECURITY: Firmware code 4 (`PSK_NOT_CONFIGURED`); PSK not
+ *     configured for join (host rejects WEP with SL_STATUS_NOT_SUPPORTED before JOIN).
+ *   - SL_STATUS_SI91X_INVALID_BAND: Invalid band.
+ *   - SL_STATUS_SI91X_DEAUTHENTICATION_RECEIVED_FROM_AP: Deauth during join.
+ *   - SL_STATUS_SI91X_ASSOCIATION_FAILED: Association failed during join.
+ *   - SL_STATUS_SI91X_INVALID_CHANNEL: Invalid channel.
+ *   - SL_STATUS_SI91X_JOIN_AUTHENTICATION_FAILED: Authentication failed during join.
+ *   - SL_STATUS_SI91X_BEACON_MISSED_FROM_AP_DURING_JOIN: Firmware code 15 (`REJOIN_LIMIT_OVER`).
+ *   - SL_STATUS_SI91X_EAP_CONFIG_NOT_DONE: EAP configuration not completed before scan/join.
+ *   - SL_STATUS_SI91X_MEMORY_FAILED_FROM_MODULE: Firmware memory allocation failed.
+ *   - SL_STATUS_SI91X_INSUFFICIENT_INFO: Insufficient/incorrect join information.
+ *   - SL_STATUS_SI91X_REJOIN_FAILURE: Rejoin failed.
+ *   - SL_STATUS_SI91X_FREQUENCY_NOT_SUPPORTED: Unsupported frequency/channel (APCONF).
+ *   - SL_STATUS_SI91X_EAP_CONFIG_FAILED: EAP configuration failed.
+ *   - SL_STATUS_SI91X_JOIN_TIMEOUT: Join timed out in firmware.
+ *   - SL_STATUS_SI91X_COMMAND_GIVEN_IN_INVALID_STATE: Command in invalid state (JOIN / IPCONF).
+ *   - SL_STATUS_SI91X_ACCESS_POINT_FAILED: Failed to form the access point.
+ *   - SL_STATUS_SI91X_INVALID_SCAN_INFO: Invalid scan parameters.
+ *   - SL_STATUS_SI91X_COMMAND_ISSUED_IN_REJOIN_STATE: Command issued while rejoin in progress.
+ *   - SL_STATUS_SI91X_WRONG_PARAMETERS: Incorrect parameters (JOIN / PSK / APCONF).
+ *   - SL_STATUS_SI91X_INVALID_PSK_LENGTH: PSK length invalid (HOST_PSK / APCONF).
+ *   - SL_STATUS_SI91X_INVALID_PMK_LEN: Invalid PMK length (HOST_PSK).
+ *   - SL_STATUS_SI91X_SSID_NOT_PRESENT_FOR_PMK_GENERATION: SSID missing for PMK generation.
+ *   - SL_STATUS_SI91X_COMMAND_ISSUED_WHILE_INTERNAL_OPERATION: Host command during internal operation
+ *     (for example auto-join).
+ *   - SL_STATUS_SI91X_MISSING_PSK_OR_PMK: PSK/PMK not provided for join.
+ *   - SL_STATUS_SI91X_INVALID_SECURITY_MODE_IN_JOIN_COMMAND: Invalid security mode in join.
+ *   - SL_STATUS_SI91X_MAX_BEACON_MISCOUNT: Deauth due to beacon miss during join.
+ *   - SL_STATUS_SI91X_DEAUTH_REQUEST_FROM_SUPPLICANT: Deauth from supplicant during join.
+ *   - SL_STATUS_SI91X_DEAUTH_REQUEST_FROM_FROM_AP: Deauth from AP after channel switch during join.
+ *   - SL_STATUS_SI91X_MISSED_SYNCHRONIZATION: Synchronization missed during join.
+ *   - SL_STATUS_SI91X_AUTHENTICATION_TIMEOUT: Authentication timed out during join.
+ *   - SL_STATUS_SI91X_ASSOCIATION_TIMEOUT: Association timed out during join.
+ *   - SL_STATUS_SI91X_SSID_MISMATCH: Scanned SSID does not match join SSID.
+ *   - SL_STATUS_SI91X_CLIENT_MAX_SUPPORTED_EXCEEDED: Max stations exceeded (APCONF).
+ *   - SL_STATUS_SI91X_HT_CAPABILITIES_NOT_SUPPORTED: HT capabilities not supported.
+ *   - SL_STATUS_SI91X_FIXED_DATA_RATE_NOT_SUPPORTED_BY_AP: Invalid/unsupported fixed rate (JOIN).
+ *   - SL_STATUS_SI91X_CONNECTED_AP_OR_STATION_CHANNEL_MISMATCH: Concurrent channel mismatch.
+ *   - SL_STATUS_SI91X_FOUR_WAY_HANDSHAKE_FAILED: 4-way handshake failed.
+ *   - SL_STATUS_SI91X_AP_HT_CAPS_NOT_ENABLED: AP HT capabilities not enabled for 40 MHz.
+ *   - SL_STATUS_SI91X_INVALID_BEACON_INTERVAL_OR_DTM_PERIOD: Invalid beacon/DTIM (APCONF).
+ *   - SL_STATUS_SI91X_SAE_FAILURE_DUE_TO_MULTIPLE_CONFIRM_FRAMES_FROM_AP: SAE failure (JOIN).
+ *   - SL_STATUS_SI91X_FEATURE_NOT_ENABLED: Required TCP/IP feature not enabled (IPCONF).
+ *   - SL_STATUS_SI91X_IP_CONFLICT_ERROR: Static IP conflict (IPCONF).
+ *   - SL_STATUS_SI91X_DHCP_HANDSHAKE_FAILURE: DHCP handshake failed (IPCONFV4).
+ *   - SL_STATUS_SI91X_CONCURRENT_IP_CREATION_ERROR: IPCONF network/interface mismatch.
+ *   - SL_STATUS_SI91X_TCP_IP_INIT_FAILED: TCP/IP stack init failed (IPCONF).
  * 
  * @note
  * By default, profile and credential configurations in sl_net_defaults.h are used by SDK.
@@ -150,8 +254,10 @@ sl_status_t sl_net_deinit(sl_net_interface_t interface);
  * To enable support for both IPv4 and IPv6, the ip.type in the profile should be set to (SL_IPV4|SL_IPV6).
  * @note
  * For a dual-stack profile, a partial-success return (`SL_STATUS_WIFI_IPV4_OK` or `SL_STATUS_WIFI_IPV6_OK`)
- * means at least one address family configured and the link is usable. If both families fail, the return
- * code is the IPv4 error only; call [sl_wifi_get_ip_config_failure_reason](../wiseconnect-api-reference-guide-wi-fi/wi-fi-common-api#sl-wifi-get-ip-config-failure-reason) to obtain per-family errors.
+ * means at least one address family configured, Wi-Fi remains associated, and that family can be used.
+ * If both families fail, the return code is the IPv4 error only; call
+ * [sl_wifi_get_ip_config_failure_reason](../wiseconnect-api-reference-guide-wi-fi/wi-fi-common-api#sl-wifi-get-ip-config-failure-reason)
+ * to obtain per-family errors.
  * @note
  * The user can define their profile and credential configurations for an interface by calling @ref sl_net_set_profile and @ref sl_net_set_credential APIs before calling @ref sl_net_up API.
  * @note
@@ -194,8 +300,10 @@ sl_status_t sl_net_up(sl_net_interface_t interface, sl_net_profile_id_t profile_
  * To enable support for both IPv4 and IPv6, the ip.type in the profile should be set to (SL_IPV4|SL_IPV6).
  * @note
  * For a dual-stack profile, a partial-success return (`SL_STATUS_WIFI_IPV4_OK` or `SL_STATUS_WIFI_IPV6_OK`)
- * means at least one address family configured and the link is usable. If both families fail, the return
- * code is the IPv4 error only; call [sl_wifi_get_ip_config_failure_reason](../wiseconnect-api-reference-guide-wi-fi/wi-fi-common-api#sl-wifi-get-ip-config-failure-reason) to obtain per-family errors.
+ * means at least one address family configured, Wi-Fi remains associated, and that family can be used.
+ * If both families fail, the return code is the IPv4 error only; call
+ * [sl_wifi_get_ip_config_failure_reason](../wiseconnect-api-reference-guide-wi-fi/wi-fi-common-api#sl-wifi-get-ip-config-failure-reason)
+ * to obtain per-family errors.
  * @note
  * The user can define their profile and credential configurations for an interface by calling @ref sl_net_set_profile and @ref sl_net_set_credential APIs before calling this API.
  * @note
@@ -463,11 +571,61 @@ sl_status_t sl_net_delete_profile(sl_net_interface_t interface, sl_net_profile_i
  * - The above mentioned Headers and Footers might vary 
  * - This API does not support the OPEN Security type for Wi-Fi client credentials.
  * - When configuring AP or client interfaces in open security mode, the credential ID must be set to `SL_NET_NO_CREDENTIAL_ID`.
+ * - On-device EC key generation uses @ref sl_net_generate_and_set_credential with @ref SL_NET_GENERATE_EC_PRIVATE_KEY.
+ * - EC client certificates must be installed with @ref SL_NET_WIFI_EAP_CLIENT_CREDENTIAL_ID_KEY(`key_id`) and @ref SL_NET_CERTIFICATE.
  ******************************************************************************/
 sl_status_t sl_net_set_credential(sl_net_credential_id_t id,
                                   sl_net_credential_type_t type,
                                   const void *credential,
                                   uint32_t credential_length);
+
+/***************************************************************************/ /**
+ * @brief
+ *   Generate an on-device EC private key and store it under a credential ID.
+ *
+ * @details
+ *   Phase-1 supports @ref SL_NET_GENERATE_EC_PRIVATE_KEY only. `id` must be
+ *   @ref SL_NET_WIFI_EAP_CLIENT_CREDENTIAL_ID_KEY(`key_id`); the low byte of `id`
+ *   is the host-supplied `key_id`. `credential` must point to an
+ *   sl_si91x_ec_generate_params_t object. On success the NWP fills
+ *   `spki` / `spki_len`. The private key never leaves the NWP.
+ *
+ *   The host does not soft-overwrite an existing key. If the slot is already
+ *   provisioned, firmware returns SL_STATUS_EC_IDENTITY_IN_USE
+ *   (SL_STATUS_EC_KEY_ALREADY_EXISTS). Call @ref sl_net_delete_credential
+ *   with @ref SL_NET_DELETE_EC_PRIVATE_KEY first, then regenerate.
+ *   sl_si91x_csr_sign returns SL_STATUS_EC_KEY_NOT_FOUND when the slot is empty.
+ *
+ *   Install the enterprise CA with @ref sl_net_set_credential,
+ *   @ref SL_NET_SIGNING_CERTIFICATE, and legacy
+ *   @ref SL_NET_WIFI_EAP_CLIENT_CREDENTIAL_ID. Install the EC client certificate
+ *   with @ref sl_net_set_credential, @ref SL_NET_CERTIFICATE, and
+ *   @ref SL_NET_WIFI_EAP_CLIENT_CREDENTIAL_ID_KEY(`key_id`). Sign a CSR TBS with
+ *   sl_si91x_csr_sign.
+ *
+ * @pre Pre-conditions:
+ * - @ref sl_net_init should be called before this API.
+ *
+ * @param[in] id
+ *   Must be @ref SL_NET_WIFI_EAP_CLIENT_CREDENTIAL_ID_KEY(`key_id`).
+ * @param[in] type
+ *   Must be @ref SL_NET_GENERATE_EC_PRIVATE_KEY.
+ * @param[in,out] credential
+ *   Pointer to sl_si91x_ec_generate_params_t. On success the NWP fills
+ *   `spki` / `spki_len`.
+ * @param[in] credential_length
+ *   Must be `sizeof(sl_si91x_ec_generate_params_t)`.
+ *
+ * @return
+ *   sl_status_t. See [Status Codes](https://docs.silabs.com/gecko-platform/latest/platform-common/status)
+ *   and [WiSeConnect Status Codes](../wiseconnect-api-reference-guide-err-codes/wiseconnect-status-codes).
+ ******************************************************************************/
+#if defined(SLI_SI917) || defined(SLI_SI91X_MCU_INTERFACE) || defined(DOXYGEN)
+sl_status_t sl_net_generate_and_set_credential(sl_net_credential_id_t id,
+                                               sl_net_credential_type_t type,
+                                               void *credential,
+                                               uint32_t credential_length);
+#endif
 
 /***************************************************************************/ /**
  * @brief
@@ -511,6 +669,10 @@ sl_status_t sl_net_get_credential(sl_net_credential_id_t id,
  * @details
  *   This function deletes the network credential data for the specified credential ID and type.
  *   Once deleted, the credential cannot be used for network operations.
+ *
+ *   For on-device EC private keys, pass @ref SL_NET_DELETE_EC_PRIVATE_KEY and
+ *   @ref SL_NET_WIFI_EAP_CLIENT_CREDENTIAL_ID_KEY(`key_id`). After a successful
+ *   delete, a new key may be generated with @ref sl_net_generate_and_set_credential.
  * 
  * @pre Pre-conditions:
  * -
@@ -519,7 +681,7 @@ sl_status_t sl_net_get_credential(sl_net_credential_id_t id,
  * @param[in] id
  *   Network credential identifier as identified by @ref sl_net_credential_id_t.
  * 
- * @param[out] type
+ * @param[in] type
  *   Network credential type as identified by @ref sl_net_credential_type_t.
  * 
  * @return
@@ -718,56 +880,3 @@ sl_status_t sl_net_wifi_ap_up(sl_net_interface_t interface, sl_net_profile_id_t 
  * @return sl_status_t Status of the operation.
  */
 sl_status_t sl_net_wifi_ap_down(sl_net_interface_t interface);
-
-/***************************************************************************/ /**
- * @brief
- *   Apply an SDK application profile preset.
- *
- * @details
- *   Selects between Default and Neutral-less Matter switch opaque presets and applies
- *   the corresponding internal Wi-Fi configuration (advanced-config frames, scan timeouts,
- *   and scan-time overrides). Applications pass only the profile enum; preset values are
- *   internal to the SDK.
- *
- * @pre Pre-conditions:
- * - @ref sl_net_init should be called before this API.
- * - **Initial apply:** Call after @ref sl_net_init and before the first @ref sl_net_up / connect
- *   when configuring scan-related parameters ahead of connect.
- *
- * @param[in] interface
- *   Network interface identified by @ref sl_net_interface_t. Only Wi-Fi client interfaces
- *   (`SL_NET_WIFI_CLIENT_INTERFACE` or `SL_NET_WIFI_CLIENT_2_INTERFACE`) are supported.
- *
- * @param[in] profile
- *   Application profile of type @ref sl_net_application_profile_t.
- *
- * @return
- *   sl_status_t. See [Status Codes](https://docs.silabs.com/gecko-platform/latest/platform-common/status)
- *   and [WiSeConnect Status Codes](../wiseconnect-api-reference-guide-err-codes/wiseconnect-status-codes) for details.
- *
- * @note
- *   When selecting @ref SL_NET_APPLICATION_PROFILE_MATTER_NEUTRAL_LESS_SWITCH, **11n mode must
- *   already be enabled during Wi-Fi initialization** (for example via
- *   @c SL_WIFI_FEAT_DISABLE_11AX_SUPPORT in the device boot configuration). The Neutral-less
- *   switch profile does not enable 11n. If 11n is not enabled, this API returns an error.
- * @note
- *   Profile application invokes multiple internal Wi-Fi APIs sequentially. If any internal API
- *   fails, this function returns the corresponding error status. The SDK does **not** roll back
- *   configuration that was already applied before the failure. The application **must re-call**
- *   this API with the desired profile to complete configuration.
- * @note
- *   **Recovery reapply (required for non-default profiles):** Profile configuration
- *   (advanced-config and scan-timeout settings) is not retained across Wi-Fi disconnect
- *   or join failure. When using a profile other than @ref SL_NET_APPLICATION_PROFILE_DEFAULT,
- *   the application **must call this API again** with the same @a interface and @a profile
- *   after disconnect or join failure, **before** the next connect or auto-join retry.
- *   The SDK does not perform automatic reapply. This API is idempotent and safe to call
- *   multiple times with the same arguments. Re-calling this API also restores scan-timeout
- *   settings applied by the preset.
- * @note
- *   Once this API has been applied successfully, active and passive channel scan timeouts
- *   are owned by the profile preset. sl_wifi_configure_timeout() and
- *   sl_si91x_configure_timeout() return @c SL_STATUS_OK for those timeout types without
- *   changing the profile-managed values until Wi-Fi is deinitialized.
- ******************************************************************************/
-sl_status_t sl_net_set_application_profile(sl_net_interface_t interface, sl_net_application_profile_t profile);

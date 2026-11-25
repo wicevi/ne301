@@ -56,6 +56,15 @@
 #define SL_WIFI_MAX_CLIENT_COUNT 16
 
 /**
+ * @def SL_WIFI_WORLDWIDE_GAIN_TABLE_SIZE
+ * @brief Number of gain entries in the Worldwide (WW) TX power ceiling table.
+ *
+ * @details Payload length required by @ref sl_wifi_update_worldwide_gain_table.
+ *          Layout is one gain byte per rate/MCS index, from 1 Mbps through MCS7.
+ */
+#define SL_WIFI_WORLDWIDE_GAIN_TABLE_SIZE 20
+
+/**
  * @def SL_WIFI_MIN_HOST_STACK_PORT
  * @brief Lowest destination TCP/UDP port used for SiWx3xx dual-stack RX demux.
  *
@@ -764,7 +773,13 @@ typedef enum {
   SL_WIFI_EAP_AES128_SHA    = (1 << 9),  ///< Wi-Fi EAP Client flag to use AES128-SHA Cipher for EAP connection
   SL_WIFI_EAP_RC4_SHA       = (1 << 10), ///< Wi-Fi EAP Client flag to use RC4-SHA Cipher for EAP connection
   SL_WIFI_EAP_DES_CBC3_SHA  = (1 << 11), ///< Wi-Fi EAP Client flag to use DES-CBC3-SHA Cipher for EAP connection
-  SL_WIFI_EAP_RC4_MD5       = (1 << 12)  ///< Wi-Fi EAP Client flag to use RC4-MD5 Cipher for EAP connection
+  SL_WIFI_EAP_RC4_MD5       = (1 << 12), ///< Wi-Fi EAP Client flag to use RC4-MD5 Cipher for EAP connection
+  SL_WIFI_EAP_ECDHE_ECDSA_AES128_SHA =
+    (1 << 15), ///< Wi-Fi EAP Client flag to use ECDHE-ECDSA-AES128-SHA for an on-device EC identity
+  SL_WIFI_EAP_ECDHE_ECDSA_AES256_SHA =
+    (1 << 16), ///< Wi-Fi EAP Client flag to use ECDHE-ECDSA-AES256-SHA for an on-device EC identity
+  SL_WIFI_EAP_ECDHE_ECDSA_AES128_SHA256 =
+    (1 << 17), ///< Wi-Fi EAP Client flag to use ECDHE-ECDSA-AES128-SHA256 for an on-device EC identity
 } sl_wifi_eap_client_flag_t;
 
 //! @cond Doxygen_Suppress

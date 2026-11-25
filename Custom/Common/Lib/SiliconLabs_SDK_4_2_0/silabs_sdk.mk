@@ -1,7 +1,7 @@
 #
 # Silicon Labs WiseConnect SDK 4.2.0 (Si917 NCP) - Makefile integration
 #
-# Sources from the vendor's internal 4.2.0 drop (wiseconnect build 1036 +
+# Sources from the vendor's internal 4.2.x drop (wiseconnect build 1428 +
 # matching gecko-sdk platform_core/network_stack subtrees). 4.2.0 layout
 # changes vs 4.1.1:
 #   - sockets/bsd_socket/asynchronous_socket/sl_websocket_client moved to
@@ -131,6 +131,7 @@ C_INCLUDES += -I../Custom/Hal
 C_INCLUDES += -I$(SL_PORT)/inc
 C_INCLUDES += -I$(SL_SISDK)/common/inc
 C_INCLUDES += -I$(SL_SISDK)/mem_pool/inc
+C_INCLUDES += -I$(SL_SISDK)/sl_log/inc
 C_INCLUDES += -I$(SL_WSDK)/components/common/inc
 C_INCLUDES += -I$(SL_WSDK)/components/sli_wifi/inc
 C_INCLUDES += -I$(SL_WSDK)/components/sli_command_engine/inc
@@ -141,6 +142,7 @@ C_INCLUDES += -I$(SL_WSDK)/components/sli_queue_manager/inc
 C_INCLUDES += -I$(SL_WSDK)/components/sli_routing_utility/inc
 C_INCLUDES += -I$(SL_WSDK)/components/protocol/wifi/inc
 C_INCLUDES += -I$(SL_WSDK)/components/service/network_manager/inc
+C_INCLUDES += -I$(SL_WSDK)/components/service/network_manager/config
 C_INCLUDES += -I$(SL_WSDK)/components/service/mqtt/inc
 C_INCLUDES += -I$(SL_WSDK)/components/service/http_client/inc
 C_INCLUDES += -I$(SL_WSDK)/components/service/mdns/inc
@@ -154,11 +156,13 @@ C_INCLUDES += -I$(SL_WSDK_DEV)/inc/http_client/inc
 C_INCLUDES += -I$(SL_WSDK_DEV)/inc/mqtt/inc
 C_INCLUDES += -I$(SL_WSDK_DEV)/inc/sntp
 C_INCLUDES += -I$(SL_WSDK)/components/device/silabs/si91x/host_interface/ncp_bus/spi
+C_INCLUDES += -I$(SL_WSDK)/components/device/silabs/si91x/host_interface/ncp_bus/uart
 C_INCLUDES += -I$(SL_WSDK)/components/device/silabs/si91x/host_interface/inc
 C_INCLUDES += -I$(SL_WSDK_DEV)/sl_net/inc
 C_INCLUDES += -I$(SL_NS)/device/silabs/si91x/wireless/socket/inc
 C_INCLUDES += -I$(SL_NS)/device/silabs/si91x/wireless/asynchronous_socket/inc
 C_INCLUDES += -I$(SL_WSDK_DEV)/ble/inc
+C_INCLUDES += -I$(SL_WSDK_DEV)/memory/inc
 C_INCLUDES += -I$(SL_WSDK_DEV)/firmware_upgrade
 C_INCLUDES += -I$(SL_WSDK)/components/device/silabs/si91x/mcu/hal/sli_hal_si91x/inc
 C_INCLUDES += -I$(SL_WSDK_DEV)/sli_si91x_wifi_command_engine/inc

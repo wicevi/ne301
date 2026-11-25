@@ -182,6 +182,7 @@
 #define SLI_SI91X_MAX_POSSIBLE_CHANNEL 24
 
 #define ATTESTATION 30
+#define CSR_SIGN    33 ///< Platform CSR TBS sign over ENCRYPT_CRYPTO
 
 #define NONCE_DATA_SIZE 32
 
@@ -191,12 +192,12 @@ typedef enum { SLI_NONE, SLI_TKIP, SLI_CCMP } sli_si91x_encryption_mode_t;
 
 /// Scan information response structure
 typedef struct {
-  uint8_t rf_channel;                           ///< channel number of the scanned AP
-  uint8_t security_mode;                        ///<  security mode of the scanned AP
-  uint8_t rssi_val;                             ///< rssi value of the scanned AP
-  uint8_t network_type;                         ///< network type of the scanned AP
-  uint8_t ssid[SLI_SSID_LEN];                   ///< SSID of the scanned AP
-  uint8_t bssid[SLI_MAC_ADDR_LEN];              ///< BSSID of the scanned AP
+  uint8_t rf_channel;              ///< channel number of the scanned AP
+  uint8_t security_mode;           ///<  security mode of the scanned AP
+  uint8_t rssi_val;                ///< Unsigned RSSI value of the scanned AP (for example 76 means -76 dBm)
+  uint8_t network_type;            ///< network type of the scanned AP
+  uint8_t ssid[SLI_SSID_LEN];      ///< SSID of the scanned AP
+  uint8_t bssid[SLI_MAC_ADDR_LEN]; ///< BSSID of the scanned AP
   uint8_t reserved[SLI_SI91X_2BYTE_FIELD_SIZE]; ///< Reserved
 } sli_si91x_scan_info_t;
 
@@ -228,6 +229,30 @@ typedef struct {
   sli_si91x_cert_info_t cert_info;                   ///< certificate information structure
   uint8_t certificate[SLI_SI91X_MAX_CERT_SEND_SIZE]; ///< certificate
 } sli_si91x_req_set_certificate_t;
+
+/// EC identity generate sub-command. CSR sign uses Platform ENCRYPT_CRYPTO.
+#define SLI_SI91X_EC_IDENTITY_SUBCMD_GENERATE 1
+/// EC identity delete sub-command.
+#define SLI_SI91X_EC_IDENTITY_SUBCMD_DELETE 2
+/// Maximum EC identity request payload length, in bytes. Unused for generate and delete.
+#define SLI_SI91X_EC_IDENTITY_MAX_PAYLOAD 512
+
+/// Packed EC identity request/response header. `key_id` is not SET_CERT `cert_index`.
+typedef struct {
+  uint8_t sub_cmd;  ///< Generate = 1, delete = 2
+  uint8_t reserved; ///< Reserved, set to 0
+  uint32_t key_id;  ///< Host-supplied EC identity identifier
+  uint8_t curve;    ///< sl_si91x_ec_curve_t
+  uint8_t sig_alg;  ///< sl_si91x_ec_sig_alg_t
+  uint16_t in_len;  ///< Input payload length
+  uint16_t out_len; ///< Output payload length (response)
+} SL_ATTRIBUTE_PACKED sli_si91x_ec_identity_req_hdr_t;
+
+/// EC identity command request (generate / delete)
+typedef struct {
+  sli_si91x_ec_identity_req_hdr_t hdr;                ///< Request header
+  uint8_t payload[SLI_SI91X_EC_IDENTITY_MAX_PAYLOAD]; ///< Unused for generate/delete
+} SL_ATTRIBUTE_PACKED sli_si91x_req_ec_identity_t;
 
 /// IPV4 ipconfig command request  structure
 typedef struct {
@@ -334,8 +359,8 @@ typedef struct {
   /// Length of the packet
   uint16_t length;
 
-  /// RPS content
-  uint8_t content[SLI_MAX_FWUP_CHUNK_SIZE];
+  /// RPS content (flexible; length given by @ref length, up to SLI_MAX_FWUP_CHUNK_SIZE)
+  uint8_t content[];
 } sli_si91x_req_fwup_t;
 
 /** \addtogroup SL_SI91X_TYPES
@@ -653,7 +678,7 @@ typedef struct {
   uint8_t sub_cmd; ///< sub_cmd from @ref sl_si91x_ta_m4_commands_t (main command is SLI_COMMON_REQ_TA_M4_COMMANDS)
   uint8_t input_data_size; ///< length of input_data
   uint8_t input_data
-    []; ///< Input data. In this input data first byte is reserved for enable(1) or Disable(0) sub_cmd of this structure.
+    []; ///< Input data. The first byte of the input data is reserved for enable(1) or Disable(0) sub_cmd of the structure.
 } SL_ATTRIBUTE_PACKED sli_si91x_ta_m4_handshake_parameters_t;
 #endif
 
@@ -1006,6 +1031,26 @@ typedef struct {
 } sli_si91x_sha_mp_request_t;
 
 typedef struct {
+  uint16_t algorithm_type;
+  uint16_t algorithm_sub_type;
+  uint16_t total_msg_length;
+  uint16_t output_length;
+  uint8_t *msg;
+  uint8_t *output;
+} sli_si91x_sha3_request_t;
+
+typedef struct {
+  uint16_t algorithm_type;
+  uint8_t algorithm_sub_type;
+  uint8_t sha3_flags;
+  uint16_t total_msg_length;
+  uint16_t current_chunk_length;
+  uint16_t output_length;
+  uint8_t *msg;
+  uint8_t *output;
+} sli_si91x_sha3_mp_request_t;
+
+typedef struct {
   uint8_t algorithm_type;
   uint8_t nonce_length;
   uint16_t encrypt_decryption;
@@ -1143,6 +1188,18 @@ typedef struct {
   uint8_t *token_buf;        ///< Token buffer
 } sli_si91x_rsi_token_req_t;
 
+/// Platform CSR sign request (ENCRYPT_CRYPTO / CSR_SIGN) — side-band
+typedef struct {
+  uint16_t algorithm_type; ///< Must be CSR_SIGN
+  uint8_t sig_alg;         ///< sl_si91x_ec_sig_alg_t
+  uint8_t reserved;        ///< Reserved, set to 0
+  uint32_t key_id;         ///< Host-supplied EC identity identifier
+  uint16_t cri_der_len;    ///< Length of cri_der
+  uint8_t *cri_der;        ///< CertificationRequestInfo DER
+  uint8_t *signature;      ///< Output signature buffer
+  uint16_t *signature_len; ///< In/out signature length
+} sli_si91x_csr_sign_request_t;
+
 typedef struct {
   uint8_t algorithm_type;
   uint8_t algorithm_sub_type;
@@ -1194,7 +1251,8 @@ typedef struct {
   uint8_t key[SL_SI91X_KEY_BUFFER_SIZE];
 #endif
   uint8_t IV[SL_SI91X_IV_SIZE];
-  uint8_t msg[1408];
+  /// Message (flexible; sent as a second fragment, up to 1408 bytes)
+  uint8_t msg[];
 } sli_si91x_aes_request_t;
 
 typedef struct {
@@ -1225,7 +1283,8 @@ typedef struct {
 #else
   uint32_t key_length;
 #endif
-  uint8_t hmac_data[1400];
+  /// HMAC data (flexible; sent as a second fragment, up to 1400 bytes)
+  uint8_t hmac_data[];
 } sli_si91x_hmac_sha_request_t;
 
 /// Si91x specific SHA request
@@ -1235,8 +1294,18 @@ typedef struct {
   uint8_t sha_flags;             ///< SHA flags
   uint16_t total_msg_length;     ///< Total message length
   uint16_t current_chunk_length; ///< Current chunk length
-  uint8_t msg[1400];             ///< Message
+  uint8_t msg[];                 ///< Message (flexible; sent as a second fragment, up to 1400 bytes)
 } sli_si91x_sha_request_t;
+
+/// Si91x specific SHA3 request
+typedef struct {
+  uint16_t algorithm_type;       ///< Algorithm type
+  uint8_t algorithm_sub_type;    ///< Algorithm sub type
+  uint8_t sha3_flags;            ///< SHA3 flags
+  uint16_t total_msg_length;     ///< Total message length
+  uint16_t current_chunk_length; ///< Current chunk length
+  uint8_t msg[1400];             ///< Message
+} sli_si91x_sha3_request_t;
 
 /// Si91x specific CCM request
 typedef struct {
@@ -1257,7 +1326,7 @@ typedef struct {
   uint8_t nonce[SLI_SI91X_CCM_IV_BUFF_LEN]; ///< Nonce
   uint8_t ad[SLI_SI91X_CCM_AD_MAX_SIZE];    ///< AD
   uint8_t tag[SL_SI91X_TAG_SIZE];           ///< tag size = 16
-  uint8_t msg[SLI_SI91X_CCM_MSG_MAX_SIZE];  ///< max msg size = 1200 bytes
+  uint8_t msg[]; ///< Message (flexible; sent as a second fragment, up to SLI_SI91X_CCM_MSG_MAX_SIZE)
 } sli_si91x_ccm_request_t;
 
 typedef struct {
@@ -1277,7 +1346,8 @@ typedef struct {
 #endif
   uint8_t nonce[SLI_SI91X_GCM_IV_SIZE]; // iv length = 12 bytes
   uint8_t ad[SLI_SI91X_GCM_AD_MAX_SIZE];
-  uint8_t msg[SLI_SI91X_GCM_MSG_MAX_SIZE];
+  /// Message (flexible; sent as a second fragment, up to SLI_SI91X_GCM_MSG_MAX_SIZE)
+  uint8_t msg[];
 } sli_si91x_gcm_request_t;
 
 typedef struct {
@@ -1298,7 +1368,8 @@ typedef struct {
   uint8_t keys_in[SLI_SI91X_KEYS_SIZE];
 #endif
   uint8_t header_input[SLI_SI91X_GCM_AD_MAX_SIZE];
-  uint8_t msg[SLI_SI91X_CHACHAPOLY_MSG_MAX_SIZE];
+  /// Message (flexible; sent as a second fragment, up to SLI_SI91X_CHACHAPOLY_MSG_MAX_SIZE)
+  uint8_t msg[];
 } sli_si91x_chachapoly_request_t;
 
 typedef struct {
@@ -1320,8 +1391,19 @@ typedef struct {
   uint8_t private_key[SLI_SI91X_PRIVATE_KEY_MAX_SIZE];
   uint8_t public_key[SLI_SI91X_PUBLIC_KEY_MAX_SIZE];
   uint8_t signature[SLI_SI91X_SIGNATURE_MAX_SIZE];
-  uint8_t msg[SLI_SI91X_ECDSA_MSG_MAX_SIZE];
+  /// Message (flexible; sent as a second fragment, up to SLI_SI91X_ECDSA_MSG_MAX_SIZE)
+  uint8_t msg[];
 } sl_si91x_ecdsa_request_t;
+
+/// Platform CSR sign request header (ENCRYPT_CRYPTO / CSR_SIGN).
+/// CRI DER is sent as a second fragment via sli_si91x_crypto_send_command().
+typedef struct {
+  uint16_t algorithm_type; ///< Must be CSR_SIGN
+  uint8_t sig_alg;         ///< sl_si91x_ec_sig_alg_t
+  uint8_t reserved;        ///< Reserved, set to 0
+  uint32_t key_id;         ///< Host-supplied EC identity identifier
+  uint16_t cri_der_len;    ///< Length of CRI DER payload fragment
+} SL_ATTRIBUTE_PACKED sli_si91x_csr_sign_request_t;
 
 typedef struct {
   uint8_t algorithm_type;

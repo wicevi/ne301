@@ -50,6 +50,19 @@ sl_status_t sli_wifi_get_timeout(sl_wifi_interface_t interface,
                                  sl_wifi_timeout_type_t timeout_type,
                                  uint16_t *timeout_value);
 sl_wifi_interface_t sli_wifi_get_default_interface(void);
+/**
+ * @brief Get the Wi-Fi operating band saved during initialization.
+ * @details Returns the band from `sl_wifi_device_configuration_t.band` stored at init
+ *          via @ref sli_wifi_set_band. Independent of @ref sli_wifi_set_default_interface.
+ * @return sl_wifi_band_mode_t configured at initialization.
+ */
+sl_wifi_band_mode_t sli_wifi_get_band(void);
+/**
+ * @brief Save the Wi-Fi operating band from device configuration at initialization.
+ * @param[in] band Band from `sl_wifi_device_configuration_t.band`.
+ * @note Call only from Wi-Fi driver init. Do not use when changing the default interface.
+ */
+void sli_wifi_set_band(sl_wifi_band_mode_t band);
 sl_status_t sli_wifi_wps_connect(sli_wifi_wps_config_t wps_config, sl_wifi_wps_response_t *wps_response);
 void sli_wifi_set_default_interface(sl_wifi_interface_t interface);
 sl_status_t sli_wifi_set_antenna(sl_wifi_interface_t interface, sl_wifi_antenna_t antenna);
@@ -182,6 +195,10 @@ sl_status_t sli_wifi_update_su_gain_table(uint8_t band,
                                           uint16_t payload_length,
                                           uint8_t x_offset,
                                           uint8_t y_offset);
+sl_status_t sli_wifi_update_worldwide_gain_table(uint8_t band,
+                                                 uint8_t bandwidth,
+                                                 const uint8_t *payload,
+                                                 uint16_t payload_length);
 sl_status_t sli_wifi_set_11ax_config(const sl_wifi_11ax_config_params_t *config_11ax_params);
 sl_status_t sli_wifi_transceiver_set_channel(sl_wifi_interface_t interface, sl_wifi_transceiver_set_channel_t channel);
 sl_status_t sli_wifi_set_transceiver_parameters(sl_wifi_interface_t interface,
@@ -214,7 +231,7 @@ sl_status_t sli_wifi_config_xo_ctune(sl_wifi_interface_t interface,
 sl_status_t sli_wifi_read_ctune(sl_wifi_interface_t interface,
                                 sl_wifi_response_get_ctune_data_t *get_xo_ctune,
                                 const uint32_t *ctune_data);
-sl_status_t sli_wifi_add_vendor_ie(sl_wifi_vendor_ie_t *vendor_ie, uint8_t *fw_unique_id);
+sl_status_t sli_wifi_add_vendor_ie(const sl_wifi_vendor_ie_t *vendor_ie, uint8_t *fw_unique_id);
 sl_status_t sli_wifi_remove_vendor_ie(uint8_t unique_id);
 sl_status_t sli_wifi_remove_all_vendor_ie(void);
 
@@ -257,10 +274,7 @@ sl_status_t sli_wifi_set_high_throughput_capability(sl_wifi_interface_t interfac
 sl_status_t sli_wifi_set_device_region(sl_wifi_operation_mode_t operation_mode,
                                        sl_wifi_band_mode_t band,
                                        sl_wifi_region_code_t region_code);
-void sli_wifi_prepare_mac_frame_header(const void *buf,
-                                       const uint8_t *addr1,
-                                       const uint8_t *addr2,
-                                       const uint8_t *addr3);
+void sli_wifi_prepare_mac_frame_header(void *buf, const uint8_t *addr1, const uint8_t *addr2, const uint8_t *addr3);
 sl_status_t sli_wifi_send_mac_data_frame(const sl_wifi_transmitter_test_info_t *per_params,
                                          sl_wifi_system_packet_t *packet,
                                          uint16_t chunk_length);
@@ -275,8 +289,8 @@ sl_status_t sli_wifi_send_mac_data_frame_11ax(const sl_wifi_transmitter_test_bas
 /**
  * @brief Route an already-formed Wi-Fi data packet to firmware.
  *
- * @param[in] data Pointer to packet bytes; must not be modified through this pointer by this API
- *            (matches @c sli_routing_utility_route_packet's @c const void * packet parameter).
+ * @param[in] data Pointer to packet bytes passed to the routing path (handler/enqueue may mutate).
+ *            Matches @c sli_routing_utility_route_packet's @c void * packet parameter.
  *
  * @note Buffer-ownership contract: callers retain ownership of @a data on all return paths.
  *       On the Si91x port, @c sli_routing_utility_route_packet does NOT free the packet on success,
@@ -285,7 +299,7 @@ sl_status_t sli_wifi_send_mac_data_frame_11ax(const sl_wifi_transmitter_test_bas
  *       @ref sli_wifi_send_mac_data_frame_11bgn / @ref sli_wifi_send_mac_data_frame_11ax and the
  *       SiWx3xx 11ac/11be chunk-builders.
  */
-sl_status_t sli_wifi_send_data_packet(const void *data, uint16_t length, const void *context);
+sl_status_t sli_wifi_send_data_packet(void *data, uint16_t length, void *context);
 /**
  * @brief Send IP address information to firmware.
  *
@@ -312,6 +326,6 @@ sl_status_t sli_wifi_set_opportunistic_sleep_config(sl_wifi_interface_t interfac
 sl_status_t sli_wifi_set_retry_config(sl_wifi_interface_t interface, const sli_wifi_retry_config_t *config);
 sl_status_t sli_wifi_set_aggregation_config(sl_wifi_interface_t interface, const sli_wifi_aggregation_config_t *config);
 
-void sli_wifi_set_active_application_profile(sli_wifi_application_profile_t profile);
-sli_wifi_application_profile_t sli_wifi_get_active_application_profile(void);
+void sli_wifi_set_active_application_profile_config_group(sli_wifi_application_profile_config_group_t config_group);
+sli_wifi_application_profile_config_group_t sli_wifi_get_active_application_profile_config_group(void);
 #endif

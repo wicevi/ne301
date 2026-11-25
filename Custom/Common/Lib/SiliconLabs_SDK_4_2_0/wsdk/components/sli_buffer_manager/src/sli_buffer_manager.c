@@ -30,12 +30,16 @@
 #include "sli_buffer_manager.h"
 #include "sl_status.h"
 #include "sl_constants.h"
+#include "sli_buffer_manager_log_helper.h"
 #include "stdlib.h"
 #include "string.h"
 #include "cmsis_os2.h"
 #include "sl_core.h"
 #include "sl_slist.h"
 #include "sl_cmsis_utility.h"
+
+sl_log_level_t sl_log_buffer_manager_component_level = SL_LOG_BUFFER_MANAGER_COMPONENT_LEVEL;
+
 #define SLI_MEM_POOL_BLOCK_SIZE(x)               \
   (x                                             \
    + sizeof(sli_buffer_manager_mempool_handler_t \
@@ -122,7 +126,7 @@ inline static uint32_t sli_buffer_manager_get_host_elapsed_time(uint32_t startin
  * @param mempool_handler Memory pool handler.
  * @return SL_STATUS_OK if the operation is successful.
  */
-static sl_status_t sli_buffer_manager_create_and_assign_mempool(sli_buffer_manager_pool_info_t *configuration,
+static sl_status_t sli_buffer_manager_create_and_assign_mempool(const sli_buffer_manager_pool_info_t *configuration,
                                                                 sli_buffer_manager_mempool_handler_t *mempool_handler,
                                                                 bool is_common_pool)
 {
@@ -134,12 +138,12 @@ static sl_status_t sli_buffer_manager_create_and_assign_mempool(sli_buffer_manag
   }
 
   sli_mem_pool_create(&mempool_handler->mempool,
-                      SLI_MEM_POOL_BLOCK_SIZE(configuration->block_size),
-                      configuration->block_count,
+                      (uint16_t)SLI_MEM_POOL_BLOCK_SIZE(configuration->block_size),
+                      (uint16_t)configuration->block_count,
                       mempool_handler->mempool_memory,
-                      buffer_size);
+                      (uint32_t)buffer_size);
 
-  mempool_handler->max_buffer_count       = configuration->block_count;
+  mempool_handler->max_buffer_count       = (uint16_t)configuration->block_count;
   mempool_handler->allocated_buffer_count = 0;
   mempool_handler->is_common_pool         = is_common_pool;
   return SL_STATUS_OK;
@@ -154,14 +158,14 @@ static bool sli_buffer_manager_are_all_pools_deallocated()
 {
   CORE_irqState_t state = CORE_EnterAtomic();
 
-  SL_DEBUG_LOG_V2(DEBUG, "Buffer Manager Pools Status:\r\n");
+  SL_DEBUG_LOG_V2(DEBUG, "[buffer_manager] Buffer Manager Pools Status:\r\n");
 
   // Dedicated pools
   for (uint8_t i = 0; i < SLI_MAX_MEMPOOL_HANDLERS_COUNT; i++) {
-    sli_buffer_manager_mempool_handler_t *handler = &dedicated_mempool_handlers[i];
+    const sli_buffer_manager_mempool_handler_t *handler = &dedicated_mempool_handlers[i];
     if (handler->mempool_memory != NULL) {
-      SL_DEBUG_LOG_V2(DEBUG, "Dedicated Pool %u: Max Buffers = %u", i, handler->max_buffer_count);
-      SL_DEBUG_LOG_V2(DEBUG, "Dedicated Pool %u: Allocated = %u", i, handler->allocated_buffer_count);
+      SL_DEBUG_LOG_V2(DEBUG, "[buffer_manager] Dedicated Pool %u: Max Buffers = %u", i, handler->max_buffer_count);
+      SL_DEBUG_LOG_V2(DEBUG, "[buffer_manager] Dedicated Pool %u: Allocated = %u", i, handler->allocated_buffer_count);
 
       if (handler->allocated_buffer_count > 0) {
         CORE_ExitAtomic(state);
@@ -170,7 +174,7 @@ static bool sli_buffer_manager_are_all_pools_deallocated()
     }
   }
 
-  SL_DEBUG_LOG_V2(DEBUG, "Common Pools (Queue Size: %u):\r\n", common_mempool_queue.size);
+  SL_DEBUG_LOG_V2(DEBUG, "[buffer_manager] Common Pools (Queue Size: %u):\r\n", common_mempool_queue.size);
 
   /* ponytail: the SDK do-while below dereferences `current` before testing it
    * ("there shall be at least one common pool") — but on a clean first boot
@@ -187,8 +191,11 @@ static bool sli_buffer_manager_are_all_pools_deallocated()
 
   uint8_t pool_idx = 0;
   do {
-    SL_DEBUG_LOG_V2(DEBUG, "Common Pool %u: Max Buffers = %u", pool_idx, current->max_buffer_count);
-    SL_DEBUG_LOG_V2(DEBUG, "Common Pool %u: Allocated = %u", pool_idx, current->allocated_buffer_count);
+    SL_DEBUG_LOG_V2(DEBUG, "[buffer_manager] Common Pool %u: Max Buffers = %u", pool_idx, current->max_buffer_count);
+    SL_DEBUG_LOG_V2(DEBUG,
+                    "[buffer_manager] Common Pool %u: Allocated = %u",
+                    pool_idx,
+                    current->allocated_buffer_count);
 
     if (current->allocated_buffer_count > 0) {
       CORE_ExitAtomic(state);
@@ -199,6 +206,8 @@ static bool sli_buffer_manager_are_all_pools_deallocated()
     // ponytail: size bound — a broken ring (tail/head unreachable) must not
     // let this read-only walk chase next-pointers indefinitely under PRIMASK.
     // A healthy ring visits exactly `size` handlers and wraps out first.
+    // (pool_idx increments unconditionally: the ring bound needs it even when
+    // the log component that also uses it is compiled out.)
   } while ((current != common_mempool_queue.head) && (current != NULL) && (pool_idx <= common_mempool_queue.size));
 
   CORE_ExitAtomic(state);
@@ -347,8 +356,8 @@ static bool sli_buffer_manager_try_allocate_from_common_pool(sli_internal_buffer
     return false;
   }
 
-  sli_buffer_manager_mempool_handler_t *mempool_handler = common_mempool_queue.last_used_handler;
-  sli_buffer_manager_mempool_handler_t *start_handler   = mempool_handler;
+  sli_buffer_manager_mempool_handler_t *mempool_handler     = common_mempool_queue.last_used_handler;
+  const sli_buffer_manager_mempool_handler_t *start_handler = mempool_handler;
 
   do {
     if (mempool_handler->allocated_buffer_count < mempool_handler->max_buffer_count) {
@@ -741,7 +750,7 @@ static sl_status_t sli_buffer_manager_free_all_mempools(void)
 /***************************************************************************************************************** 
  * Public functions
  * ****************************************************************************************************************/
-sl_status_t sli_buffer_manager_init(sli_buffer_manager_configuration_t *configuration)
+sl_status_t sli_buffer_manager_init(const sli_buffer_manager_configuration_t *configuration)
 {
   SL_VERIFY_POINTER_OR_RETURN(configuration, SL_STATUS_NULL_POINTER);
   sl_status_t status = SL_STATUS_ALLOCATION_FAILED;
@@ -818,7 +827,10 @@ sl_status_t sli_buffer_manager_allocate_buffer(const sli_buffer_manager_pool_typ
   if (allocation_type == SLI_BUFFER_MANAGER_ALLOCATION_TYPE_DEDICATED) {
     sl_status_t status =
       sli_buffer_manager_allocate_buffer_from_dedicated_pool(&internal_buffer, pool_type, start, wait_duration_ms);
-    VERIFY_STATUS_AND_RETURN(status);
+    // Return failures without ERROR tagging; callers decide whether to log.
+    if (status != SL_STATUS_OK) {
+      return status;
+    }
 
     *buffer = internal_buffer->data;
     return SL_STATUS_OK;
@@ -864,8 +876,7 @@ sl_status_t sli_buffer_manager_free_buffer(sli_buffer_t buffer)
   temp            = (uint8_t *)buffer;
   internal_buffer = (sli_internal_buffer_t *)(temp - sizeof(sli_buffer_manager_mempool_handler_t *));
 
-  sli_buffer_manager_mempool_handler_t *mempool_handler =
-    (sli_buffer_manager_mempool_handler_t *)internal_buffer->buffer_manager_mempool_handler;
+  sli_buffer_manager_mempool_handler_t *mempool_handler = internal_buffer->buffer_manager_mempool_handler;
 
   // Validate that the handler pointer points to a known pool (dedicated or common)
   bool valid_handler     = false;
@@ -903,11 +914,10 @@ sl_status_t sli_buffer_manager_free_buffer(sli_buffer_t buffer)
   mempool_handler->allocated_buffer_count--;
 
   if ((mempool_handler->is_common_pool) && (mempool_handler->allocated_buffer_count == 0)
-      && (common_mempool_queue.size > SLI_MINIUM_ELEMENTS_IN_COMMON_MEMPOOL_QUEUE)) {
-    if (sli_buffer_manager_free_a_common_mempool_from_queue(mempool_handler) == SL_STATUS_OK) {
-      /* Pool removed and freed; no buffer returned to an existing common pool — avoid waking waiters. */
-      suppress_common_pool_event = true;
-    }
+      && (common_mempool_queue.size > SLI_MINIUM_ELEMENTS_IN_COMMON_MEMPOOL_QUEUE)
+      && (sli_buffer_manager_free_a_common_mempool_from_queue(mempool_handler) == SL_STATUS_OK)) {
+    /* Pool removed and freed; no buffer returned to an existing common pool — avoid waking waiters. */
+    suppress_common_pool_event = true;
   }
 
   CORE_ExitAtomic(state);

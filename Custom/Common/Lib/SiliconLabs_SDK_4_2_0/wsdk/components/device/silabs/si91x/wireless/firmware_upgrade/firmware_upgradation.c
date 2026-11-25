@@ -267,15 +267,17 @@ static sl_status_t sli_send_http_otaf_chunked(const sli_si91x_http_otaf_request_
 
     memcpy(packet_buffer->buffer, (http_otaf->buffer + offset), chunk_size);
 
-    status = sli_wifi_send_command_with_custom_desc(
-      SLI_WIFI_REQ_HTTP_OTAF,
-      SLI_WIFI_WLAN_CMD,
-      packet_buffer,
-      (sizeof(sli_si91x_http_otaf_request_t) - SLI_SI91X_HTTP_BUFFER_LEN + chunk_size),
-      (rem_length == chunk_size) ? SLI_WIFI_WAIT_FOR_OTAF_RESPONSE : SLI_WIFI_WAIT_FOR_COMMAND_RESPONSE,
-      NULL,
-      NULL,
-      packet_identifier);
+    sli_wifi_custom_desc_command_params_t cmd_params = {
+      .command      = SLI_WIFI_REQ_HTTP_OTAF,
+      .command_type = SLI_WIFI_WLAN_CMD,
+      .data         = packet_buffer,
+      .data_length  = (sizeof(sli_si91x_http_otaf_request_t) - SLI_SI91X_HTTP_BUFFER_LEN + chunk_size),
+      .wait_period  = (rem_length == chunk_size) ? SLI_WIFI_WAIT_FOR_OTAF_RESPONSE : SLI_WIFI_WAIT_FOR_COMMAND_RESPONSE,
+      .sdk_context  = NULL,
+      .response_buffer  = NULL,
+      .custom_host_desc = packet_identifier,
+    };
+    status = sli_wifi_send_command_with_custom_desc(&cmd_params);
 
     if ((status != SL_STATUS_OK) && (status != SL_STATUS_SI91X_HTTP_GET_CMD_IN_PROGRESS)) {
       break;
@@ -307,7 +309,8 @@ static sl_status_t sl_si91x_fwup(uint16_t type, const uint8_t *content, uint16_t
 
 static sl_status_t sl_si91x_fwup(uint16_t type, const uint8_t *content, uint16_t length)
 {
-  sl_status_t status        = SL_STATUS_FAIL;
+  sl_status_t status = SL_STATUS_FAIL;
+  // Header only — payload is passed as a second fragment to avoid a ~1KB stack buffer
   sli_si91x_req_fwup_t fwup = { 0 };
 
   // Check if length exceeds
@@ -315,21 +318,22 @@ static sl_status_t sl_si91x_fwup(uint16_t type, const uint8_t *content, uint16_t
     return SL_STATUS_INVALID_PARAMETER;
   }
 
-  // Fill packet type
-  memcpy(&fwup.type, &type, sizeof(fwup.type));
-  // Fill packet length
-  memcpy(&fwup.length, &length, sizeof(fwup.length));
-  // Fill packet content
-  memcpy(fwup.content, content, length);
+  fwup.type   = type;
+  fwup.length = length;
 
-  // Send FW update command
-  status = sli_wifi_send_command(SLI_WIFI_REQ_FWUP,
-                                 SLI_WIFI_WLAN_CMD,
-                                 &fwup,
-                                 sizeof(sli_si91x_req_fwup_t),
-                                 SLI_WIFI_WAIT_FOR_RESPONSE(SLI_WIFI_RSP_FWUP_WAIT_TIME),
-                                 NULL,
-                                 NULL);
+  // Send FW update command (header + optional content without intermediate copy)
+  sli_wifi_command_payload_t fragments = {
+    .header         = &fwup,
+    .header_length  = sizeof(sli_si91x_req_fwup_t),
+    .payload        = content,
+    .payload_length = length,
+  };
+  status = sli_wifi_send_command_with_payload(SLI_WIFI_REQ_FWUP,
+                                              SLI_WIFI_WLAN_CMD,
+                                              &fragments,
+                                              SLI_WIFI_WAIT_FOR_RESPONSE(SLI_WIFI_RSP_FWUP_WAIT_TIME),
+                                              NULL,
+                                              NULL);
 
   // Return status if error in sending command occurs
   return status;
