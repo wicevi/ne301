@@ -1405,6 +1405,35 @@ aicam_result_t mqtt_service_restart(void)
     
 }
 
+aicam_result_t mqtt_service_reload_config(aicam_bool_t restart)
+{
+    mqtt_service_config_t *persistent = (mqtt_service_config_t*)buffer_calloc(1, sizeof(mqtt_service_config_t));
+    aicam_result_t result;
+
+    if (!g_mqtt_service.initialized) {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+    if (persistent == NULL) {
+        return AICAM_ERROR_NO_MEMORY;
+    }
+
+    // The persistent config (NVS) was edited by someone else: sync the runtime copy
+    result = json_config_get_mqtt_service_config(persistent);
+    if (result == AICAM_OK) {
+        free_mqtt_config_strings(&g_mqtt_service.config.base_config);
+        result = mqtt_config_persistent_to_runtime(persistent, &g_mqtt_service.config);
+    }
+    buffer_free(persistent);
+
+    if (result != AICAM_OK) {
+        return result;
+    }
+    if (restart && g_mqtt_service.running) {
+        return mqtt_service_restart();
+    }
+    return AICAM_OK;
+}
+
 aicam_result_t mqtt_service_deinit(void)
 {
     if (!g_mqtt_service.initialized) {

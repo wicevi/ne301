@@ -20,6 +20,7 @@
 #include "rtsp_service.h"
 #include "webhook_service.h"
 #include "upload_coordinator.h"
+#include "ble_prov_service.h"
 #include "Services/Video/video_stream_hub.h"
 #include "cmsis_os2.h"
 
@@ -286,6 +287,23 @@ static const service_module_t g_service_registry[] = {
          * Runtime channel/sd probes gracefully tolerate "not ready" → false. */
         .depends_on = {},
         .depends_count = 0
+    },
+    {
+        .name = "ble_prov_service",
+        .state = SERVICE_STATE_UNINITIALIZED,
+        .init_func = ble_prov_service_init,
+        .start_func = ble_prov_service_start,
+        .stop_func = ble_prov_service_stop,
+        .deinit_func = ble_prov_service_deinit,
+        .get_state_func = ble_prov_service_get_state,
+        .config = NULL,
+        .auto_start = AICAM_TRUE,
+        /* After device_service (3): its start owns the button callbacks, which
+         * the BLE window's double click routes through. */
+        .init_priority = 12,
+        .required_in_low_power = AICAM_FALSE,
+        .depends_on = {"communication_service"},   // BLE rides on the Wi-Fi chip
+        .depends_count = 1
     }
 };
 

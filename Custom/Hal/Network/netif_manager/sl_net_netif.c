@@ -76,6 +76,7 @@
 #if IS_ENABLE_BLE
 #include "ble_config.h"
 #include "sl_rsi_ble.h"
+#include "sl_rsi_ble_gatt.h"
 #include "rsi_bt_common_apis.h"
 #include "rsi_common_apis.h"
 #endif
@@ -1429,6 +1430,11 @@ int sl_net_client_netif_init(void)
         LOG_DRV_ERROR("Failed to init Wi-Fi Client interface: 0x%lX\r\n", status);
         return status;
     }
+#if IS_ENABLE_BLE
+    if (status == SL_STATUS_OK) {
+        sl_ble_gatt_profile_invalidate();   // a fresh NWP boot carries an empty GATT database
+    }
+#endif
 
 #if IS_SELF_DHCP_SERVER
     if (!sl_net_fw_dhcps_check_skip) {
@@ -2370,6 +2376,11 @@ int sl_net_ap_netif_init(void)
         LOG_DRV_ERROR("Failed to init Wi-Fi AP interface: 0x%lX\r\n", status);
         return status;
     }
+#if IS_ENABLE_BLE
+    if (status == SL_STATUS_OK) {
+        sl_ble_gatt_profile_invalidate();   // a fresh NWP boot carries an empty GATT database
+    }
+#endif
 
 #if IS_SELF_DHCP_SERVER
     status = sl_net_fw_dhcps_compat_check(SL_NET_WIFI_AP_INTERFACE);

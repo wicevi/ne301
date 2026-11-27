@@ -629,6 +629,15 @@ uint16_t rsi_bt_global_cb_init(rsi_driver_cb_t *driver_cb, uint8_t *buffer)
  *             "NWP would not send card ready command response").
  */
 
+// NE301 local patch: bounded wait for BT card ready. The stock osWaitForever
+// acquire parks sl_wifi_init() for good when the NWP firmware carries no BT
+// stack, and on the init-after-deinit path noted above (no repeated card
+// ready) it would stall every NWP recovery re-init. Same 5 s budget as the
+// WLAN card-ready wait in sl_si91x_driver_init().
+#ifndef RSI_BT_CARD_READY_WAIT_MS
+#define RSI_BT_CARD_READY_WAIT_MS 5000
+#endif
+
 void rsi_bt_common_init(void)
 {
   // Get bt_common_cb structure pointer
@@ -650,7 +659,17 @@ void rsi_bt_common_init(void)
 
   // Wait on BLE semaphore
   if (bt_common_cb->bt_sem) {
-    osSemaphoreAcquire(bt_common_cb->bt_sem, osWaitForever);
+    uint32_t wait_start = osKernelGetTickCount();
+    if (osSemaphoreAcquire(bt_common_cb->bt_sem, RSI_BT_CARD_READY_WAIT_MS) != osOK) {
+      // Abandon the wait with the bookkeeping cleared: the BT stack is not
+      // reachable, and a late card ready must not be matched as this sync
+      // response.
+      bt_common_cb->expected_response_type = 0;
+      bt_common_cb->sync_rsp               = 0;
+      sl_debug_log("[WARN] [si91x_bt] BT card ready wait timed out after %d ms\r\n", RSI_BT_CARD_READY_WAIT_MS);
+      return;
+    }
+    sl_debug_log("[DEBUG] [si91x_bt] BT card ready after %u ms\r\n", (unsigned)(osKernelGetTickCount() - wait_start));
   }
 
 #ifdef SLI_SI91X_MCU_INTERFACE

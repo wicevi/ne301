@@ -310,6 +310,26 @@ aicam_result_t communication_configure_interface(const char *if_name,
                                                  netif_config_t *config);
 
 /**
+ * @brief Store Wi-Fi client credentials without connecting (known-networks
+ *        database + NVS). bssid may be NULL/empty for "any BSSID"
+ * @param ssid Network SSID
+ * @param password Password ("" = open network)
+ * @param bssid Optional AP to lock onto ("XX:XX:XX:XX:XX:XX")
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t communication_store_wifi_credentials(const char *ssid, const char *password,
+                                                    const char *bssid);
+
+/**
+ * @brief Join the network stored with communication_store_wifi_credentials().
+ *        Blocking: association + DHCP
+ * @param ssid Network SSID
+ * @param bssid Same BSSID string used when storing (NULL/empty = any)
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t communication_apply_wifi_credentials(const char *ssid, const char *bssid);
+
+/**
  * @brief Start network interface
  * @param if_name Interface name
  * @return aicam_result_t Operation result
@@ -583,6 +603,13 @@ aicam_result_t communication_cellular_get_settings(cellular_connection_settings_
  * @return aicam_result_t Operation result
  */
 aicam_result_t communication_cellular_set_settings(const cellular_connection_settings_t *settings);
+
+/**
+ * @brief Replace the cellular settings in RAM and NVS without touching the modem
+ * @param settings Settings structure
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t communication_cellular_store_settings(const cellular_connection_settings_t *settings);
 
 /**
  * @brief Save cellular settings to NVS

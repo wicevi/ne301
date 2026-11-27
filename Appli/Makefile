@@ -191,6 +191,8 @@ C_SOURCES += ../Custom/Hal/Network/netif_manager/mm_halow_netif.c
 C_SOURCES += ../Custom/Hal/Network/netif_manager/w5500_netif.c
 C_SOURCES += ../Custom/Hal/Network/netif_manager/netif_init_manager.c
 C_SOURCES += ../Custom/Hal/Network/sl_rsi_ble/sl_rsi_ble.c
+C_SOURCES += ../Custom/Hal/Network/sl_rsi_ble/sl_rsi_ble_gatt.c
+C_SOURCES += ../Custom/Hal/Network/sl_rsi_ble/sl_rsi_ble_ctprov.c
 C_SOURCES += ../Custom/Hal/Network/w5500/eth_tool.c
 C_SOURCES += ../Custom/Hal/Network/w5500/w5500.c
 C_SOURCES += ../Custom/Hal/Network/ms_modem/ms_modem.c
@@ -209,6 +211,10 @@ C_SOURCES += ../Custom/Services/RTSP/rtsp_server.c
 C_SOURCES += ../Custom/Services/RTSP/rtsp_rtp.c
 C_SOURCES += ../Custom/Services/RTSP/rtsp_digest_auth.c
 C_SOURCES += ../Custom/Services/Webhook/webhook_service.c
+C_SOURCES += ../Custom/Services/BleProv/ble_prov_service.c
+C_SOURCES += ../Custom/Services/BleProv/ble_prov_config.c
+C_SOURCES += ../Custom/Services/BleProv/ct_prov_codec.c
+C_SOURCES += ../Custom/Services/BleProv/ct_prov_dispatch.c
 C_SOURCES += ../Custom/Services/Upload/upload_coordinator.c
 C_SOURCES += ../Custom/Services/System/system_service.c
 # video_stream_hub moved to Core/Video
@@ -768,6 +774,7 @@ C_INCLUDES += -I../Custom/Common/Lib/rtmpdump
 C_INCLUDES += -I../Custom/Common/Lib/rtmpdump/librtmp
 C_INCLUDES += -I../Custom/Services/RTSP
 C_INCLUDES += -I../Custom/Services/Webhook
+C_INCLUDES += -I../Custom/Services/BleProv
 C_INCLUDES += -I../Custom/Services/Upload
 
 # Drivers - HAL & CMSIS

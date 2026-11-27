@@ -43,7 +43,8 @@
 #define RSI_BLE_MAX_NBR_ATT_SERV    10
 /* Number of BLE notifications */
 #define RSI_BLE_NUM_CONN_EVENTS     20
-#define RSI_BLE_MAX_NBR_PERIPHERALS 3
+/* NE301: one provisioning session at a time (the CT-Prov server accepts a single client) */
+#define RSI_BLE_MAX_NBR_PERIPHERALS 1
 #define RSI_BLE_MAX_NBR_CENTRALS    1
 #endif
 

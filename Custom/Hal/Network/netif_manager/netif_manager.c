@@ -1243,9 +1243,9 @@ void netif_manager_register_commands(void)
     aws_capture_register();
     icmp_client_register();
     wifi_register();
-#ifdef SLI_SI91X_ENABLE_BLE
-    driver_cmd_register_callback("ble", sl_ble_test_commands_register);
-#endif
+    // The central-role "ble" test commands (sl_rsi_ble.c) are not registered:
+    // they take over the driver's single BLE callback table, which the
+    // provisioning GATT server (ble_prov_service) owns. Its CLI is "bleprov".
     driver_cmd_register_callback("rtmp_test", rtmp_push_test_register_commands);
 }
 

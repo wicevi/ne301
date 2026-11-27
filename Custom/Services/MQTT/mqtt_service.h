@@ -124,6 +124,13 @@ aicam_result_t mqtt_service_stop(void);
 aicam_result_t mqtt_service_restart(void);
 
 /**
+ * @brief Re-read the persistent MQTT config (NVS) into the runtime config
+ * @param restart Restart the client when the service is running
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t mqtt_service_reload_config(aicam_bool_t restart);
+
+/**
  * @brief Deinitialize MQTT service
  * @return aicam_result_t Operation result
  */

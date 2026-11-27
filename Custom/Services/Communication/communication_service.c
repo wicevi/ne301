@@ -15,6 +15,7 @@
 #include "buffer_mgr.h"
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 #include "cmsis_os2.h"
 #include "common_utils.h"
 #include "service_init.h"
@@ -557,7 +558,16 @@ static aicam_result_t try_connect_known_networks(aicam_bool_t scan_before_connec
         for(uint32_t j = 0; j < g_communication_service.scan_result_count; j++) {
             LOG_SVC_DEBUG("Scan result: %s (%s)", g_communication_service.scan_results[j].ssid, g_communication_service.scan_results[j].bssid);
             if (strcmp(g_communication_service.scan_results[j].ssid, known->ssid) == 0) {
+                /* Refresh channel/security/RSSI too: the join does not sweep
+                 * channels by itself (channel 0 fails with 0x10019), and the
+                 * AP may have moved since the entry was stored. */
                 memcpy(known->bssid, g_communication_service.scan_results[j].bssid, sizeof(known->bssid));
+                known->channel = g_communication_service.scan_results[j].channel;
+                known->rssi = g_communication_service.scan_results[j].rssi;
+                if (g_communication_service.scan_results[j].security != WIRELESS_OPEN &&
+                    g_communication_service.scan_results[j].security < WIRELESS_SECURITY_MAX) {
+                    known->security = g_communication_service.scan_results[j].security;
+                }
                 break;
             }
         }
@@ -1891,6 +1901,138 @@ aicam_result_t communication_configure_interface(const char *if_name,
     }
     
     return result;
+}
+
+aicam_result_t communication_store_wifi_credentials(const char *ssid, const char *password,
+                                                     const char *bssid)
+{
+    network_scan_result_t network;
+    char bssid_text[18] = "00:00:00:00:00:00";   // known-networks key for "any BSSID"
+    uint32_t i;
+
+    if (!ssid || ssid[0] == '\0' || !password) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    if (!g_communication_service.initialized) {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (bssid != NULL && bssid[0] != '\0') {
+        memset(bssid_text, 0, sizeof(bssid_text));
+        for (i = 0; i < 17 && bssid[i] != '\0'; i++) {
+            bssid_text[i] = (char)toupper((unsigned char)bssid[i]);
+        }
+    }
+
+    /* One entry per SSID: the password lookup in communication_configure_interface
+     * keys on (ssid, bssid text), so older entries of this SSID filed under
+     * another BSSID would still carry the previous credentials. */
+    for (i = 0; i < g_communication_service.known_network_count; ) {
+        network_scan_result_t *known = &g_communication_service.known_networks[i];
+        if (strcmp(known->ssid, ssid) == 0 && strcmp(known->bssid, bssid_text) != 0) {
+            LOG_SVC_INFO("Dropping known network entry %s (%s): superseded", ssid, known->bssid);
+            memmove(known, known + 1,
+                    (g_communication_service.known_network_count - i - 1) * sizeof(network_scan_result_t));
+            g_communication_service.known_network_count--;
+            memset(&g_communication_service.known_networks[g_communication_service.known_network_count], 0,
+                   sizeof(network_scan_result_t));
+        } else {
+            i++;
+        }
+    }
+
+    memset(&network, 0, sizeof(network));
+    strncpy(network.ssid, ssid, sizeof(network.ssid) - 1);
+    strncpy(network.bssid, bssid_text, sizeof(network.bssid) - 1);
+    strncpy(network.password, password, sizeof(network.password) - 1);
+    network.security = (password[0] != '\0') ? WIRELESS_WPA_WPA2_MIXED : WIRELESS_OPEN;
+    /* The NWP's join does not sweep channels by itself: a channel of 0 makes
+     * it fail with REJOIN_FAILURE (0x10019, verified on NWP 2.17.6), so take
+     * the live channel/BSSID/security from the last scan when the network is
+     * visible there. */
+    for (i = 0; i < g_communication_service.scan_result_count; i++) {
+        network_scan_result_t *scanned = &g_communication_service.scan_results[i];
+
+        if (strcmp(scanned->ssid, ssid) == 0) {
+            network.channel = scanned->channel;
+            network.rssi    = scanned->rssi;
+            if (scanned->security != WIRELESS_OPEN && scanned->security < WIRELESS_SECURITY_MAX) {
+                network.security = scanned->security;
+            }
+            if (bssid_text[0] == '\0' || strcmp(bssid_text, "00:00:00:00:00:00") == 0) {
+                strncpy(network.bssid, scanned->bssid, sizeof(network.bssid) - 1);
+            }
+            break;
+        }
+    }
+    network.is_known = AICAM_TRUE;
+    network.connected = AICAM_FALSE;
+    network.last_connected_time = rtc_get_timeStamp();
+
+    add_known_network(&network);
+    return save_known_networks_to_nvs();
+}
+
+aicam_result_t communication_apply_wifi_credentials(const char *ssid, const char *bssid)
+{
+    network_scan_result_t *known;
+    netif_config_t config;
+    unsigned int bssid_bytes[6];
+    int known_index;
+
+    if (!ssid) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    if (!g_communication_service.initialized) {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    known_index = is_known_network(ssid, (bssid != NULL && bssid[0] != '\0') ? bssid : "00:00:00:00:00:00");
+    if (known_index < 0) {
+        /* The entry may be filed under the real BSSID (stored from a scan):
+         * fall back to the first entry of this SSID. */
+        for (known_index = 0; known_index < (int)g_communication_service.known_network_count; known_index++) {
+            if (strcmp(g_communication_service.known_networks[known_index].ssid, ssid) == 0) {
+                break;
+            }
+        }
+        if (known_index >= (int)g_communication_service.known_network_count) {
+            return AICAM_ERROR_NOT_FOUND;
+        }
+    }
+    known = &g_communication_service.known_networks[known_index];
+
+    memset(&config, 0, sizeof(config));
+    if (communication_get_interface_config(NETIF_NAME_WIFI_STA, &config) != AICAM_OK) {
+        return AICAM_ERROR;
+    }
+    strncpy(config.wireless_cfg.ssid, known->ssid, sizeof(config.wireless_cfg.ssid) - 1);
+    config.wireless_cfg.ssid[sizeof(config.wireless_cfg.ssid) - 1] = '\0';
+    strncpy(config.wireless_cfg.pw, known->password, sizeof(config.wireless_cfg.pw) - 1);
+    config.wireless_cfg.pw[sizeof(config.wireless_cfg.pw) - 1] = '\0';
+    config.wireless_cfg.security = known->security;
+    memset(config.wireless_cfg.bssid, 0, sizeof(config.wireless_cfg.bssid));
+    if (sscanf(known->bssid, "%02X:%02X:%02X:%02X:%02X:%02X", &bssid_bytes[0], &bssid_bytes[1], &bssid_bytes[2],
+               &bssid_bytes[3], &bssid_bytes[4], &bssid_bytes[5]) == 6) {
+        for (int i = 0; i < 6; i++) {
+            config.wireless_cfg.bssid[i] = (uint8_t)(bssid_bytes[i] & 0xFF);
+        }
+    }
+    /* A fixed channel: the NWP's join does not sweep channels by itself and
+     * fails with REJOIN_FAILURE (0x10019) when given 0. Prefer the live scan
+     * channel (the AP may have moved), fall back to the stored one. */
+    config.wireless_cfg.channel = known->channel;
+    for (uint32_t i = 0; i < g_communication_service.scan_result_count; i++) {
+        if (strcmp(g_communication_service.scan_results[i].ssid, ssid) == 0) {
+            config.wireless_cfg.channel = g_communication_service.scan_results[i].channel;
+            break;
+        }
+    }
+    config.ip_mode = NETIF_IP_MODE_DHCP;
+
+    return communication_configure_interface(NETIF_NAME_WIFI_STA, &config);
 }
 
 aicam_result_t communication_start_interface(const char *if_name)
@@ -4112,6 +4254,26 @@ aicam_result_t communication_cellular_set_settings(const cellular_connection_set
     }
     
     return result;
+#else
+    return AICAM_ERROR_UNAVAILABLE;
+#endif
+}
+
+aicam_result_t communication_cellular_store_settings(const cellular_connection_settings_t *settings)
+{
+#if NETIF_4G_CAT1_IS_ENABLE
+    if (!settings) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+
+    if (!g_communication_service.initialized) {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    // RAM copy + NVS only: the modem receives them with the next
+    // communication_cellular_set_settings() or at start-up
+    g_communication_service.cellular_settings = *settings;
+    return communication_cellular_save_settings();
 #else
     return AICAM_ERROR_UNAVAILABLE;
 #endif

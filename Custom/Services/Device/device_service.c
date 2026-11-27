@@ -26,6 +26,7 @@
 #include "upgrade_manager.h"
 #include "factory_test.h"
 #include "communication_service.h"
+#include "ble_prov_service.h"
 #include "web_server.h"
 #include "system_service.h"
 #include "nn.h"
@@ -109,6 +110,8 @@ typedef struct {
     led_config_t led_config;
     aicam_bool_t led_initialized;
     system_indicator_state_t indicator_state;  // Current system indicator state
+    aicam_bool_t indicator_hold;               // BLE provisioning owns the indicator
+    system_indicator_state_t indicator_deferred_state;  // Running state to restore when the hold ends
     
     // Sensor management
     sensor_data_t sensor_data;
@@ -975,9 +978,11 @@ static void single_press_callback(void *user_data)
  */
 static void double_click_callback(void *user_data)
 {
-    LOG_SVC_INFO("Double click detected\r\n");
-    // Double click is now available for other purposes
+    (void)user_data;
+    LOG_SVC_INFO("Double click detected - toggling BLE provisioning\r\n");
+    // Runs on the key scan thread: the service defers the work to its own thread.
     // Factory reset is triggered by super long press (10s) only
+    ble_prov_service_toggle();
 }
 
 /**
@@ -3537,6 +3542,14 @@ aicam_result_t device_service_set_indicator_state(system_indicator_state_t state
     if (state >= SYSTEM_INDICATOR_MAX) {
         return AICAM_ERROR_INVALID_PARAM;
     }
+
+    // BLE provisioning owns the LED while its window is open; SLEEP and
+    // FACTORY_RESET still override it.
+    if (g_device_service.indicator_hold && state != SYSTEM_INDICATOR_BLE_PROVISIONING &&
+        state != SYSTEM_INDICATOR_SLEEP && state != SYSTEM_INDICATOR_FACTORY_RESET) {
+        g_device_service.indicator_deferred_state = state;
+        return AICAM_OK;
+    }
     
     aicam_result_t result = AICAM_OK;
     
@@ -3572,6 +3585,14 @@ aicam_result_t device_service_set_indicator_state(system_indicator_state_t state
                 LOG_SVC_INFO("System indicator: FACTORY_RESET (5Hz fast blink)");
             }
             break;
+
+        case SYSTEM_INDICATOR_BLE_PROVISIONING:
+            // 2Hz blink - BLE provisioning window is open
+            result = device_service_led_blink(0, 250);  // 0 = infinite blink
+            if (result == AICAM_OK) {
+                LOG_SVC_INFO("System indicator: BLE_PROVISIONING (2Hz blink)");
+            }
+            break;
             
         default:
             return AICAM_ERROR_INVALID_PARAM;
@@ -3582,6 +3603,27 @@ aicam_result_t device_service_set_indicator_state(system_indicator_state_t state
     }
     
     return result;
+}
+
+aicam_result_t device_service_indicator_hold(aicam_bool_t hold)
+{
+    system_indicator_state_t restore;
+
+    if (!g_device_service.initialized) {
+        return AICAM_ERROR_NOT_INITIALIZED;
+    }
+
+    if (hold && !g_device_service.indicator_hold) {
+        g_device_service.indicator_hold            = AICAM_TRUE;
+        g_device_service.indicator_deferred_state  = g_device_service.indicator_state;
+    } else if (!hold && g_device_service.indicator_hold) {
+        restore = g_device_service.indicator_deferred_state;
+        g_device_service.indicator_hold = AICAM_FALSE;
+        if (g_device_service.indicator_state == SYSTEM_INDICATOR_BLE_PROVISIONING) {
+            return device_service_set_indicator_state(restore);
+        }
+    }
+    return AICAM_OK;
 }
 
 system_indicator_state_t device_service_get_indicator_state(void)

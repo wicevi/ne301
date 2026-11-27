@@ -69,7 +69,8 @@ C_SOURCES += $(SL_WSDK)/components/protocol/wifi/src/sl_wifi_basic_credentials.c
 C_SOURCES += $(SL_WSDK)/components/protocol/wifi/src/sl_wifi_callback_framework.c
 C_SOURCES += $(SL_WSDK)/components/protocol/wifi/src/sli_wifi_callback_framework.c
 
-# --- BLE (compiled; SLI_SI91X_ENABLE_BLE macro disabled) ---
+# --- BLE host driver (gated by SLI_SI91X_ENABLE_BLE in C_DEFS; when it is
+# defined sl_net_netif.c also boots the NWP in WLAN+BLE coexistence) ---
 C_SOURCES += $(SL_WSDK_DEV)/ble/src/rsi_ble_gap_apis.c
 C_SOURCES += $(SL_WSDK_DEV)/ble/src/rsi_ble_gatt_apis.c
 C_SOURCES += $(SL_WSDK_DEV)/ble/src/rsi_bt_ble.c
@@ -219,7 +220,7 @@ C_DEFS += -DSLI_SI91X_EMBEDDED_MQTT_CLIENT
 C_DEFS += -DSLI_SI91X_INTERNAL_HTTP_CLIENT
 C_DEFS += -DSLI_SI91X_CONFIG_WIFI6_PARAMS=1
 C_DEFS += -DSLI_SI91X_NETWORK_DUAL_STACK_
-# C_DEFS += -DSLI_SI91X_ENABLE_BLE
+C_DEFS += -DSLI_SI91X_ENABLE_BLE
 C_DEFS += -DSL_SI91X_ENABLE_LITTLE_ENDIAN
 # 2K SPI transceiver packets: 4.2.0's pool-block-size knob (drives
 # SLI_WIFI_BUFFER_BLOCK_SIZE and the buffer-manager pool geometry), plus the

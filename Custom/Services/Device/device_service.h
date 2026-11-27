@@ -63,6 +63,7 @@ typedef enum {
     SYSTEM_INDICATOR_RUNNING_AP_OFF,         // Slow blink 1Hz - system running, AP closed
     SYSTEM_INDICATOR_RUNNING_AP_ON,          // LED solid on - system running, AP open
     SYSTEM_INDICATOR_FACTORY_RESET,          // Fast blink 5Hz - factory reset in progress
+    SYSTEM_INDICATOR_BLE_PROVISIONING,       // 2Hz blink - BLE provisioning window open
     SYSTEM_INDICATOR_MAX
 } system_indicator_state_t;
 
@@ -483,10 +484,21 @@ aicam_result_t device_service_led_blink(uint32_t blink_times, uint32_t interval_
  *          - SYSTEM_INDICATOR_RUNNING_AP_OFF: Slow blink 1Hz (500ms interval)
  *          - SYSTEM_INDICATOR_RUNNING_AP_ON: LED solid on
  *          - SYSTEM_INDICATOR_FACTORY_RESET: Fast blink 5Hz (100ms interval)
+ *          - SYSTEM_INDICATOR_BLE_PROVISIONING: 2Hz blink (250ms interval)
  * @param state System indicator state
  * @return aicam_result_t Operation result
  */
 aicam_result_t device_service_set_indicator_state(system_indicator_state_t state);
+
+/**
+ * @brief Let BLE provisioning own the indicator while it is active
+ * @details While held, requests for the other running states are remembered
+ *          instead of applied and come back when the hold is released.
+ *          SLEEP and FACTORY_RESET always pass through.
+ * @param hold AICAM_TRUE to take the indicator, AICAM_FALSE to give it back
+ * @return aicam_result_t Operation result
+ */
+aicam_result_t device_service_indicator_hold(aicam_bool_t hold);
 
 /**
  * @brief Get current system indicator LED state
